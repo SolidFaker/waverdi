@@ -1,11 +1,7 @@
+use crate::dump::ParseOut;
 use crate::waveform::{Change, ScopeTree, SigKind, Signal, Ticks, TimeScale, Value, Waveform};
 use std::collections::HashMap;
 use std::path::Path;
-
-pub struct ParseOut {
-    pub wf: Waveform,
-    pub warnings: Vec<String>,
-}
 
 pub fn parse_vcd(path: &Path) -> Result<ParseOut, String> {
     let data = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;

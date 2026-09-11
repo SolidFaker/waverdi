@@ -1,4 +1,6 @@
 mod app;
+mod dump;
+mod fst;
 mod picker;
 mod theme;
 mod ui;
@@ -66,7 +68,7 @@ fn main() {
     }
 
     if let Some(file) = &cli.file {
-        match vcd::parse_vcd(file) {
+        match dump::parse(file) {
             Ok(out) => {
                 if cli.list_signals {
                     print_tree(&out.wf);
@@ -77,7 +79,7 @@ fn main() {
                 app::set_title(&path);
             }
             Err(e) => {
-                eprintln!("failed to load {}: {e}", file.display());
+                eprintln!("{e}");
                 std::process::exit(1);
             }
         }

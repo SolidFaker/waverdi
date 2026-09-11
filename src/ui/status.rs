@@ -87,7 +87,7 @@ pub fn draw_status(buf: &mut Buffer, l: &Layout, app: &App) {
 pub fn draw_empty(buf: &mut Buffer, l: &Layout) {
     let lines = [
         "waverdi — Verdi-style terminal RTL waveform viewer",
-        "Press 'o' to open a VCD file, or run: waverdi <file.vcd>",
+        "Press 'o' to open a VCD/FST dump, or run: waverdi <file>",
         "F1 / '?' for key bindings",
     ];
     for (i, line) in lines.iter().enumerate() {

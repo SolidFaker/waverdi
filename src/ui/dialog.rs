@@ -9,10 +9,12 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Widget as _};
 use ratatui::Frame;
 
-const KEYS: [&str; 21] = [
+const KEYS: [&str; 23] = [
     "General   q quit   o open (system dialog when available)",
     "          O open built-in TUI browser   g goto time",
-    "          s search   F1 / ? help",
+    "          s search signal   F1 / ? help",
+    "Search    v find value (hex/bin/oct/dec/ascii text)",
+    "          n / N next / previous match (wraps around)",
     "View      z / Z zoom in / out   f fit   c center",
     "          ← → move cursor   Shift+← → x10",
     "          , / . prev / next transition (selected signal)",
@@ -58,6 +60,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
         Dialog::Open => "Open Waveform",
         Dialog::Goto => "Go to Time",
         Dialog::Find => "Search Signal",
+        Dialog::FindValue => "Find Value",
         Dialog::Keys => "Key Bindings",
         Dialog::About => "About",
     };
@@ -113,6 +116,19 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
             Dialog::Find => {
                 cursor = draw_find(buf, area, inner_x, inner_w, app);
             }
+            Dialog::FindValue => {
+                cursor = draw_input(
+                    buf,
+                    area,
+                    inner_x,
+                    inner_w,
+                    app,
+                    (
+                        "Value: ",
+                        "Enter: find next    n / N: next / prev    Esc: cancel",
+                    ),
+                );
+            }
             Dialog::Keys => {
                 for (i, line) in KEYS.iter().enumerate() {
                     text::put(
@@ -127,7 +143,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
             Dialog::About => {
                 let lines = [
                     "waverdi 0.1 — Verdi-style terminal RTL waveform viewer",
-                    "format: VCD (FSDB support planned)",
+                    "formats: VCD, FST (FSDB via the Verdi FFR library)",
                     "ratatui + crossterm on Rust",
                 ];
                 for (i, line) in lines.iter().enumerate() {
@@ -193,9 +209,7 @@ fn draw_browser(buf: &mut Buffer, area: Rect, app: &App) {
             match entry.kind {
                 EntryKind::Parent => Style::new().fg(DIM),
                 EntryKind::Dir => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                EntryKind::File if entry.name.to_lowercase().ends_with(".vcd") => {
-                    Style::new().fg(HIGH)
-                }
+                EntryKind::File if crate::app::is_waveform(&entry.name) => Style::new().fg(HIGH),
                 EntryKind::File => Style::new().fg(Color::Rgb(170, 170, 180)),
             }
         };

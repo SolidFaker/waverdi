@@ -25,12 +25,13 @@ pub fn detect_gui() -> bool {
     cfg!(feature = "gui") && !ssh_session() && has_display()
 }
 
-/// Show the operating system's file picker and return the chosen VCD file.
+/// Show the operating system's file picker and return the chosen dump.
 #[cfg(feature = "gui")]
 pub fn pick_vcd() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_title("Open Waveform")
-        .add_filter("VCD waveform", &["vcd"])
+        .add_filter("Waveform (VCD/FST)", &["vcd", "fst"])
+        .add_filter("FSDB (needs Verdi FFR)", &["fsdb"])
         .add_filter("All files", &["*"])
         .pick_file()
 }

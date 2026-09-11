@@ -59,6 +59,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.find_sel = 0;
             false
         }
+        KeyCode::Char('v') => {
+            app.find_value_dialog();
+            false
+        }
+        KeyCode::Char('n') => {
+            app.search_value(true);
+            false
+        }
+        KeyCode::Char('N') => {
+            app.search_value(false);
+            false
+        }
         KeyCode::Char('r') => {
             app.cycle_radix();
             false
@@ -208,6 +220,7 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Esc => app.dialog = None,
         KeyCode::Enter => match app.dialog {
             Some(Dialog::Goto) => app.apply_goto(),
+            Some(Dialog::FindValue) => app.apply_find_value(),
             Some(Dialog::Find) => {
                 let matches = app.find_matches();
                 if !matches.is_empty() {

@@ -2,30 +2,20 @@
 
 A Verdi-style RTL waveform viewer for the terminal, written in Rust.
 
-waverdi is meant for SSH sessions and headless machines: open a VCD dump and
-browse signals, values and waveform traces without ever leaving the terminal.
+waverdi is meant for SSH sessions and headless machines: open a VCD or FST
+dump and browse signals, values and waveform traces without ever leaving the
+terminal.
 
-```
- waverdi  File   View   Signal   Trace   Help
-  Open   │ Zoom In   │ Zoom Out   │ Fit   │ Center   │ Goto   │ Find   │ Prev Tr   │ Next Tr   │
-┌ nTrace ─────────────────────┐ Signal List              Value     │ 100ns      150ns      200ns │
-│▾ design                     │▾ tb/ (7)                          │   ┴          ┴          ┴   │
-│  ▸ tb                       │  clk                    b0→b1     │▁│▔│▁│▔│▁▁│▔│▁│▔│▁│▔▔│▔│▁ │
-│                             │  rst_n                  b1        │▔▔▔▔▔▔▔▔▔│▔▔▔▔▔▔▔▔▔▔▔▔▔▔ │
-│                             │  ▾ u_cpu/ (3)                     │        │
-│                             │    state                h1→h2     │╳h1───│──╳─╳──╳──╳─h1──╳── │
-│                             │    pc                   h00→h01   │h00───│h01────╳─h02────╳ │
-│                             │    data                 h648d5ce9 │──────│───────╳────────╳ │
-│                             │  ▾ u_ram/ (5)                     │
-│                             │    addr, wdata, we, rdata, dq     │                         │
-└─────────────────────────────┘                                   │────████───────────────
- counter.vcd | timescale 1ns | cursor 150ns | ΔT 70ns | zoom 7ns/char | signals 7 | focus nTrace
-```
+![waverdi screenshot](shot/waveform.png)
 
 ## Features
 
 - **VCD parser** — scopes, vectors, `real`, `string`, `x`/`z`, every value
   base (`b`, `o`, `h`, `d`, `r`, `s`), `$dumpvars`, timescale handling.
+- **FST support** — GTKWave's Fast Signal Trace format is read through the
+  [wellen](https://github.com/ekiwi/wellen) library. FSDB is a proprietary
+  Synopsys format: opening one tells you to install/convert with the Verdi
+  FSDB Reader (FFR), which waverdi cannot bundle.
 - **Verdi-like layout** — `nTrace` hierarchy browser, `Signal List` with
   current values, `nWave` waveform pane with ruler, cursor and range markers.
 - **Waveform rendering** — thin high/low rails, `/` rising and `\` falling
@@ -36,7 +26,7 @@ browse signals, values and waveform traces without ever leaving the terminal.
   waveform pane.
 - **Signal operations** — radix (Hex/Binary/Octal/Decimal/ASCII), digital ⇄
   analog waveform, split a bus into bits, merge consecutive 1-bit signals into
-  a bus.
+  a bus, search for a value (`v` then `n`/`N`), cursor time shown on the ruler.
 - **Full mouse support** — clickable menus/toolbar, draggable pane borders and
   scrollbars, drag to reorder signals, selection-to-zoom, wheel zoom,
   right-click context menus.
@@ -60,15 +50,16 @@ cargo build --release --no-default-features
 ## Usage
 
 ```sh
-waverdi counter.vcd                 # open a dump
-waverdi --list-signals complex.vcd  # print the hierarchy and exit
-waverdi --no-gui counter.vcd        # force the built-in TUI file browser
-waverdi --gui counter.vcd           # force the native file dialog
+waverdi waveform/counter.vcd                 # open a VCD dump
+waverdi waveform/demo.fst                    # open an FST dump
+waverdi --list-signals waveform/complex.vcd  # print the hierarchy and exit
+waverdi --no-gui waveform/counter.vcd        # force the built-in TUI file browser
+waverdi --gui waveform/counter.vcd           # force the native file dialog
 ```
 
-`counter.vcd` (4-bit counter with enable/carry) and `complex.vcd` (a small
-CPU/RAM/sensor design with 16 signals, tristate and analog values) are
-included as demos.
+The `waveform/` folder contains demos: `counter.vcd` (4-bit counter with
+enable/carry), `complex.vcd` (a small CPU/RAM/sensor design with 16 signals,
+tristate and analog values) and `demo.fst` (a nested tb/u_dut design in FST).
 
 ### File dialog
 
@@ -86,6 +77,8 @@ override with `--gui` / `--no-gui`, or open the browser directly with `O`.
 | `o` / `O` | open (system dialog / built-in TUI browser) |
 | `g` | go to time (`1500`, `1.5us`, ...) |
 | `s` | search signals |
+| `v` | find a value in the selected signal (dialog) |
+| `n` / `N` | next / previous value match (wraps) |
 | `z` / `Z` | zoom in / out around the cursor |
 | `f` | fit the whole time range |
 | `c` | center the cursor |
@@ -128,12 +121,16 @@ override with `--gui` / `--no-gui`, or open the browser directly with `O`.
 ## Project layout
 
 ```
+waveform/          demo dumps (counter.vcd, complex.vcd, demo.fst)
+shot/              README screenshot
 src/
 ├── main.rs        CLI, terminal setup, event loop
 ├── app/           state machine: input, keys, mouse, view, navigation, actions
 ├── ui/            ratatui rendering: layout, tree, list, wave, menus, dialogs
 ├── waveform/      data model: signals, values, time, scope tree
 ├── vcd.rs         VCD parser
+├── fst.rs         FST loader (via wellen)
+├── dump.rs        format detection and dispatcher
 ├── picker.rs      native dialog detection / wrapper
 └── theme.rs       color palette
 ```

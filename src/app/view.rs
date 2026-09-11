@@ -56,7 +56,7 @@ impl App {
         self.clamp_view();
     }
 
-    fn reveal_cursor(&mut self) {
+    pub(crate) fn reveal_cursor(&mut self) {
         let span = self.span();
         if (self.cursor as f64) < self.t0 || (self.cursor as f64) > self.t0 + span {
             self.t0 = self.cursor as f64 - span * 0.4;

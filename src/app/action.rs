@@ -11,6 +11,9 @@ pub enum Action {
     Center,
     Goto,
     Find,
+    FindValue,
+    FindNextValue,
+    FindPrevValue,
     AddSel,
     DelSel,
     DelAll,
@@ -41,6 +44,9 @@ impl Action {
                 app.input.clear();
                 app.find_sel = 0;
             }
+            Action::FindValue => app.find_value_dialog(),
+            Action::FindNextValue => app.search_value(true),
+            Action::FindPrevValue => app.search_value(false),
             Action::AddSel => app.tree_enter(),
             Action::DelSel => app.remove_selected(),
             Action::DelAll => app.clear_all(),

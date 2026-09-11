@@ -30,6 +30,9 @@ pub const MENUS: [(&str, &[(&str, Action)]); 5] = [
         "Signal",
         &[
             ("Search Signal...", Action::Find),
+            ("Find Value...", Action::FindValue),
+            ("Find Next Value", Action::FindNextValue),
+            ("Find Previous Value", Action::FindPrevValue),
             ("Change Radix", Action::Radix),
             ("Previous Transition", Action::Prev),
             ("Next Transition", Action::Next),

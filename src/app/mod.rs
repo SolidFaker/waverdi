@@ -6,9 +6,11 @@ mod input;
 mod keys;
 mod mouse;
 mod nav;
+mod value;
 mod view;
 
 pub use action::Action;
+pub(crate) use browser::is_waveform;
 pub use browser::{EntryKind, FileBrowser};
 pub use context::{ContextMenu, CtxItem, CtxTarget};
 pub use dialog::Dialog;
@@ -18,7 +20,6 @@ pub use mouse::handle_mouse;
 pub use nav::ListRow;
 
 use crate::ui::layout::{compute_layout, Layout, Splits};
-use crate::vcd;
 use crate::waveform::{Radix, Ticks, Waveform};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet};
@@ -112,6 +113,8 @@ pub struct App {
     pub analog: HashMap<usize, (f64, f64)>,
     /// Scope paths of Signal List groups that are collapsed.
     pub collapsed: HashSet<String>,
+    /// Last "Find Value" query, searched with `n` / `N`.
+    pub value_query: Option<String>,
     pub ctx_menu: Option<ContextMenu>,
     /// Use the native GUI file dialog instead of the built-in browser.
     pub use_gui: bool,
@@ -147,12 +150,13 @@ impl App {
             splits: Splits::default(),
             analog: HashMap::new(),
             collapsed: HashSet::new(),
+            value_query: None,
             ctx_menu: None,
             use_gui: crate::picker::detect_gui(),
             browser: None,
             pending_fit: false,
         };
-        app.msg("waverdi 0.1 — press 'o' to open a VCD file, F1/? for key bindings");
+        app.msg("waverdi 0.1 — press 'o' to open a waveform dump, F1/? for key bindings");
         app
     }
 
@@ -212,7 +216,7 @@ impl App {
     /// Load a VCD from disk, reporting failures through the message log.
     pub fn load(&mut self, path: &str) -> bool {
         self.msg(format!("Loading {path} ..."));
-        match vcd::parse_vcd(Path::new(path)) {
+        match crate::dump::parse(Path::new(path)) {
             Ok(out) => {
                 self.apply_parsed(path, out);
                 set_title(path);
@@ -252,7 +256,7 @@ impl App {
     }
 
     /// Install a parsed waveform and reset the view state.
-    pub fn apply_parsed(&mut self, path: impl Into<String>, out: vcd::ParseOut) {
+    pub fn apply_parsed(&mut self, path: impl Into<String>, out: crate::dump::ParseOut) {
         let wf = out.wf;
         self.msg(format!("Loaded {}", wf.summary()));
         for warning in out.warnings {
@@ -325,7 +329,7 @@ mod tests {
     use ratatui::layout::Rect;
 
     pub(crate) fn app_with(vcd_text: &str) -> App {
-        let out = vcd::parse_bytes(vcd_text.as_bytes()).unwrap();
+        let out = crate::vcd::parse_bytes(vcd_text.as_bytes()).unwrap();
         let mut app = App::new();
         app.apply_parsed("<test>", out);
         app.sync_layout(Rect::new(0, 0, 100, 40));

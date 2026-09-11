@@ -15,6 +15,12 @@ pub struct Entry {
     pub kind: EntryKind,
 }
 
+/// True for files that look like openable waveform dumps.
+pub(crate) fn is_waveform(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name.ends_with(".vcd") || name.ends_with(".fst") || name.ends_with(".fsdb")
+}
+
 /// Strip the Windows `\\?\` extended-length prefix for friendlier paths.
 pub(crate) fn clean_path(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
@@ -98,10 +104,8 @@ impl FileBrowser {
                 }
                 dirs.sort_by_key(|e| e.name.to_lowercase());
                 files.sort_by(|a, b| {
-                    let a_vcd = a.name.to_lowercase().ends_with(".vcd");
-                    let b_vcd = b.name.to_lowercase().ends_with(".vcd");
-                    b_vcd
-                        .cmp(&a_vcd)
+                    is_waveform(&b.name)
+                        .cmp(&is_waveform(&a.name))
                         .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
                 });
                 self.entries.extend(dirs);

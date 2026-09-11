@@ -9,6 +9,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 clap = { version = "4", features = ["derive"] }
 rfd = { version = "0.17.2", optional = true }
+wellen = "0.25.6"
 
 [features]
 default = ["gui"]
@@ -18,3 +19,6 @@ gui = ["dep:rfd"]
 
 [profile.release]
 lto = true
+
+[dev-dependencies]
+fst-writer = "0.3.1"

@@ -136,6 +136,18 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         }
         t += step;
     }
+
+    // Cursor time at the right edge of the ruler (like Verdi's cursor label).
+    let label = format!(" {} ", waveform::format_time(app.cursor as f64, &ts));
+    let width = label.chars().count() as u16;
+    let x = l.wave.right().saturating_sub(width + 1);
+    text::put(
+        buf,
+        x,
+        l.ruler.y,
+        &label,
+        Style::new().fg(CURSOR).add_modifier(Modifier::BOLD),
+    );
 }
 
 fn draw_signal_row(

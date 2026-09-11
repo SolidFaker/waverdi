@@ -10,6 +10,11 @@ impl InputState {
         self.pos = 0;
     }
 
+    pub fn set(&mut self, text: &str) {
+        self.buf = text.chars().collect();
+        self.pos = self.buf.len();
+    }
+
     pub fn as_string(&self) -> String {
         self.buf.iter().collect()
     }

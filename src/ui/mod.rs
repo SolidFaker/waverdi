@@ -115,6 +115,29 @@ mod tests {
     }
 
     #[test]
+    fn renders_fst_waveform() {
+        let out = crate::fst::parse_fst(std::path::Path::new("waveform/demo.fst")).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("waveform/demo.fst", out);
+        app.display = (0..app.wf.as_ref().unwrap().signals.len()).collect();
+        let screen = render_app(&mut app, 120, 30);
+        assert!(screen.contains("clk"), "{screen}");
+        assert!(screen.contains("data"), "{screen}");
+    }
+
+    #[test]
+    fn fst_find_value() {
+        let out = crate::fst::parse_fst(std::path::Path::new("waveform/demo.fst")).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("waveform/demo.fst", out);
+        app.display = (0..app.wf.as_ref().unwrap().signals.len()).collect();
+        app.sel_row = Some(4); // state (after the tb / u_dut group rows)
+        app.value_query = Some("h2".to_string());
+        app.search_value(true);
+        assert_eq!(app.cursor, 30);
+    }
+
+    #[test]
     fn isolated_bit_edges_render_diagonals() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();
@@ -201,6 +224,7 @@ mod tests {
         for dialog in [
             crate::app::Dialog::Goto,
             crate::app::Dialog::Find,
+            crate::app::Dialog::FindValue,
             crate::app::Dialog::Keys,
             crate::app::Dialog::About,
         ] {

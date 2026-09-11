@@ -3,6 +3,7 @@ pub enum Dialog {
     Open,
     Goto,
     Find,
+    FindValue,
     Keys,
     About,
 }
