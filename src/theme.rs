@@ -1,0 +1,28 @@
+use ratatui::style::Color;
+
+pub const BG: Color = Color::Rgb(12, 12, 16);
+pub const MENUBAR_BG: Color = Color::Rgb(25, 25, 40);
+pub const TOOLBAR_BG: Color = Color::Rgb(20, 20, 28);
+pub const ACCENT: Color = Color::Rgb(255, 200, 60);
+pub const MENU_ACTIVE: Color = Color::Rgb(60, 80, 160);
+pub const PANEL_BORDER: Color = Color::Rgb(70, 70, 90);
+pub const POPUP_BG: Color = Color::Rgb(30, 30, 40);
+pub const OVERLAY: Color = Color::Rgb(15, 15, 20);
+pub const ROW_ALT: Color = Color::Rgb(16, 16, 22);
+pub const ROW_SEL_BG: Color = Color::Rgb(40, 46, 70);
+pub const RANGE_BG: Color = Color::Rgb(26, 40, 60);
+pub const LIST_HEADER_BG: Color = Color::Rgb(24, 24, 34);
+pub const SEP_BG: Color = Color::Rgb(30, 30, 40);
+pub const STATUS_BG: Color = Color::Rgb(22, 22, 30);
+pub const MSG_BG: Color = Color::Rgb(18, 18, 24);
+pub const HIGH: Color = Color::Rgb(80, 220, 130);
+pub const LOW: Color = Color::Rgb(150, 150, 150);
+pub const XCOL: Color = Color::Rgb(255, 90, 90);
+pub const ZCOL: Color = Color::Rgb(110, 170, 255);
+pub const BUS: Color = Color::Rgb(215, 175, 75);
+pub const CURSOR: Color = Color::Rgb(255, 220, 80);
+pub const ANALOG: Color = Color::Rgb(80, 200, 255);
+pub const TICK: Color = Color::Rgb(140, 140, 160);
+pub const DIM: Color = Color::Rgb(90, 90, 100);
+pub const GREEN_DIM: Color = Color::Rgb(120, 180, 140);
+pub const INPUT_BG: Color = Color::Rgb(30, 30, 40);

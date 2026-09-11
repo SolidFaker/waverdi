@@ -1,0 +1,14 @@
+[package]
+name = "waverdi"
+version = "0.1.0"
+edition = "2021"
+description = "Verdi-style terminal RTL waveform viewer (VCD)"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+clap = { version = "4", features = ["derive"] }
+rfd = "0.17.2"
+
+[profile.release]
+lto = true
