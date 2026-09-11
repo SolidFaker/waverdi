@@ -1,4 +1,4 @@
-use super::{App, Drag, DragMode, Focus, TreeNode};
+use super::{App, CtxTarget, Dialog, Drag, DragMode, Focus, ListRow, TreeNode};
 use crate::ui::layout::{pt_in, tree_inner, Layout, Splits};
 use crate::ui::menubar;
 use crate::ui::toolbar;
@@ -12,6 +12,37 @@ const WHEEL_STEP: usize = 3;
 pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
     let (col, row) = (m.column, m.row);
     let shift = m.modifiers.contains(KeyModifiers::SHIFT);
+
+    if app.dialog == Some(Dialog::Open) {
+        match m.kind {
+            MouseEventKind::ScrollUp => browser_wheel(app, -(WHEEL_STEP as i64)),
+            MouseEventKind::ScrollDown => browser_wheel(app, WHEEL_STEP as i64),
+            MouseEventKind::Down(MouseButton::Left) => browser_click(app, col, row),
+            _ => {}
+        }
+        return false;
+    }
+
+    if app.ctx_menu.is_some() {
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                match crate::ui::context::item_at(app, col, row) {
+                    Some(index) => {
+                        let item = app.ctx_items()[index].1;
+                        app.run_ctx_item(item);
+                    }
+                    None => app.ctx_menu = None,
+                }
+                return false;
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                // Close and fall through so the right-click can open a new menu.
+                app.ctx_menu = None;
+            }
+            _ => return false,
+        }
+    }
+
     match m.kind {
         MouseEventKind::Down(btn) => mouse_down(app, col, row, btn),
         MouseEventKind::Drag(_) => {
@@ -34,8 +65,45 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
     }
 }
 
+fn browser_wheel(app: &mut App, delta: i64) {
+    let rows = crate::ui::dialog::browser_rows(app.layout().area);
+    if let Some(browser) = app.browser.as_mut() {
+        browser.move_sel(delta, rows);
+    }
+}
+
+fn browser_click(app: &mut App, col: u16, row: u16) {
+    let l = app.layout();
+    let rect = crate::ui::dialog::open_rect(l.area);
+    let list_top = rect.y + 3;
+    let list_bottom = rect.bottom().saturating_sub(1);
+    if col < rect.x || col >= rect.right() || row < list_top || row >= list_bottom {
+        return;
+    }
+    let rows = (list_bottom - list_top) as usize;
+    let index = app.browser.as_ref().map(|b| b.scroll).unwrap_or(0) + (row - list_top) as usize;
+
+    let is_double = app
+        .last_click
+        .map(|(c, r, at)| c == col && r == row && at.elapsed() < DOUBLE_CLICK)
+        .unwrap_or(false);
+    app.last_click = Some((col, row, Instant::now()));
+
+    if let Some(browser) = app.browser.as_mut() {
+        browser.select(index, rows);
+    }
+    if is_double {
+        if let Some(path) = app.browser.as_mut().and_then(|browser| browser.activate()) {
+            app.load(&path.display().to_string());
+        }
+    }
+}
+
 fn mouse_down(app: &mut App, col: u16, row: u16, btn: MouseButton) -> bool {
-    if app.dialog.is_some() {
+    if let Some(dialog) = app.dialog {
+        if dialog == Dialog::Open {
+            browser_click(app, col, row);
+        }
         return false;
     }
     if let Some(menu) = app.menu.open {
@@ -48,10 +116,10 @@ fn mouse_down(app: &mut App, col: u16, row: u16, btn: MouseButton) -> bool {
         if let Some(i) = menubar::menu_item_at(l.menu, col) {
             app.menu.open = Some(i);
             app.menu.sel = 0;
+            app.ctx_menu = None;
         }
         return false;
     }
-
     if pt_in(l.toolbar, col, row) {
         return match toolbar::tool_at(l.toolbar, col) {
             Some(tool) => toolbar::run_tool(app, tool),
@@ -103,9 +171,35 @@ fn mouse_down(app: &mut App, col: u16, row: u16, btn: MouseButton) -> bool {
     if pt_in(l.list, col, row) {
         if row >= l.list.y + 2 {
             let row_in_list = (row - l.list.y - 2) as usize;
-            if row_in_list < app.rows_h() && app.row_scroll + row_in_list < app.display.len() {
+            let list_row = app
+                .list_rows()
+                .into_iter()
+                .nth(app.row_scroll + row_in_list)
+                .filter(|_| row_in_list < app.rows_h());
+            if let Some(list_row) = list_row {
                 app.sel_row = Some(app.row_scroll + row_in_list);
                 app.focus = Focus::List;
+                match (btn, list_row) {
+                    (MouseButton::Right, ListRow::Signal { sig, .. }) => {
+                        app.open_context_menu(CtxTarget::Signal(sig), col, row)
+                    }
+                    (MouseButton::Right, ListRow::Group { path, .. }) => {
+                        app.open_context_menu(CtxTarget::Group(path), col, row)
+                    }
+                    (MouseButton::Left, ListRow::Signal { sig, .. }) => {
+                        let from = app.display.iter().position(|&s| s == sig).unwrap_or(0);
+                        app.dragging = Some(Drag {
+                            mode: DragMode::Reorder,
+                            start_x: col,
+                            start_pct: 0.0,
+                            row: from,
+                        });
+                    }
+                    (MouseButton::Left, ListRow::Group { path, .. }) if is_double => {
+                        app.toggle_group(&path)
+                    }
+                    _ => {}
+                }
             }
         }
         return false;
@@ -127,8 +221,44 @@ fn mouse_down(app: &mut App, col: u16, row: u16, btn: MouseButton) -> bool {
     if pt_in(l.rows, col, row) {
         app.cursor = app.tick_at_x(col);
         let row_in_wave = (row - l.rows.y) as usize;
-        if row_in_wave < app.rows_h() && app.row_scroll + row_in_wave < app.display.len() {
-            app.sel_row = Some(app.row_scroll + row_in_wave);
+        let list_row = app
+            .list_rows()
+            .into_iter()
+            .nth(app.row_scroll + row_in_wave)
+            .filter(|_| row_in_wave < app.rows_h());
+        if let Some(list_row) = list_row {
+            let index = app.row_scroll + row_in_wave;
+            if btn == MouseButton::Right {
+                app.sel_row = Some(index);
+                app.focus = Focus::Wave;
+                match list_row {
+                    ListRow::Signal { sig, .. } => {
+                        app.open_context_menu(CtxTarget::Signal(sig), col, row)
+                    }
+                    ListRow::Group { path, .. } => {
+                        app.open_context_menu(CtxTarget::Group(path), col, row)
+                    }
+                }
+                return false;
+            }
+            if matches!(list_row, ListRow::Group { .. }) {
+                app.sel_row = Some(index);
+                if is_double {
+                    if let ListRow::Group { path, .. } = list_row {
+                        app.toggle_group(&path);
+                    }
+                }
+                return false;
+            }
+            app.sel_row = Some(index);
+        }
+        if let Some((a, b)) = app.range {
+            if b > a && app.cursor >= a && app.cursor <= b {
+                app.zoom_to_range();
+                app.range = None;
+                app.focus = Focus::Wave;
+                return false;
+            }
         }
         app.range = Some((app.cursor, app.cursor));
         app.dragging = Some(new_drag(DragMode::Range, col, 0.0));
@@ -150,6 +280,7 @@ fn new_drag(mode: DragMode, col: u16, start_pct: f64) -> Drag {
         mode,
         start_x: col,
         start_pct,
+        row: 0,
     }
 }
 
@@ -222,6 +353,38 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
             app.range = Some((anchor.min(t), anchor.max(t)));
             app.cursor = t;
         }
+        DragMode::Reorder => {
+            let rows = app.list_rows();
+            if rows.is_empty() {
+                return;
+            }
+            let hover = (row.saturating_sub(l.list.y + 2) as usize).min(rows.len() - 1);
+            // Drop before the nearest signal row (groups are not drop targets).
+            let target = rows[hover..]
+                .iter()
+                .find_map(|r| match r {
+                    ListRow::Signal { sig, .. } => Some(*sig),
+                    _ => None,
+                })
+                .or_else(|| {
+                    rows[..hover].iter().rev().find_map(|r| match r {
+                        ListRow::Signal { sig, .. } => Some(*sig),
+                        _ => None,
+                    })
+                });
+            let Some(target_sig) = target else { return };
+            let Some(target) = app.display.iter().position(|&s| s == target_sig) else {
+                return;
+            };
+            if target != drag.row {
+                let sig = app.display.remove(drag.row);
+                app.display.insert(target, sig);
+                if let Some(active) = app.dragging.as_mut() {
+                    active.row = target;
+                }
+                app.scroll_to_row_of(sig);
+            }
+        }
         DragMode::VScroll => scroll_rows(app, &l, row),
         DragMode::TreeScroll => scroll_tree(app, &l, row),
         DragMode::HScroll => pan_to_col(app, &l, col),
@@ -241,7 +404,7 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
 }
 
 fn scroll_rows(app: &mut App, l: &Layout, row: u16) {
-    let total = app.display.len();
+    let total = app.rows_len();
     let visible = l.rows_h;
     if visible == 0 || total <= visible {
         return;
@@ -277,13 +440,16 @@ fn pan_to_col(app: &mut App, l: &Layout, col: u16) {
     }
     let span = l.cols as f64 * app.scale;
     let total = (end - start).max(0.0);
-    if span >= total {
+    if span >= total || total <= 0.0 {
         app.t0 = start;
         return;
     }
+    let max_t0 = total - span;
+    let thumb_w = ((span / total) * l.cols as f64).clamp(1.0, l.cols as f64);
+    let denom = (l.cols as f64 - thumb_w).max(1.0);
     let rel = col.saturating_sub(l.rows.x) as f64;
-    let denom = (l.cols.saturating_sub(1)).max(1) as f64;
-    app.t0 = start + (rel.min(denom) / denom) * (total - span);
+    let pos = ((rel - thumb_w / 2.0) / denom).clamp(0.0, 1.0);
+    app.t0 = start + pos * max_t0;
 }
 
 fn mouse_wheel(app: &mut App, col: u16, row: u16, up: bool, shift: bool) {
@@ -302,14 +468,14 @@ fn mouse_wheel(app: &mut App, col: u16, row: u16, up: bool, shift: bool) {
         return;
     }
 
-    if pt_in(l.rows, col, row) || pt_in(l.list, col, row) {
+    if pt_in(l.list, col, row) {
         let h = l.rows_h.max(1);
         app.row_scroll = if up {
             app.row_scroll.saturating_sub(WHEEL_STEP)
         } else {
             app.row_scroll + WHEEL_STEP
         };
-        app.row_scroll = app.row_scroll.min(app.display.len().saturating_sub(h));
+        app.row_scroll = app.row_scroll.min(app.rows_len().saturating_sub(h));
         return;
     }
 
@@ -333,8 +499,9 @@ mod tests {
 
     const VCD: &str = "$timescale 1ns $end\n\
         $var wire 1 ! clk $end\n\
+        $var wire 1 \" rst $end\n\
         $enddefinitions $end\n\
-        #0\n0!\n#10\n1!\n";
+        #0\n0!\n0\"\n#10\n1!\n";
 
     fn click(col: u16, row: u16) -> MouseEvent {
         MouseEvent {
@@ -389,6 +556,84 @@ mod tests {
         assert!(app.splits.tree_pct > Splits::default().tree_pct);
         assert!(app.layout().tree.width > before);
         assert!(app.layout().wave.width > 0);
+    }
+
+    #[test]
+    fn drag_list_row_reorders_signals() {
+        let mut app = app_with(VCD);
+        app.display = vec![0, 1];
+        app.sel_row = Some(0);
+        let l = app.layout();
+        let top = l.list.y + 2;
+        crate::app::handle_mouse(&mut app, click(30, top));
+        crate::app::handle_mouse(&mut app, drag(30, top + 1));
+        app.dragging = None;
+        assert_eq!(app.display, vec![1, 0]);
+        assert_eq!(app.sel_row, Some(1));
+    }
+
+    #[test]
+    fn click_inside_selection_zooms_to_range() {
+        let mut app = app_with(VCD);
+        app.display = vec![0];
+        app.range = Some((2, 8));
+        app.t0 = 0.0;
+        app.scale = 1.0;
+        let l = app.layout();
+        let x = l.rows.x + 5; // tick 5.5, inside [2, 8]
+        crate::app::handle_mouse(&mut app, click(x, l.rows.y));
+        assert!(app.range.is_none());
+        let expected = 6.0 / l.cols as f64;
+        assert!((app.scale - expected).abs() < 1e-9);
+        assert!((app.t0 - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn context_menu_survives_button_release() {
+        let mut app = app_with(VCD);
+        app.display = vec![0, 1];
+        let l = app.layout();
+        let y = l.list.y + 2;
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 30,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        crate::app::handle_mouse(&mut app, down);
+        assert!(app.ctx_menu.is_some());
+        let up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Right),
+            column: 30,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        crate::app::handle_mouse(&mut app, up);
+        assert!(app.ctx_menu.is_some());
+    }
+
+    #[test]
+    fn wheel_over_waveform_zooms() {
+        let mut app = app_with(VCD);
+        app.display = vec![0];
+        let before = app.scale;
+        let l = app.layout();
+        let up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: l.rows.x + 5,
+            row: l.rows.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        crate::app::handle_mouse(&mut app, up);
+        assert!(app.scale < before);
+        let down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: l.rows.x + 5,
+            row: l.rows.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        crate::app::handle_mouse(&mut app, down);
+        assert!((app.scale - before).abs() <= before * 1e-9);
     }
 
     #[test]

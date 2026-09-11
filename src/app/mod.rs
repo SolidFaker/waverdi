@@ -1,4 +1,6 @@
 mod action;
+mod browser;
+mod context;
 mod dialog;
 mod input;
 mod keys;
@@ -7,10 +9,13 @@ mod nav;
 mod view;
 
 pub use action::Action;
+pub use browser::{EntryKind, FileBrowser};
+pub use context::{ContextMenu, CtxItem, CtxTarget};
 pub use dialog::Dialog;
 pub use input::{parse_time_spec, InputState};
 pub use keys::handle_key;
 pub use mouse::handle_mouse;
+pub use nav::ListRow;
 
 use crate::ui::layout::{compute_layout, Layout, Splits};
 use crate::vcd;
@@ -55,6 +60,7 @@ pub struct MenuState {
 pub(crate) enum DragMode {
     Cursor,
     Range,
+    Reorder,
     VScroll,
     HScroll,
     TreeScroll,
@@ -67,6 +73,8 @@ pub(crate) struct Drag {
     pub mode: DragMode,
     pub start_x: u16,
     pub start_pct: f64,
+    /// Row being dragged for `DragMode::Reorder`.
+    pub row: usize,
 }
 
 /// Flattened view of the hierarchy tree, produced on demand for the nTrace pane.
@@ -100,6 +108,14 @@ pub struct App {
     pub radix: HashMap<usize, Radix>,
     pub last_click: Option<(u16, u16, Instant)>,
     pub splits: Splits,
+    /// Per-signal analog rendering range; presence means "show as analog".
+    pub analog: HashMap<usize, (f64, f64)>,
+    /// Scope paths of Signal List groups that are collapsed.
+    pub collapsed: HashSet<String>,
+    pub ctx_menu: Option<ContextMenu>,
+    /// Use the native GUI file dialog instead of the built-in browser.
+    pub use_gui: bool,
+    pub browser: Option<FileBrowser>,
     pending_fit: bool,
 }
 
@@ -129,6 +145,11 @@ impl App {
             radix: HashMap::new(),
             last_click: None,
             splits: Splits::default(),
+            analog: HashMap::new(),
+            collapsed: HashSet::new(),
+            ctx_menu: None,
+            use_gui: crate::picker::detect_gui(),
+            browser: None,
             pending_fit: false,
         };
         app.msg("waverdi 0.1 — press 'o' to open a VCD file, F1/? for key bindings");
@@ -178,6 +199,16 @@ impl App {
         (((t as f64) - self.t0) / self.scale).round() as i64
     }
 
+    /// Tick range covered by the column the cursor is drawn in.
+    ///
+    /// Uses rounding, matching `x_at_tick`, so an edge drawn in the cursor's
+    /// column counts even when the exact tick is a fraction of a column away.
+    pub fn cursor_column_range(&self) -> (f64, f64) {
+        let col = self.x_at_tick(self.cursor) as f64;
+        let center = self.t0 + col * self.scale;
+        (center - 0.5 * self.scale, center + 0.5 * self.scale)
+    }
+
     /// Load a VCD from disk, reporting failures through the message log.
     pub fn load(&mut self, path: &str) -> bool {
         self.msg(format!("Loading {path} ..."));
@@ -197,9 +228,27 @@ impl App {
 
     /// Open the operating system's file dialog and load the selection.
     pub fn open_file_dialog(&mut self) {
-        if let Some(path) = crate::picker::pick_vcd() {
-            self.load(&path.display().to_string());
+        if self.use_gui {
+            if let Some(path) = crate::picker::pick_vcd() {
+                self.load(&path.display().to_string());
+            }
+            return;
         }
+        self.open_tui_browser();
+    }
+
+    /// Open the built-in terminal file browser (used over SSH / headless).
+    pub fn open_tui_browser(&mut self) {
+        let start = if self.path.is_empty() {
+            std::env::current_dir().unwrap_or_default()
+        } else {
+            Path::new(&self.path)
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default()
+        };
+        self.browser = Some(FileBrowser::new(&start));
+        self.dialog = Some(Dialog::Open);
     }
 
     /// Install a parsed waveform and reset the view state.
@@ -219,6 +268,9 @@ impl App {
         self.tree_scroll = 0;
         self.range = None;
         self.radix.clear();
+        self.analog.clear();
+        self.collapsed.clear();
+        self.ctx_menu = None;
         self.find_sel = 0;
         self.cursor = wf.start;
         self.wf = Some(wf);
@@ -292,6 +344,16 @@ mod tests {
         // After sync_layout the pending fit ran, so the full range is visible.
         let wf = app.wf.as_ref().unwrap();
         assert!((app.scale - wf.total_ticks() as f64 / app.cols() as f64).abs() < 1e-9);
+    }
+
+    #[test]
+    fn open_without_gui_uses_tui_browser() {
+        let mut app =
+            app_with("$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n#0\n0!\n");
+        app.use_gui = false;
+        Action::Open.run(&mut app);
+        assert_eq!(app.dialog, Some(Dialog::Open));
+        assert!(app.browser.is_some());
     }
 
     #[test]

@@ -44,17 +44,22 @@ impl Signal {
         }
     }
 
-    /// If the signal has a value change exactly at `t`, return the previous
-    /// and new values.
-    pub fn change_at(&self, t: Ticks) -> Option<(Option<&Value>, &Value)> {
-        let i = self.changes.binary_search_by_key(&t, |c| c.t).ok()?;
+    /// If the signal has a value change inside the time range `[from, to)`,
+    /// return the previous and new values. Used with the column the TUI
+    /// actually draws the cursor in, so hitting "near" an edge counts.
+    pub fn change_in(&self, from: f64, to: f64) -> Option<(Option<&Value>, &Value)> {
+        let i = self.changes.partition_point(|c| (c.t as f64) < from);
+        let change = self.changes.get(i)?;
+        if (change.t as f64) >= to {
+            return None;
+        }
         let previous = i.checked_sub(1).map(|j| &self.changes[j].v);
-        Some((previous, &self.changes[i].v))
+        Some((previous, &change.v))
     }
 
-    /// Render an `old→new` transition when the cursor sits on an edge.
-    pub fn display_change(&self, t: Ticks, radix: Radix) -> Option<String> {
-        let (previous, new) = self.change_at(t)?;
+    /// Render an `old→new` transition when the cursor column sits on an edge.
+    pub fn display_change_in(&self, from: f64, to: f64, radix: Radix) -> Option<String> {
+        let (previous, new) = self.change_in(from, to)?;
         let previous = previous?;
         Some(format!(
             "{}→{}",
@@ -130,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn change_at_reports_transitions() {
+    fn change_in_matches_display_column() {
         let mut s = sig(SigKind::Bits, 4);
         s.changes.push(Change {
             t: 5,
@@ -140,12 +145,19 @@ mod tests {
             t: 9,
             v: Value::Bits(vec![0, 1, 0, 1]),
         });
-        assert_eq!(s.display_change(9, Radix::Hex), Some("h8→ha".to_string()));
+        // A column covering ticks 8..10 sees the change at 9.
         assert_eq!(
-            s.display_change(9, Radix::Bin),
-            Some("b1000→b1010".to_string())
+            s.display_change_in(8.0, 10.0, Radix::Hex),
+            Some("h8→ha".to_string())
         );
-        assert_eq!(s.display_change(5, Radix::Hex), None);
-        assert_eq!(s.display_change(7, Radix::Hex), None);
+        assert_eq!(
+            s.display_change_in(9.0, 11.0, Radix::Hex),
+            Some("h8→ha".to_string())
+        );
+        // Column before/after the edge: no transition.
+        assert_eq!(s.display_change_in(6.0, 8.0, Radix::Hex), None);
+        assert_eq!(s.display_change_in(10.0, 12.0, Radix::Hex), None);
+        // The first change has no previous value.
+        assert_eq!(s.display_change_in(4.0, 6.0, Radix::Hex), None);
     }
 }

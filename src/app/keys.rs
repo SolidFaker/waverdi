@@ -1,4 +1,4 @@
-use super::{App, Dialog, Focus};
+use super::{App, Dialog, Focus, ListRow};
 use crate::ui::menubar;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -11,6 +11,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if app.dialog.is_some() {
         return dialog_key(app, key);
     }
+    if app.ctx_menu.is_some() {
+        return ctx_key(app, key);
+    }
     if app.menu.open.is_some() {
         return menu_key(app, key);
     }
@@ -18,6 +21,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('q') => true,
         KeyCode::Char('o') => {
             app.open_file_dialog();
+            false
+        }
+        KeyCode::Char('O') => {
+            app.open_tui_browser();
             false
         }
         KeyCode::F(1) | KeyCode::Char('?') => {
@@ -77,8 +84,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Enter => {
-            if app.focus == Focus::Tree {
-                app.tree_enter();
+            match app.focus {
+                Focus::Tree => app.tree_enter(),
+                Focus::List => app.list_enter(),
+                Focus::Wave => {}
             }
             false
         }
@@ -109,6 +118,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Left => {
+            if let Some(ListRow::Group {
+                path, collapsed, ..
+            }) = app.selected_row()
+            {
+                if app.focus == Focus::List && !collapsed {
+                    app.set_group_collapsed(&path, true);
+                    return false;
+                }
+            }
             let step = app.span()
                 / if key.modifiers.contains(KeyModifiers::SHIFT) {
                     10.0
@@ -119,6 +137,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Right => {
+            if let Some(ListRow::Group {
+                path, collapsed, ..
+            }) = app.selected_row()
+            {
+                if app.focus == Focus::List && collapsed {
+                    app.set_group_collapsed(&path, false);
+                    return false;
+                }
+            }
             let step = app.span()
                 / if key.modifiers.contains(KeyModifiers::SHIFT) {
                     10.0
@@ -173,6 +200,10 @@ fn page(app: &mut App, down: bool) {
 }
 
 fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
+    if app.dialog == Some(Dialog::Open) {
+        browser_key(app, key);
+        return false;
+    }
     match key.code {
         KeyCode::Esc => app.dialog = None,
         KeyCode::Enter => match app.dialog {
@@ -200,6 +231,90 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Down if app.dialog == Some(Dialog::Find) => {
             let n = app.find_matches().len();
             app.find_sel = (app.find_sel + 1).min(n.saturating_sub(1));
+        }
+        _ => {}
+    }
+    false
+}
+
+enum BrowserCmd {
+    Stay,
+    Close,
+    Load(String),
+}
+
+fn browser_key(app: &mut App, key: KeyEvent) {
+    let rows = crate::ui::dialog::browser_rows(app.layout().area);
+    let cmd = {
+        let Some(browser) = app.browser.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => BrowserCmd::Close,
+            KeyCode::Up => {
+                browser.move_sel(-1, rows);
+                BrowserCmd::Stay
+            }
+            KeyCode::Down => {
+                browser.move_sel(1, rows);
+                BrowserCmd::Stay
+            }
+            KeyCode::PageUp => {
+                browser.move_sel(-(rows as i64), rows);
+                BrowserCmd::Stay
+            }
+            KeyCode::PageDown => {
+                browser.move_sel(rows as i64, rows);
+                BrowserCmd::Stay
+            }
+            KeyCode::Home => {
+                browser.select(0, rows);
+                BrowserCmd::Stay
+            }
+            KeyCode::End => {
+                browser.select(browser.entries.len().saturating_sub(1), rows);
+                BrowserCmd::Stay
+            }
+            KeyCode::Backspace | KeyCode::Left => {
+                browser.go_parent();
+                BrowserCmd::Stay
+            }
+            KeyCode::Enter => match browser.activate() {
+                Some(path) => BrowserCmd::Load(path.display().to_string()),
+                None => BrowserCmd::Stay,
+            },
+            _ => BrowserCmd::Stay,
+        }
+    };
+    match cmd {
+        BrowserCmd::Stay => {}
+        BrowserCmd::Close => app.dialog = None,
+        BrowserCmd::Load(path) => {
+            app.load(&path);
+        }
+    }
+}
+
+fn ctx_key(app: &mut App, key: KeyEvent) -> bool {
+    let Some(sel) = app.ctx_menu.as_ref().map(|menu| menu.sel) else {
+        return false;
+    };
+    let count = app.ctx_items().len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Left => app.ctx_menu = None,
+        KeyCode::Up => {
+            if let Some(menu) = app.ctx_menu.as_mut() {
+                menu.sel = sel.checked_sub(1).unwrap_or(count - 1);
+            }
+        }
+        KeyCode::Down => {
+            if let Some(menu) = app.ctx_menu.as_mut() {
+                menu.sel = (sel + 1) % count;
+            }
+        }
+        KeyCode::Enter => {
+            let item = app.ctx_items()[sel].1;
+            app.run_ctx_item(item);
         }
         _ => {}
     }

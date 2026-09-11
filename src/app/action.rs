@@ -3,6 +3,7 @@ use super::{App, Dialog};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Open,
+    OpenTui,
     Quit,
     ZoomIn,
     ZoomOut,
@@ -26,6 +27,7 @@ impl Action {
         match self {
             Action::Quit => return true,
             Action::Open => app.open_file_dialog(),
+            Action::OpenTui => app.open_tui_browser(),
             Action::ZoomIn => app.zoom_in(),
             Action::ZoomOut => app.zoom_out(),
             Action::Fit => app.fit(),

@@ -10,7 +10,11 @@ use ratatui::widgets::{Block, Widget as _};
 pub const MENUS: [(&str, &[(&str, Action)]); 5] = [
     (
         "File",
-        &[("Open Waveform...", Action::Open), ("Quit", Action::Quit)],
+        &[
+            ("Open Waveform...", Action::Open),
+            ("Open in TUI Browser...", Action::OpenTui),
+            ("Quit", Action::Quit),
+        ],
     ),
     (
         "View",

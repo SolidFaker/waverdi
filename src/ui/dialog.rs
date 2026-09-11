@@ -1,15 +1,17 @@
-use crate::app::{App, Dialog};
+use crate::app::{App, Dialog, EntryKind};
 use crate::theme::*;
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Widget as _};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Clear, Widget as _};
 use ratatui::Frame;
 
-const KEYS: [&str; 16] = [
-    "General   q quit   o open (system dialog)   g goto time",
+const KEYS: [&str; 21] = [
+    "General   q quit   o open (system dialog when available)",
+    "          O open built-in TUI browser   g goto time",
     "          s search   F1 / ? help",
     "View      z / Z zoom in / out   f fit   c center",
     "          ← → move cursor   Shift+← → x10",
@@ -17,45 +19,87 @@ const KEYS: [&str; 16] = [
     "          Home / End to start / end   Tab cycle focus",
     "Signals   a / Enter add (nTrace)   d remove   x remove all",
     "          r cycle radix (Bin/Oct/Dec/Hex/Ascii)",
+    "          right-click: radix / waveform / bus operations",
+    "Groups    Enter / ← → collapse / expand a group",
+    "          right-click a group: expand / collapse / remove",
     "          ↑ ↓ / PgUp PgDn navigate lists",
     "Mouse     menus / toolbar: click to execute",
     "          drag pane borders: resize panes",
     "          drag scrollbars: scroll / pan time",
+    "          drag list rows: reorder signals",
     "          click ruler: cursor   drag waveform: range",
-    "          wheel: zoom   shift+wheel: pan   middle: zoom out",
-    "          wheel over nTrace / Signal List: scroll",
-    "          double click: expand scope / add signal",
+    "          click inside a selection: zoom to it",
+    "          wheel over waveform: zoom   over lists: scroll",
+    "          double click: expand scope / group / add signal",
 ];
 
-pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
-    let (title, wanted_height) = match dialog {
-        Dialog::Goto => ("Go to Time", 7),
-        Dialog::Find => ("Search Signal", 13),
-        Dialog::Keys => ("Key Bindings", KEYS.len() as u16 + 4),
-        Dialog::About => ("About", 7),
-    };
-    let width = 64u16.min(l.area.width.saturating_sub(8)).max(28);
-    let height = wanted_height.min(l.area.height.saturating_sub(4));
-    let area = Rect {
-        x: l.area.x + l.area.width.saturating_sub(width) / 2,
-        y: l.area.y + l.area.height.saturating_sub(height) / 2,
+const OPEN_W: u16 = 76;
+const OPEN_H: u16 = 20;
+
+/// Geometry of the built-in TUI file browser dialog.
+pub fn open_rect(screen: Rect) -> Rect {
+    let width = OPEN_W.min(screen.width.saturating_sub(4)).max(30);
+    let height = OPEN_H.min(screen.height.saturating_sub(4)).max(7);
+    Rect {
+        x: screen.x + screen.width.saturating_sub(width) / 2,
+        y: screen.y + screen.height.saturating_sub(height) / 2,
         width,
         height,
+    }
+}
+
+/// Number of file rows shown by the built-in browser.
+pub fn browser_rows(screen: Rect) -> usize {
+    open_rect(screen).height.saturating_sub(4) as usize
+}
+
+pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
+    let title = match dialog {
+        Dialog::Open => "Open Waveform",
+        Dialog::Goto => "Go to Time",
+        Dialog::Find => "Search Signal",
+        Dialog::Keys => "Key Bindings",
+        Dialog::About => "About",
+    };
+    let area = if dialog == Dialog::Open {
+        open_rect(l.area)
+    } else {
+        let wanted_height = match dialog {
+            Dialog::Find => 13,
+            Dialog::Keys => KEYS.len() as u16 + 4,
+            _ => 7,
+        };
+        let width = 64u16.min(l.area.width.saturating_sub(8)).max(28);
+        let height = wanted_height.min(l.area.height.saturating_sub(4));
+        Rect {
+            x: l.area.x + l.area.width.saturating_sub(width) / 2,
+            y: l.area.y + l.area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        }
     };
 
     let mut cursor = None;
     {
         let buf = frame.buffer_mut();
         buf.set_style(l.area, Style::new().bg(OVERLAY));
-        Block::bordered()
+        Clear.render(area, buf);
+        let mut block = Block::bordered()
             .title(format!(" {title} "))
             .title_style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
-            .border_style(Style::new().fg(ACCENT))
-            .render(area, buf);
+            .border_style(Style::new().fg(ACCENT));
+        if dialog == Dialog::Open {
+            block = block.title_bottom(
+                Line::from(" ↑↓ move   Enter open   Backspace parent   Esc cancel ")
+                    .style(Style::new().fg(DIM)),
+            );
+        }
+        block.render(area, buf);
 
         let inner_x = area.x + 2;
         let inner_w = area.width.saturating_sub(4) as usize;
         match dialog {
+            Dialog::Open => draw_browser(buf, area, app),
             Dialog::Goto => {
                 cursor = draw_input(
                     buf,
@@ -100,6 +144,81 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
     }
     if let Some(position) = cursor {
         frame.set_cursor_position(position);
+    }
+}
+
+fn draw_browser(buf: &mut Buffer, area: Rect, app: &App) {
+    let Some(browser) = &app.browser else {
+        text::put(
+            buf,
+            area.x + 2,
+            area.y + 2,
+            "no browser state",
+            Style::new().fg(XCOL),
+        );
+        return;
+    };
+
+    text::put(
+        buf,
+        area.x + 2,
+        area.y + 1,
+        &browser.dir.display().to_string(),
+        Style::new().fg(Color::Cyan),
+    );
+    let sep_w = area.width.saturating_sub(2) as usize;
+    buf.set_string(
+        area.x + 1,
+        area.y + 2,
+        "─".repeat(sep_w),
+        Style::new().fg(PANEL_BORDER),
+    );
+
+    if let Some(error) = &browser.error {
+        text::put(buf, area.x + 2, area.y + 3, error, Style::new().fg(XCOL));
+        return;
+    }
+
+    let rows = area.height.saturating_sub(4) as usize;
+    for row in 0..rows {
+        let k = browser.scroll + row;
+        if k >= browser.entries.len() {
+            break;
+        }
+        let entry = &browser.entries[k];
+        let selected = k == browser.sel;
+        let style = if selected {
+            Style::new().fg(Color::Black).bg(ACCENT)
+        } else {
+            match entry.kind {
+                EntryKind::Parent => Style::new().fg(DIM),
+                EntryKind::Dir => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                EntryKind::File if entry.name.to_lowercase().ends_with(".vcd") => {
+                    Style::new().fg(HIGH)
+                }
+                EntryKind::File => Style::new().fg(Color::Rgb(170, 170, 180)),
+            }
+        };
+        let label = match entry.kind {
+            EntryKind::Dir | EntryKind::Parent => format!(" {}/", entry.name),
+            EntryKind::File => format!("  {}", entry.name),
+        };
+        text::put(buf, area.x + 2, area.y + 3 + row as u16, &label, style);
+    }
+
+    let total = browser.entries.len();
+    if total > rows && rows > 0 {
+        let x = area.right().saturating_sub(2);
+        let thumb = ((rows as f64 / total as f64) * rows as f64).max(1.0) as usize;
+        let top = ((browser.scroll as f64 / total as f64) * rows as f64) as usize;
+        for row in 0..rows {
+            let symbol = if row >= top && row < top + thumb {
+                "█"
+            } else {
+                "│"
+            };
+            text::set_cell(buf, x, area.y + 3 + row as u16, symbol, DIM, BG);
+        }
     }
 }
 

@@ -23,6 +23,14 @@ struct Cli {
     file: Option<PathBuf>,
     #[arg(short, long, help = "list signals and exit")]
     list_signals: bool,
+    #[arg(long, help = "force the native GUI file dialog")]
+    gui: bool,
+    #[arg(
+        long,
+        conflicts_with = "gui",
+        help = "disable GUI dialogs and use the built-in TUI browser"
+    )]
+    no_gui: bool,
 }
 
 /// `waverdi --list-signals file.vcd`: hierarchical text dump of the design.
@@ -51,6 +59,11 @@ fn print_tree(wf: &Waveform) {
 fn main() {
     let cli = Cli::parse();
     let mut app = App::new();
+    if cli.gui {
+        app.use_gui = cfg!(feature = "gui");
+    } else if cli.no_gui {
+        app.use_gui = false;
+    }
 
     if let Some(file) = &cli.file {
         match vcd::parse_vcd(file) {

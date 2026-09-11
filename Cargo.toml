@@ -8,7 +8,13 @@ description = "Verdi-style terminal RTL waveform viewer (VCD)"
 ratatui = "0.29"
 crossterm = "0.28"
 clap = { version = "4", features = ["derive"] }
-rfd = "0.17.2"
+rfd = { version = "0.17.2", optional = true }
+
+[features]
+default = ["gui"]
+# Native file dialogs. Disable with --no-default-features on headless/SSH-only
+# builds: the viewer then always uses its built-in terminal file browser.
+gui = ["dep:rfd"]
 
 [profile.release]
 lto = true

@@ -1,17 +1,14 @@
-use super::App;
+use super::{App, ListRow};
 use crate::waveform::Ticks;
 
 impl App {
     pub(crate) fn clamp_view(&mut self) {
         let Some(wf) = &self.wf else { return };
-        let cols = self.cols().max(1) as f64;
-        let span = cols * self.scale;
+        let span = self.cols().max(1) as f64 * self.scale;
         let start = wf.start as f64;
         let end = wf.end as f64;
-        let total = (end - start).max(1.0);
-        let lo = start - span;
-        let hi = if span >= total { start } else { end - span };
-        self.t0 = self.t0.clamp(lo, hi);
+        let max_t0 = (end - span).max(start);
+        self.t0 = self.t0.clamp(start, max_t0);
     }
 
     pub fn zoom_at(&mut self, t: f64, factor: f64) {
@@ -47,6 +44,18 @@ impl App {
         self.clamp_view();
     }
 
+    /// Zoom the time axis to the current mouse selection.
+    pub fn zoom_to_range(&mut self) {
+        let Some((a, b)) = self.range else { return };
+        if b <= a {
+            return;
+        }
+        let cols = self.cols().max(1) as f64;
+        self.scale = ((b - a) as f64 / cols).max(1e-9);
+        self.t0 = a as f64;
+        self.clamp_view();
+    }
+
     fn reveal_cursor(&mut self) {
         let span = self.span();
         if (self.cursor as f64) < self.t0 || (self.cursor as f64) > self.t0 + span {
@@ -72,9 +81,9 @@ impl App {
         if self.display.is_empty() {
             return;
         }
-        let candidates: Vec<usize> = match self.sel_row {
-            Some(row) => self.display.get(row).copied().into_iter().collect(),
-            None => self.display.clone(),
+        let candidates: Vec<usize> = match self.selected_row() {
+            Some(ListRow::Signal { sig, .. }) => vec![sig],
+            _ => self.display.clone(),
         };
         let target = candidates
             .iter()

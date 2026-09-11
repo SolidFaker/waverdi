@@ -1,4 +1,4 @@
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, ListRow};
 use crate::theme::*;
 use crate::ui::layout::Layout;
 use crate::ui::text;
@@ -36,18 +36,16 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         Style::new().fg(PANEL_BORDER),
     );
 
-    for row in 0..l.rows_h {
-        let k = app.row_scroll + row;
-        if k >= app.display.len() {
-            break;
-        }
-        let idx = app.display[k];
-        let sig = &wf.signals[idx];
-        let y = l.list.y + 2 + row as u16;
+    let rows = app.list_rows();
+    let scroll = app.row_scroll.min(rows.len().saturating_sub(l.rows_h));
+    for visible in 0..l.rows_h {
+        let k = scroll + visible;
+        let Some(list_row) = rows.get(k) else { break };
+        let y = l.list.y + 2 + visible as u16;
         let selected = Some(k) == app.sel_row;
         let bg = if selected {
             ROW_SEL_BG
-        } else if row % 2 == 0 {
+        } else if visible % 2 == 0 {
             ROW_ALT
         } else {
             BG
@@ -62,37 +60,68 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
             Style::new().bg(bg),
         );
 
-        let name_style = if selected && app.focus == Focus::List {
-            Style::new().fg(Color::White).bg(bg)
-        } else {
-            Style::new().fg(Color::Rgb(190, 190, 200)).bg(bg)
-        };
-        let name_w = (l.list.width as usize).saturating_sub(value_w + 1);
-        let name = text::trunc(&sig.full_name(), name_w);
-        buf.set_string(l.list.x, y, &name, name_style);
+        match list_row {
+            ListRow::Group {
+                name,
+                depth,
+                count,
+                collapsed,
+                ..
+            } => {
+                let arrow = if *collapsed { "▸" } else { "▾" };
+                let label = format!("{}{arrow} {name}/ ({count})", "  ".repeat(*depth));
+                let style = if selected {
+                    Style::new().fg(Color::Black).bg(ACCENT)
+                } else {
+                    Style::new().fg(ACCENT).bg(bg).add_modifier(Modifier::BOLD)
+                };
+                buf.set_string(
+                    l.list.x,
+                    y,
+                    text::trunc(&label, l.list.width as usize),
+                    style,
+                );
+            }
+            ListRow::Signal { sig, depth } => {
+                let signal = &wf.signals[*sig];
+                let name_style = if selected && app.focus == Focus::List {
+                    Style::new().fg(Color::White).bg(bg)
+                } else {
+                    Style::new().fg(Color::Rgb(190, 190, 200)).bg(bg)
+                };
+                let indent = "  ".repeat(*depth);
+                let name = text::trunc(&format!("{indent}{}", signal.name), name_width(l, value_w));
+                buf.set_string(l.list.x, y, &name, name_style);
 
-        let radix = app.radix_for(idx);
-        let transition = sig.display_change(app.cursor, radix);
-        let on_edge = transition.is_some();
-        let value = match transition {
-            Some(text) if text.chars().count() <= value_w => text,
-            _ => sig.display_value(app.cursor, radix),
-        };
-        let value_style = if on_edge {
-            Style::new().fg(CURSOR).bg(bg).add_modifier(Modifier::BOLD)
-        } else if value.contains('x') || value.contains('z') {
-            Style::new().fg(XCOL).bg(bg)
-        } else {
-            Style::new().fg(Color::Rgb(220, 220, 230)).bg(bg)
-        };
-        text::put(
-            buf,
-            l.list.right().saturating_sub(value_w as u16),
-            y,
-            &value,
-            value_style,
-        );
+                let radix = app.radix_for(*sig);
+                let (from, to) = app.cursor_column_range();
+                let transition = signal.display_change_in(from, to, radix);
+                let on_edge = transition.is_some();
+                let value = match transition {
+                    Some(text_value) if text_value.chars().count() <= value_w => text_value,
+                    _ => signal.display_value(app.cursor, radix),
+                };
+                let value_style = if on_edge {
+                    Style::new().fg(CURSOR).bg(bg).add_modifier(Modifier::BOLD)
+                } else if value.contains('x') || value.contains('z') {
+                    Style::new().fg(XCOL).bg(bg)
+                } else {
+                    Style::new().fg(Color::Rgb(220, 220, 230)).bg(bg)
+                };
+                text::put(
+                    buf,
+                    l.list.right().saturating_sub(value_w as u16),
+                    y,
+                    &value,
+                    value_style,
+                );
+            }
+        }
     }
+}
+
+fn name_width(l: &Layout, value_w: usize) -> usize {
+    (l.list.width as usize).saturating_sub(value_w + 1)
 }
 
 fn value_col_width(l: &Layout) -> usize {

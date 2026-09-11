@@ -1,3 +1,4 @@
+pub mod context;
 pub mod dialog;
 pub mod layout;
 pub mod list;
@@ -39,6 +40,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         if let Some(idx) = app.menu.open {
             menubar::draw_dropdown(buf, &l, app, idx);
         }
+        context::draw(buf, &l, app);
     }
 
     if let Some(dialog) = app.dialog {
@@ -138,6 +140,60 @@ mod tests {
     }
 
     #[test]
+    fn edge_detection_matches_display_column() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.display = vec![0];
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 120, 30));
+        app.t0 = 0.0;
+        app.scale = 10.0;
+        app.cursor = 11; // column 1 covers ticks 5..15
+        let screen = render_app(&mut app, 120, 30);
+        assert!(screen.contains('→'), "{screen}");
+        app.cursor = 26; // column 3 covers ticks 25..35, no edge
+        let screen = render_app(&mut app, 120, 30);
+        assert!(!screen.contains('→'), "{screen}");
+    }
+
+    #[test]
+    fn context_menu_renders() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.display = vec![0];
+        app.open_context_menu(crate::app::CtxTarget::Signal(0), 5, 5);
+        let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("Set Radix: Hex"), "{screen}");
+        assert!(screen.contains("Bus: Split Bus"), "{screen}");
+        assert!(screen.contains("Set Waveform: Analog"), "{screen}");
+    }
+
+    #[test]
+    fn list_renders_hierarchy_groups() {
+        let scoped = "$timescale 1ns $end\n\
+            $scope module top $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let out = vcd::parse_bytes(scoped.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.display = vec![0];
+        let screen = render_app(&mut app, 120, 30);
+        assert!(screen.contains("top/"), "{screen}");
+        assert!(screen.contains("clk"), "{screen}");
+        // Collapse via group context menu: the group stays, its signal does not.
+        app.open_context_menu(crate::app::CtxTarget::Group("top".to_string()), 5, 5);
+        let items = app.ctx_items().len();
+        assert_eq!(items, 5); // expand / collapse / expand all / collapse all / remove
+        let _ = items;
+        app.run_ctx_item(crate::app::CtxItem::CollapseGroup);
+        let screen = render_app(&mut app, 120, 30);
+        assert!(screen.contains("top/"), "{screen}");
+    }
+
+    #[test]
     fn dialogs_render() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();
@@ -151,6 +207,17 @@ mod tests {
             app.dialog = Some(dialog);
             let _ = render_app(&mut app, 100, 30);
         }
+    }
+
+    #[test]
+    fn tui_browser_dialog_renders() {
+        let mut app = App::new();
+        app.use_gui = false;
+        app.open_tui_browser();
+        let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("Open Waveform"), "{screen}");
+        assert!(screen.contains("Enter open"), "{screen}");
+        assert!(screen.contains("Cargo.toml"), "{screen}");
     }
 
     #[test]
