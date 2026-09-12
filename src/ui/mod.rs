@@ -434,6 +434,16 @@ mod tests {
             buffer.cell((l.list.x + 1, l.list.y)).unwrap().bg,
             crate::theme::Theme::LIGHT.list_header_bg
         );
+        // Other panes keep light backgrounds: the Signal List uses the light
+        // alternate row colour while the waveform rows stay dark.
+        assert_eq!(
+            buffer.cell((l.list.x + 2, l.list.y + 2)).unwrap().bg,
+            crate::theme::Theme::LIGHT.row_alt
+        );
+        assert_eq!(
+            buffer.cell((l.rows.x + 2, l.rows.y)).unwrap().bg,
+            crate::theme::Theme::DARK.bg
+        );
     }
 
     #[test]

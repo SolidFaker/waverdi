@@ -159,6 +159,7 @@ impl Theme {
 
     /// Mixed: light chrome (menus, lists, dialogs), dark waveform panes.
     pub const MIXED: Theme = Theme {
+        // Waveform pane only: its own dark background and colours.
         wave_bg: Theme::DARK.bg,
         wave_alt: Theme::DARK.row_alt,
         wave_text: Theme::DARK.text,
@@ -174,8 +175,8 @@ impl Theme {
         cursor: Theme::DARK.cursor,
         analog: Theme::DARK.analog,
         tick: Theme::DARK.tick,
-        row_alt: Theme::DARK.row_alt,
         range_bg: Theme::DARK.range_bg,
+        // Everything else (list, dialogs, menus, ...) stays light.
         ..Theme::LIGHT
     };
 }
