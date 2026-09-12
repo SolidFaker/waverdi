@@ -41,3 +41,19 @@ pub fn pick_vcd() -> Option<PathBuf> {
 pub fn pick_vcd() -> Option<PathBuf> {
     None
 }
+
+/// Show the operating system's file picker and return the chosen filelist.
+#[cfg(feature = "gui")]
+pub fn pick_filelist() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Load Filelist")
+        .add_filter("Filelist", &["f", "list", "txt"])
+        .add_filter("All files", &["*"])
+        .pick_file()
+}
+
+/// Built without the `gui` feature: there is no native dialog to show.
+#[cfg(not(feature = "gui"))]
+pub fn pick_filelist() -> Option<PathBuf> {
+    None
+}

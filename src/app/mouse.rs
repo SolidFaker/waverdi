@@ -125,6 +125,15 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
             {
                 app.finish_source_selection();
             }
+            // A drop may leave the newest group populated: only now add the
+            // trailing empty group (never while dragging through groups).
+            if app
+                .dragging
+                .map(|drag| matches!(drag.mode, DragMode::Reorder | DragMode::GroupReorder))
+                .unwrap_or(false)
+            {
+                app.ensure_trailing_group();
+            }
             app.dragging = None;
             false
         }
@@ -237,7 +246,7 @@ fn browser_click(app: &mut App, col: u16, row: u16) {
     }
     if is_double {
         if let Some(path) = app.browser.as_mut().and_then(|browser| browser.activate()) {
-            app.load(&path.display().to_string());
+            app.browser_load(&path.display().to_string());
         }
     }
 }
@@ -303,13 +312,43 @@ fn mouse_down(
 
     let inner = tree_inner(&l);
     if pt_in(inner, col, row) {
-        if col == inner.right().saturating_sub(1) {
+        let scrollbar = app.layout().tree_height();
+        if col == inner.right().saturating_sub(1)
+            && row > inner.y
+            && app.tree_visible().len() > scrollbar
+        {
             app.dragging = Some(new_drag(DragMode::TreeScroll, col, 0.0));
+            return false;
+        }
+        let (_, sep_x, module_x) = crate::ui::tree::columns(inner, app.splits.hier_pct);
+        // Bottom row: one horizontal scrollbar per column.
+        if row == inner.bottom().saturating_sub(1) {
+            if col < sep_x {
+                scroll_tree_h(app, &l, col, false);
+                app.dragging = Some(new_drag(DragMode::TreeHScroll, col, 0.0));
+                app.focus = Focus::Tree;
+            } else if col >= module_x && col < inner.right().saturating_sub(1) {
+                scroll_tree_h(app, &l, col, true);
+                app.dragging = Some(new_drag(DragMode::ModuleHScroll, col, 0.0));
+                app.focus = Focus::Tree;
+            }
+            return false;
+        }
+        // The Hierarchy | Module divider resizes the columns.
+        if col == sep_x {
+            app.dragging = Some(Drag {
+                mode: DragMode::SplitHier,
+                start_x: col,
+                start_pct: app.splits.hier_pct as f64,
+                row: 0,
+            });
             return false;
         }
         if row == inner.y {
             return false; // column header
         }
+        // Keep the drawing and the click mapping in sync.
+        app.clamp_tree_scroll();
         let k = app.tree_scroll + (row - inner.y - 1) as usize;
         let nodes = app.tree_visible();
         if let Some(node) = nodes.get(k).copied() {
@@ -334,6 +373,13 @@ fn mouse_down(
                 return false;
             }
         }
+        // Bottom row: horizontal scrollbar of the code text.
+        if row == rect.bottom().saturating_sub(1) {
+            scroll_source_h(app, &l, col);
+            app.dragging = Some(new_drag(DragMode::SourceHScroll, col, 0.0));
+            app.focus = Focus::Source;
+            return false;
+        }
         let line = app
             .source_view
             .as_ref()
@@ -345,7 +391,7 @@ fn mouse_down(
                 .map(source::gutter_width)
                 .unwrap_or(0);
             let text_x = rect.x.saturating_add(gutter);
-            let char_col = col.saturating_sub(text_x) as usize;
+            let char_col = col.saturating_sub(text_x) as usize + app.source_h_scroll;
             app.focus = Focus::Source;
             match btn {
                 MouseButton::Right => {
@@ -360,7 +406,7 @@ fn mouse_down(
                         mode: DragMode::SourceSel,
                         start_x: col,
                         start_pct: 0.0,
-                        row: 0,
+                        row: row as usize,
                     });
                 }
                 MouseButton::Left if is_double => {
@@ -374,7 +420,7 @@ fn mouse_down(
                         mode: DragMode::SourceSel,
                         start_x: col,
                         start_pct: 0.0,
-                        row: 0,
+                        row: row as usize,
                     });
                 }
                 _ => {}
@@ -384,7 +430,28 @@ fn mouse_down(
     }
 
     if pt_in(l.list, col, row) {
+        // Bottom row: one horizontal scrollbar for the names and one for the
+        // Value column.
+        let value_w = l.value_col_width(app.splits.value_pct);
+        if row == l.list.bottom().saturating_sub(1) {
+            let grip = l.value_grip_x(app.splits.value_pct);
+            if col > grip {
+                scroll_list_value_h(app, &l, col);
+                app.dragging = Some(new_drag(DragMode::ValueHScroll, col, 0.0));
+                app.focus = Focus::List;
+                return false;
+            }
+            if app.list_content_width() > crate::ui::list::name_width(&l, value_w) {
+                scroll_list_h(app, &l, col);
+                app.dragging = Some(new_drag(DragMode::ListHScroll, col, 0.0));
+                app.focus = Focus::List;
+                return false;
+            }
+        }
         if row >= l.list.y + 2 {
+            // Rows may have been collapsed since the last scroll: re-clamp so
+            // clicks map to the row that is actually drawn there.
+            app.clamp_row_scroll();
             let row_in_list = (row - l.list.y - 2) as usize;
             let list_row = app
                 .list_rows()
@@ -406,7 +473,18 @@ fn mouse_down(
                 } else if ctrl {
                     app.select_range_to(index);
                 } else {
-                    app.select_row(index);
+                    // Keep a multi-selection when clicking one of its rows so
+                    // the whole block can be dragged.
+                    let picked = matches!(
+                        &list_row,
+                        ListRow::Signal { sig, .. }
+                            if app.selection.len() > 1 && app.selection.contains(sig)
+                    );
+                    if picked {
+                        app.sel_row = Some(index);
+                    } else {
+                        app.select_row(index);
+                    }
                 }
                 match (btn, list_row) {
                     (MouseButton::Right, ListRow::Signal { sig, .. }) => {
@@ -427,6 +505,16 @@ fn mouse_down(
                             start_x: col,
                             start_pct: 0.0,
                             row: from,
+                        });
+                    }
+                    (MouseButton::Left, ListRow::Group { index, .. })
+                        if !shift && !ctrl && !is_double =>
+                    {
+                        app.dragging = Some(Drag {
+                            mode: DragMode::GroupReorder,
+                            start_x: col,
+                            start_pct: 0.0,
+                            row: index,
                         });
                     }
                     (MouseButton::Left, ListRow::Group { index, .. }) if is_double => {
@@ -453,6 +541,7 @@ fn mouse_down(
     }
 
     if pt_in(l.rows, col, row) {
+        app.clamp_row_scroll();
         let row_in_wave = (row - l.rows.y) as usize;
         let list_row = app
             .list_rows()
@@ -502,7 +591,8 @@ fn mouse_down(
             }
             if is_double {
                 if let ListRow::Signal { sig, .. } = list_row {
-                    app.toggle_signal_expand(sig);
+                    // Double-click on the waveform jumps to its driver logic.
+                    app.jump_to_driver(sig);
                     return false;
                 }
             }
@@ -614,41 +704,147 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
         }
         DragMode::Reorder => {
             let rows = app.list_rows();
-            if rows.is_empty() {
+            if rows.is_empty() || drag.row >= app.display.len() {
                 return;
             }
             // The pointer row maps to a row of the full list, not the viewport.
             let hover =
                 (app.row_scroll + row.saturating_sub(l.list.y + 2) as usize).min(rows.len() - 1);
-            // Drop before the nearest signal row (groups are not drop targets).
-            let target = rows[hover..]
-                .iter()
-                .find_map(|r| match r {
-                    ListRow::Signal { sig, .. } => Some(*sig),
-                    _ => None,
-                })
-                .or_else(|| {
-                    rows[..hover].iter().rev().find_map(|r| match r {
-                        ListRow::Signal { sig, .. } => Some(*sig),
-                        _ => None,
-                    })
-                });
-            let Some(target_sig) = target else { return };
-            let Some(target) = app.display.iter().position(|&s| s == target_sig) else {
-                return;
-            };
             let dragged = app.display[drag.row];
-            if target != drag.row {
-                app.move_signal(drag.row, target);
-                if let Some(active) = app.dragging.as_mut() {
-                    active.row = target;
+            if app.selection.len() > 1 && app.selection.contains(&dragged) {
+                // Move the whole multi-selection one step toward the pointer.
+                match rows[hover] {
+                    ListRow::Group { index, .. } => {
+                        let group = app.group_of_signal(dragged).unwrap_or(0);
+                        if group != index {
+                            app.move_selection(if index > group { 1 } else { -1 });
+                        }
+                    }
+                    ListRow::Signal { sig, .. } => {
+                        let Some(hover_pos) = app.display.iter().position(|&s| s == sig) else {
+                            return;
+                        };
+                        let selected: Vec<usize> = app
+                            .display
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, signal)| app.selection.contains(signal))
+                            .map(|(position, _)| position)
+                            .collect();
+                        let (Some(&first), Some(&last)) = (selected.first(), selected.last())
+                        else {
+                            return;
+                        };
+                        if hover_pos > drag.row && last < hover_pos {
+                            app.move_selection(1);
+                        } else if hover_pos < drag.row && first > hover_pos {
+                            app.move_selection(-1);
+                        }
+                    }
                 }
-                app.scroll_to_row_of(dragged);
+                if let Some(position) = app.display.iter().position(|&s| s == dragged) {
+                    if let Some(active) = app.dragging.as_mut() {
+                        active.row = position;
+                    }
+                    app.sel_row = app.list_rows().iter().position(
+                        |row| matches!(row, ListRow::Signal { sig, .. } if *sig == dragged),
+                    );
+                }
+                return;
+            }
+            // Move one slot toward the hovered row: no long jumps and no
+            // auto-scroll, so dragging across expanded arrays stays stable.
+            let to = match rows[hover] {
+                ListRow::Group { index, .. } => {
+                    let group = app.group_of_signal(dragged).unwrap_or(0);
+                    if group == index {
+                        return;
+                    }
+                    let start = app.group_range(index).start;
+                    if start >= app.display.len() {
+                        if drag.row + 1 == app.display.len() {
+                            // The target group is empty and sits after the
+                            // last row: hand the signal over without moving.
+                            app.groups[group].count = app.groups[group].count.saturating_sub(1);
+                            app.groups[index].count += 1;
+                            return;
+                        }
+                        // Step toward the end first, then hand over.
+                        drag.row + 1
+                    } else if start > drag.row {
+                        drag.row + 1
+                    } else {
+                        drag.row.saturating_sub(1)
+                    }
+                }
+                ListRow::Signal { sig, .. } => {
+                    let Some(pos) = app.display.iter().position(|&s| s == sig) else {
+                        return;
+                    };
+                    if pos == drag.row {
+                        return;
+                    }
+                    if pos > drag.row {
+                        drag.row + 1
+                    } else {
+                        drag.row.saturating_sub(1)
+                    }
+                }
+            };
+            if to != drag.row && to < app.display.len() {
+                app.move_signal(drag.row, to);
+                if let Some(active) = app.dragging.as_mut() {
+                    active.row = to;
+                }
+                app.sel_row = app
+                    .list_rows()
+                    .iter()
+                    .position(|row| matches!(row, ListRow::Signal { sig, .. } if *sig == dragged));
+            }
+        }
+        DragMode::GroupReorder => {
+            // The pointer may sit above the first row (list title) or below
+            // the last one; the rules are:
+            //  - up:   past the previous group's name row,
+            //  - down: past the next group's last signal row.
+            let first_row = (l.list.y + 2) as i64;
+            let hover = row as i64 - first_row;
+            let mut current = app.dragging.map(|drag| drag.row).unwrap_or(0);
+            loop {
+                let rows = app.list_rows();
+                let spans = group_row_spans(&rows);
+                if current >= spans.len() {
+                    break;
+                }
+                let delta = if current > 0 && hover < spans[current - 1].0 as i64 {
+                    -1
+                } else if current + 1 < spans.len() && hover > spans[current + 1].1 as i64 {
+                    1
+                } else {
+                    break;
+                };
+                app.move_group(current, delta);
+                current = (current as i64 + delta).max(0) as usize;
+                if let Some(active) = app.dragging.as_mut() {
+                    active.row = current;
+                }
             }
         }
         DragMode::VScroll => scroll_rows(app, &l, row),
         DragMode::TreeScroll => scroll_tree(app, &l, row),
         DragMode::SourceScroll => scroll_source(app, &l, row),
+        DragMode::SourceHScroll => scroll_source_h(app, &l, col),
+        DragMode::ListHScroll => scroll_list_h(app, &l, col),
+        DragMode::ValueHScroll => scroll_list_value_h(app, &l, col),
+        DragMode::TreeHScroll => scroll_tree_h(app, &l, col, false),
+        DragMode::ModuleHScroll => scroll_tree_h(app, &l, col, true),
+        DragMode::SplitHier => {
+            let delta = col as f64 - drag.start_x as f64;
+            let inner_w = crate::ui::layout::tree_inner(&l).width.max(1) as f64;
+            let pct = drag.start_pct + delta * 100.0 / inner_w;
+            app.splits.hier_pct =
+                pct.clamp(Splits::MIN_HIER_PCT as f64, Splits::MAX_HIER_PCT as f64) as u16;
+        }
         DragMode::DialogScroll => {}
         DragMode::HScroll => pan_to_col(app, &l, col),
         DragMode::SplitTree => {
@@ -687,6 +883,9 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
             if let Some((line, char_col)) = target {
                 app.extend_source_selection_to(line, char_col);
             }
+            if let Some(active) = app.dragging.as_mut() {
+                active.row = row as usize;
+            }
         }
     }
 }
@@ -707,15 +906,96 @@ fn scroll_rows(app: &mut App, l: &Layout, row: u16) {
 fn scroll_tree(app: &mut App, l: &Layout, row: u16) {
     let inner = tree_inner(l);
     let total = app.tree_visible().len();
-    let visible = inner.height as usize;
+    // Rows live between the column header and the bottom scrollbar row.
+    let visible = l.tree_height();
     if visible == 0 || total <= visible {
         return;
     }
     let max_scroll = total - visible;
-    let rel = row.saturating_sub(inner.y) as f64;
+    let rel = row.saturating_sub(inner.y + 1) as f64;
     let denom = visible.saturating_sub(1).max(1) as f64;
     app.tree_scroll = (rel.min(denom) / denom * max_scroll as f64).round() as usize;
     app.tree_scroll = app.tree_scroll.min(max_scroll);
+}
+
+/// Horizontal scroll of the Signal List names.
+fn scroll_list_h(app: &mut App, l: &Layout, col: u16) {
+    let value_w = l.value_col_width(app.splits.value_pct);
+    let name_w = crate::ui::list::name_width(l, value_w);
+    let content = app.list_content_width();
+    let max = content.saturating_sub(name_w);
+    if max == 0 {
+        return;
+    }
+    let grip = l.value_grip_x(app.splits.value_pct);
+    let end = grip.saturating_sub(1);
+    let span = end.saturating_sub(l.list.x).max(1) as f64;
+    let rel = col.saturating_sub(l.list.x) as f64 / span;
+    app.list_h_scroll = (rel.min(1.0) * max as f64).round() as usize;
+}
+
+/// Horizontal scroll of the Value column.
+fn scroll_list_value_h(app: &mut App, l: &Layout, col: u16) {
+    let value_w = l.value_col_width(app.splits.value_pct);
+    let content = app.value_content_width();
+    let max = content.saturating_sub(value_w);
+    if max == 0 {
+        return;
+    }
+    let x0 = l.value_grip_x(app.splits.value_pct).saturating_add(1);
+    let x1 = l.list.right().saturating_sub(1).max(x0 + 1);
+    let end = x1.saturating_sub(1);
+    let span = end.saturating_sub(x0).max(1) as f64;
+    let rel = col.saturating_sub(x0) as f64 / span;
+    app.value_h_scroll = (rel.min(1.0) * max as f64).round() as usize;
+}
+
+/// Horizontal scroll of the Instance pane columns (`module` selects the
+/// Module column, otherwise the Hierarchy column).
+fn scroll_tree_h(app: &mut App, l: &Layout, col: u16, module: bool) {
+    let inner = crate::ui::layout::tree_inner(l);
+    let (hier_w, sep_x, module_x) = crate::ui::tree::columns(inner, app.splits.hier_pct);
+    let (x0, x1, content, view) = if module {
+        let right = inner.right().saturating_sub(1);
+        let view = right.saturating_sub(module_x) as usize;
+        (module_x, right, app.module_content_width(), view)
+    } else {
+        let view = hier_w.saturating_sub(1) as usize;
+        (inner.x, sep_x, app.tree_content_width(), view)
+    };
+    let max = content.saturating_sub(view);
+    if max == 0 || x1 <= x0 {
+        return;
+    }
+    let span = x1.saturating_sub(x0).max(1) as f64;
+    let rel = col.saturating_sub(x0) as f64 / span;
+    let offset = (rel.min(1.0) * max as f64).round() as usize;
+    if module {
+        app.module_h_scroll = offset;
+    } else {
+        app.tree_h_scroll = offset;
+    }
+}
+
+/// Row span `(header, last)` of every group in the flattened list rows.
+fn group_row_spans(rows: &[ListRow]) -> Vec<(usize, usize)> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (row, entry) in rows.iter().enumerate() {
+        match entry {
+            ListRow::Group { index, .. } => {
+                while spans.len() <= *index {
+                    spans.push((row, row));
+                }
+                spans[*index] = (row, row);
+            }
+            ListRow::Signal { .. } => {
+                if let Some(last) = spans.last_mut() {
+                    last.1 = row;
+                }
+            }
+        }
+    }
+    spans
 }
 
 fn scroll_source(app: &mut App, l: &Layout, row: u16) {
@@ -724,7 +1004,8 @@ fn scroll_source(app: &mut App, l: &Layout, row: u16) {
         return;
     };
     let total = view.lines.len();
-    let visible = code.height as usize;
+    // The bottom row is the horizontal scrollbar.
+    let visible = code.height.saturating_sub(1) as usize;
     if visible == 0 || total <= visible {
         return;
     }
@@ -735,6 +1016,36 @@ fn scroll_source(app: &mut App, l: &Layout, row: u16) {
     if let Some(view) = app.source_view.as_mut() {
         view.scroll = scroll.min(max_scroll);
     }
+}
+
+/// Horizontal scroll of the Source pane.
+fn scroll_source_h(app: &mut App, l: &Layout, col: u16) {
+    let code = crate::ui::source::code_rect(l);
+    let Some(view) = app.source_view.as_ref() else {
+        return;
+    };
+    let gutter = crate::ui::source::gutter_width(view);
+    let vbar = crate::ui::source::scrollbar_col(l, view).is_some();
+    let text_x0 = code.x + gutter;
+    let text_w = (code.width as usize).saturating_sub(gutter as usize + usize::from(vbar));
+    let content = view
+        .lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let max = content.saturating_sub(text_w);
+    if max == 0 {
+        return;
+    }
+    let x1 = code
+        .right()
+        .saturating_sub(u16::from(vbar))
+        .max(text_x0 + 1);
+    let end = x1.saturating_sub(1);
+    let span = end.saturating_sub(text_x0).max(1) as f64;
+    let rel = col.saturating_sub(text_x0) as f64 / span;
+    app.source_h_scroll = (rel.min(1.0) * max as f64).round() as usize;
 }
 
 fn pan_to_col(app: &mut App, l: &Layout, col: u16) {
@@ -1282,6 +1593,625 @@ mod tests {
     }
 
     #[test]
+    fn drag_signal_into_an_empty_group() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        app.grow_groups(0); // G1 stays empty
+        assert_eq!(app.groups.len(), 2);
+        assert_eq!(app.groups[1].count, 0);
+        let l = app.layout();
+        let src_row = l.list.y + 3; // first signal
+        let dst_row = l.list.y + 5; // G1 header (G0, s0, s1, G1)
+        crate::app::handle_mouse(&mut app, click(30, src_row));
+        for _ in 0..6 {
+            crate::app::handle_mouse(&mut app, drag(30, dst_row));
+        }
+        app.dragging = None;
+        assert_eq!(app.groups[0].count, 1);
+        assert_eq!(
+            app.groups[1].count, 1,
+            "the empty group must accept the drop"
+        );
+        assert_eq!(app.group_of_signal(0), Some(1));
+        assert_eq!(app.display, vec![1, 0]);
+
+        // Dropping back onto G0 restores the original order.
+        app.sel_row = None;
+        let dst_row = l.list.y + 2; // G0 header
+        crate::app::handle_mouse(&mut app, click(30, l.list.y + 5)); // sig 0 in G1
+        for _ in 0..6 {
+            crate::app::handle_mouse(&mut app, drag(30, dst_row));
+        }
+        app.dragging = None;
+        assert_eq!(app.groups[0].count, 2);
+        assert_eq!(app.groups[1].count, 0);
+        assert_eq!(app.group_of_signal(0), Some(0));
+        assert_eq!(app.display, vec![0, 1]);
+    }
+
+    #[test]
+    fn drag_group_header_reorders_groups() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        app.grow_groups(0);
+        app.move_signal_to(1, 1, 2); // signal 1 joins the empty G1
+        assert_eq!(app.display, vec![0, 1]);
+        let l = app.layout();
+        let g1_row = l.list.y + 4; // G0, s0, G1, s1
+        crate::app::handle_mouse(&mut app, click(30, g1_row));
+        // Above the previous group's name row (the list title strip) moves up.
+        crate::app::handle_mouse(&mut app, drag(30, l.list.y + 1));
+        app.dragging = None;
+        assert_eq!(app.groups[0].id, 1);
+        assert_eq!(app.groups[1].id, 0);
+        assert_eq!(app.display, vec![1, 0]);
+    }
+
+    #[test]
+    fn drag_group_down_moves_past_the_next_groups_last_signal() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        app.grow_groups(0);
+        app.move_signal_to(1, 1, 2); // G0 = [0], G1 = [1]
+        let l = app.layout();
+        let g0_row = l.list.y + 2; // G0, s0, G1, s1
+        crate::app::handle_mouse(&mut app, click(30, g0_row));
+        // Hovering over G1's own rows is not enough.
+        crate::app::handle_mouse(&mut app, drag(30, l.list.y + 4)); // G1 header
+        crate::app::handle_mouse(&mut app, drag(30, l.list.y + 5)); // G1 signal
+        assert_eq!(
+            app.groups[0].id, 0,
+            "must not move before passing the last signal"
+        );
+        // Past G1's last signal row moves the group down.
+        crate::app::handle_mouse(&mut app, drag(30, l.list.y + 6));
+        app.dragging = None;
+        assert_eq!(app.groups[0].id, 1);
+        assert_eq!(app.groups[1].id, 0);
+        assert_eq!(app.display, vec![1, 0]);
+    }
+
+    #[test]
+    fn double_click_wave_row_jumps_to_the_driver() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 8 ! data [7:0] $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\nb00000000 !\n";
+        let mut app = app_with(vcd);
+        let dir = std::env::temp_dir().join(format!("waverdi_wave_jump_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tb.sv");
+        std::fs::write(
+            &file,
+            "module tb;\n\
+             \x20   logic [7:0] data;\n\
+             \x20   assign data = 8'h00;\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "tb".to_string();
+        app.tree_sel = 1;
+        app.sync_source();
+        app.set_display(vec![0]);
+
+        let l = app.layout();
+        let y = l.rows.y + 1; // G0 header is the first row, the signal follows
+        crate::app::handle_mouse(&mut app, click(l.rows.x + 5, y));
+        crate::app::handle_mouse(&mut app, click(l.rows.x + 5, y));
+        assert_eq!(app.focus, Focus::Source);
+        assert_eq!(app.source_view.as_ref().unwrap().module, "tb");
+        // The assign driver is on line 3 (0-based 2).
+        assert_eq!(app.source_view.as_ref().unwrap().line, 2);
+    }
+
+    #[test]
+    fn source_drag_autoscrolls_at_the_pane_edges() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        let dir = std::env::temp_dir().join(format!("waverdi_src_as_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("long.sv");
+        let mut text = String::from("module long(input logic clk);\n");
+        for line in 0..80 {
+            text.push_str(&format!("    assign w{line} = clk;\n"));
+        }
+        text.push_str("endmodule\n");
+        std::fs::write(&file, text).unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "long".to_string();
+        app.tree_sel = 1;
+        app.sync_source();
+
+        let l = app.layout();
+        let rect = crate::ui::source::code_rect(&l);
+        let x = rect.x + 6;
+        crate::app::handle_mouse(&mut app, click(x, rect.y + 1));
+        crate::app::handle_mouse(&mut app, drag(x, rect.bottom() + 2));
+        assert!(matches!(
+            app.dragging.map(|drag| drag.mode),
+            Some(crate::app::DragMode::SourceSel)
+        ));
+        let before = app.source_view.as_ref().unwrap().scroll;
+        for _ in 0..3 {
+            app.tick_source_drag();
+        }
+        let view = app.source_view.as_ref().unwrap();
+        assert!(view.scroll > before, "scroll {} -> {}", before, view.scroll);
+        let (_, (last, _)) = view.sel.expect("selection");
+        assert!(last >= view.scroll + rect.height as usize - 2);
+        app.dragging = None;
+    }
+
+    #[test]
+    fn a_click_does_not_select_from_the_scroll_origin() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        let dir =
+            std::env::temp_dir().join(format!("waverdi_src_click_sel_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("long.sv");
+        let mut text = String::from("module long(input logic clk);\n");
+        for line in 0..80 {
+            text.push_str(&format!("    assign w{line} = clk;\n"));
+        }
+        text.push_str("endmodule\n");
+        std::fs::write(&file, text).unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "long".to_string();
+        app.tree_sel = 1;
+        app.sync_source();
+        app.scroll_source(10);
+
+        let l = app.layout();
+        let rect = crate::ui::source::code_rect(&l);
+        let y = rect.y + 2;
+        let (line, col) = {
+            let view = app.source_view.as_ref().unwrap();
+            let line = view.scroll + (y - rect.y) as usize;
+            (line, view.lines[line].find('w').unwrap())
+        };
+        let x = rect.x
+            + crate::ui::source::gutter_width(app.source_view.as_ref().unwrap())
+            + col as u16;
+        crate::app::handle_mouse(&mut app, click(x, y));
+
+        // An idle tick before the button is released must not grow the
+        // selection from the first displayed line.
+        let scroll = app.source_view.as_ref().unwrap().scroll;
+        app.tick_source_drag();
+        let view = app.source_view.as_ref().unwrap();
+        assert_eq!(view.scroll, scroll);
+        let (start, end) = view.sel.expect("click selection");
+        assert_eq!(start, end, "a click must not become a range selection");
+
+        // Releasing without dragging picks the word under the cursor.
+        let up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        crate::app::handle_mouse(&mut app, up);
+        let view = app.source_view.as_ref().unwrap();
+        let (start, end) = view.sel.expect("word selection");
+        assert_eq!(start.0, end.0, "the word selection stays on one line");
+        assert_eq!(start.0, line);
+        assert!(end.1 > start.1);
+    }
+
+    #[test]
+    fn list_horizontal_scrollbar_shifts_long_names() {
+        let vcd = "$timescale 1ns $end\n\
+            $scope module top $end\n\
+            $scope module sub $end\n\
+            $var wire 1 ! a_very_long_signal_name $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        app.set_display(vec![0]);
+        app.show_full_names = true;
+        let l = app.layout();
+        let value_w = l.value_col_width(app.splits.value_pct);
+        let name_w = crate::ui::list::name_width(&l, value_w);
+        let max = app.list_content_width() - name_w;
+        assert!(max > 0, "the test needs an overflowing name");
+        let y = l.list.bottom() - 1;
+
+        // Drag the bar to the middle: the names scroll left.
+        crate::app::handle_mouse(&mut app, click(l.list.x + 2, y));
+        assert!(matches!(
+            app.dragging.map(|drag| drag.mode),
+            Some(crate::app::DragMode::ListHScroll)
+        ));
+        let grip = l.value_grip_x(app.splits.value_pct);
+        crate::app::handle_mouse(&mut app, drag(l.list.x + (grip - l.list.x) / 2, y));
+        app.dragging = None;
+        assert!(app.list_h_scroll > 0 && app.list_h_scroll < max);
+
+        // Dragging to the right end shows the tail again.
+        crate::app::handle_mouse(&mut app, click(grip - 1, y));
+        app.dragging = None;
+        assert_eq!(app.list_h_scroll, max);
+        crate::app::handle_mouse(&mut app, click(l.list.x, y));
+        app.dragging = None;
+        assert_eq!(app.list_h_scroll, 0);
+    }
+
+    #[test]
+    fn tree_clicks_stay_in_sync_after_scrolling() {
+        let mut vcd = String::from("$timescale 1ns $end\n$scope module tb $end\n");
+        for i in 0..20 {
+            vcd.push_str(&format!("$scope module s{i} $end\n$upscope $end\n"));
+        }
+        vcd.push_str("$upscope $end\n$enddefinitions $end\n#0\n");
+        let mut app = app_with(&vcd);
+        app.expanded.insert(1); // tb
+        let l = app.layout();
+        let inner = crate::ui::layout::tree_inner(&l);
+        let col = inner.right() - 1;
+        // Drag the scrollbar to the bottom.
+        crate::app::handle_mouse(&mut app, click(col, inner.y + 1));
+        crate::app::handle_mouse(&mut app, drag(col, inner.bottom() - 1));
+        app.dragging = None;
+        let rows = app.layout().tree_height();
+        let total = app.tree_visible().len();
+        assert!(total > rows, "the tree must scroll for this test");
+        assert_eq!(app.tree_scroll, total - rows);
+
+        // Clicks map to the node drawn on that row.
+        let expected = app.tree_scroll;
+        crate::app::handle_mouse(&mut app, click(inner.x + 2, inner.y + 1));
+        assert_eq!(app.tree_sel, expected);
+
+        // A stale offset (e.g. after collapsing scopes) is clamped first.
+        app.tree_scroll = total + 5;
+        crate::app::handle_mouse(&mut app, click(inner.x + 2, inner.y + 1));
+        assert_eq!(app.tree_sel, total - rows);
+    }
+
+    #[test]
+    fn drag_moves_the_whole_multi_selection() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 ! a $end\n\
+            $var wire 1 \" b $end\n\
+            $var wire 1 # c $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        app.set_display(vec![0, 1, 2]);
+        app.selection = vec![0, 1];
+        let l = app.layout();
+        let first = l.list.y + 3; // G0, a, b, c
+        let third = l.list.y + 5;
+        crate::app::handle_mouse(&mut app, click(30, first));
+        assert_eq!(app.selection, vec![0, 1], "clicking a picked row keeps it");
+        crate::app::handle_mouse(&mut app, drag(30, third));
+        app.dragging = None;
+        assert_eq!(app.display, vec![2, 0, 1]);
+        assert_eq!(app.selection, vec![0, 1]);
+    }
+
+    #[test]
+    fn a_drop_creates_the_trailing_empty_group() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 ! a $end\n\
+            $var wire 1 \" b $end\n\
+            $var wire 1 # c $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        app.set_display(vec![0, 1, 2]);
+        app.grow_groups(0);
+        assert_eq!(app.groups.len(), 2);
+        let l = app.layout();
+        let src_row = l.list.y + 3;
+        let g1_row = l.list.y + 6; // G0, a, b, c, G1
+        crate::app::handle_mouse(&mut app, click(30, src_row));
+        for _ in 0..8 {
+            crate::app::handle_mouse(&mut app, drag(30, g1_row));
+        }
+        assert_eq!(app.groups[1].count, 1);
+        assert_eq!(app.groups.len(), 2, "no group is created mid-drag");
+        let up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 30,
+            row: g1_row,
+            modifiers: KeyModifiers::NONE,
+        };
+        crate::app::handle_mouse(&mut app, up);
+        assert_eq!(app.groups.len(), 3, "the drop adds the empty group");
+        assert_eq!(app.groups[2].count, 0);
+    }
+
+    #[test]
+    fn value_column_scrollbar_shifts_long_values() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 64 ! big [63:0] $end\n\
+            $enddefinitions $end\n#0\nb0 !\n";
+        let mut app = app_with(vcd);
+        app.set_display(vec![0]);
+        let l = app.layout();
+        let value_w = l.value_col_width(app.splits.value_pct);
+        assert!(
+            app.value_content_width() > value_w,
+            "needs an overflowing value"
+        );
+        let grip = l.value_grip_x(app.splits.value_pct);
+        let y = l.list.bottom() - 1;
+        crate::app::handle_mouse(&mut app, click(grip + 1, y));
+        assert!(matches!(
+            app.dragging.map(|drag| drag.mode),
+            Some(crate::app::DragMode::ValueHScroll)
+        ));
+        crate::app::handle_mouse(&mut app, drag(l.list.right() - 2, y));
+        app.dragging = None;
+        assert!(app.value_h_scroll > 0, "the value bar must scroll");
+        assert!(app.value_h_scroll >= app.value_content_width() - value_w - 1);
+    }
+
+    #[test]
+    fn instance_pane_columns_scroll_and_resize() {
+        let mut vcd = String::from("$timescale 1ns $end\n");
+        for (level, name) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            vcd.push_str(&format!("$scope module {name}{level} $end\n"));
+        }
+        for _ in 0..5 {
+            vcd.push_str("$upscope $end\n");
+        }
+        vcd.push_str("$enddefinitions $end\n#0\n");
+        let mut app = app_with(&vcd);
+        let nodes = app.wf.as_ref().unwrap().tree.nodes.len();
+        app.expanded.extend(0..nodes);
+        for id in 1..nodes {
+            app.wf.as_mut().unwrap().tree.nodes[id].module = "counter_pipeline_stage".to_string();
+        }
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 40));
+
+        let l = app.layout();
+        let inner = crate::ui::layout::tree_inner(&l);
+        let (hier_w, sep_x, module_x) = crate::ui::tree::columns(inner, app.splits.hier_pct);
+        let name_w = hier_w.saturating_sub(1) as usize;
+        let module_w = inner.right().saturating_sub(module_x + 1) as usize;
+        assert!(app.tree_content_width() > name_w);
+        assert!(app.module_content_width() > module_w);
+
+        // Hierarchy scrollbar.
+        let bar_y = inner.bottom() - 1;
+        crate::app::handle_mouse(&mut app, click(inner.x + 1, bar_y));
+        crate::app::handle_mouse(&mut app, drag(sep_x - 1, bar_y));
+        app.dragging = None;
+        assert!(app.tree_h_scroll > 0);
+
+        // Module scrollbar.
+        crate::app::handle_mouse(&mut app, click(module_x + 1, bar_y));
+        crate::app::handle_mouse(&mut app, drag(inner.right() - 2, bar_y));
+        app.dragging = None;
+        assert!(app.module_h_scroll > 0);
+
+        // The Hierarchy | Module divider resizes the columns.
+        let before = app.splits.hier_pct;
+        crate::app::handle_mouse(&mut app, click(sep_x, inner.y + 2));
+        crate::app::handle_mouse(&mut app, drag(sep_x + 6, inner.y + 2));
+        app.dragging = None;
+        assert!(app.splits.hier_pct > before);
+        let (_, sep_after, _) = crate::ui::tree::columns(inner, app.splits.hier_pct);
+        assert!(sep_after > sep_x);
+    }
+
+    #[test]
+    fn source_horizontal_scrollbar_shifts_long_lines() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        let dir = std::env::temp_dir().join(format!("waverdi_src_hbar_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("wide.sv");
+        let mut text = String::from("module wide(input logic clk);\n");
+        for line in 0..20 {
+            text.push_str(&format!("    assign w{line} = {};\n", "x".repeat(120)));
+        }
+        text.push_str("endmodule\n");
+        std::fs::write(&file, text).unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "wide".to_string();
+        app.tree_sel = 1;
+        app.sync_source();
+
+        let l = app.layout();
+        let code = crate::ui::source::code_rect(&l);
+        let gutter = crate::ui::source::gutter_width(app.source_view.as_ref().unwrap());
+        let y = code.bottom() - 1;
+        crate::app::handle_mouse(&mut app, click(code.x + gutter + 2, y));
+        assert!(matches!(
+            app.dragging.map(|drag| drag.mode),
+            Some(crate::app::DragMode::SourceHScroll)
+        ));
+        crate::app::handle_mouse(&mut app, drag(code.right() - 2, y));
+        app.dragging = None;
+        // Every frame re-syncs the layout; the offset must not snap back.
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 40));
+        let view = app.source_view.as_ref().unwrap();
+        let vbar = crate::ui::source::scrollbar_col(&l, view).is_some();
+        let text_w = (code.width as usize).saturating_sub(gutter as usize + usize::from(vbar));
+        let content = view
+            .lines
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            app.source_h_scroll,
+            content.saturating_sub(text_w),
+            "the bar must reach the right edge"
+        );
+    }
+
+    #[test]
+    fn collapsing_expanded_rows_clamps_the_row_scroll() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 8 ! e0 [7:0] $end\n\
+            $var wire 8 \" e1 [7:0] $end\n\
+            $var wire 8 # e2 [7:0] $end\n\
+            $enddefinitions $end\n#0\nb0 !\nb0 \"\nb0 #\n";
+        let mut app = app_with(vcd);
+        {
+            let signals = &mut app.wf.as_mut().unwrap().signals;
+            signals[0].name = "arr[0][7:0]".to_string();
+            signals[1].name = "arr[1][7:0]".to_string();
+            signals[2].name = "arr[2][7:0]".to_string();
+        }
+        app.wf.as_mut().unwrap().build_arrays();
+        let root = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .signals
+            .iter()
+            .position(|signal| signal.name == "arr")
+            .unwrap();
+        app.set_display(vec![root]);
+        app.toggle_signal_expand(root); // root + 3 element rows
+                                        // A stale scroll from a taller list is clamped after collapsing.
+        app.row_scroll = 7;
+        app.toggle_signal_expand(root); // collapse again
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 40));
+        assert_eq!(app.row_scroll, 0);
+        // The first signal row maps to the root, not to a phantom row.
+        let l = app.layout();
+        crate::app::handle_mouse(&mut app, click(30, l.list.y + 3));
+        assert_eq!(app.selected_signal(), Some(root));
+    }
+
+    #[test]
+    fn double_click_expand_a_multi_dim_array_keeps_lower_signals() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 8 ! e0 [7:0] $end\n\
+            $var wire 8 \" e1 [7:0] $end\n\
+            $var wire 8 # e2 [7:0] $end\n\
+            $var wire 8 $ e3 [7:0] $end\n\
+            $var wire 1 % clk $end\n\
+            $enddefinitions $end\n#0\nb0 !\nb0 \"\nb0 #\nb0 $\n0%\n";
+        let mut app = app_with(vcd);
+        {
+            let signals = &mut app.wf.as_mut().unwrap().signals;
+            signals[0].name = "arr[0][0][7:0]".to_string();
+            signals[1].name = "arr[0][1][7:0]".to_string();
+            signals[2].name = "arr[1][0][7:0]".to_string();
+            signals[3].name = "arr[1][1][7:0]".to_string();
+        }
+        app.wf.as_mut().unwrap().build_arrays();
+        let root = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .signals
+            .iter()
+            .position(|signal| signal.name == "arr")
+            .unwrap();
+        let clk = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .signals
+            .iter()
+            .position(|signal| signal.name == "clk")
+            .unwrap();
+        app.set_display(vec![root, clk]);
+        let l = app.layout();
+        let y = l.list.y + 3; // the array root row
+        let up = |column: u16, row: u16| MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        for _ in 0..2 {
+            crate::app::handle_mouse(&mut app, click(30, y));
+            crate::app::handle_mouse(&mut app, up(30, y));
+        }
+        assert!(app.display.contains(&clk), "{:?}", app.display);
+        assert_eq!(app.display.len(), 4, "{:?}", app.display);
+    }
+
+    #[test]
+    fn dragging_across_an_expanded_array_is_stable() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 8 ! e0 [7:0] $end\n\
+            $var wire 8 \" e1 [7:0] $end\n\
+            $var wire 8 # tail $end\n\
+            $enddefinitions $end\n#0\nb0 !\nb0 \"\n0#\n";
+        let mut app = app_with(vcd);
+        {
+            let signals = &mut app.wf.as_mut().unwrap().signals;
+            signals[0].name = "arr[0][7:0]".to_string();
+            signals[1].name = "arr[1][7:0]".to_string();
+        }
+        app.wf.as_mut().unwrap().build_arrays();
+        let root = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .signals
+            .iter()
+            .position(|signal| signal.name == "arr")
+            .unwrap();
+        let tail = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .signals
+            .iter()
+            .position(|signal| signal.name == "tail")
+            .unwrap();
+        app.set_display(vec![root, tail]);
+        app.toggle_signal_expand(root); // rows: root, arr[0], arr[1], tail
+        assert_eq!(app.display.len(), 4);
+
+        let l = app.layout();
+        let tail_display = app.display.iter().position(|&s| s == tail).unwrap();
+        let tail_row = l.list.y + 3 + tail_display as u16;
+        let root_row = l.list.y + 3;
+        crate::app::handle_mouse(&mut app, click(30, tail_row));
+        for _ in 0..5 {
+            crate::app::handle_mouse(&mut app, drag(30, root_row));
+        }
+        app.dragging = None;
+        assert_eq!(app.display[0], tail, "{:?}", app.display);
+        // Repeating the drag does not move it back.
+        let before = app.display.clone();
+        app.last_click = None;
+        crate::app::handle_mouse(&mut app, click(30, l.list.y + 3));
+        for _ in 0..3 {
+            crate::app::handle_mouse(&mut app, drag(30, root_row));
+        }
+        app.dragging = None;
+        assert_eq!(app.display, before);
+    }
+
+    #[test]
     fn double_click_group_toggles_collapse() {
         let mut app = app_with(VCD);
         app.set_display(vec![0]);
@@ -1314,9 +2244,12 @@ mod tests {
         crate::app::handle_mouse(&mut app, click_with(30, top + 1, KeyModifiers::CONTROL));
         assert_eq!(app.selection, vec![0, 1]);
         assert_eq!(app.sel_row, Some(2));
-        // A plain click starts a new single selection.
-        crate::app::handle_mouse(&mut app, click(30, top + 1));
+        // A plain click on a picked row keeps the block (so it can be
+        // dragged); a row outside the selection starts a new single one.
+        crate::app::handle_mouse(&mut app, click_with(30, top, KeyModifiers::ALT));
+        assert_eq!(app.selection, vec![1]);
+        crate::app::handle_mouse(&mut app, click(30, top));
         assert!(app.selection.is_empty());
-        assert_eq!(app.sel_row, Some(2));
+        assert_eq!(app.sel_row, Some(1));
     }
 }

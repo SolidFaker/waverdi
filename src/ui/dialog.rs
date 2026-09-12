@@ -20,7 +20,7 @@ const KEYS: &[&str] = &[
     "View      z / Z / - / = zoom   f fit   c center",
     "          h / l move cursor   ← → / Shift+← → x10",
     "          j / k next / previous row   gg / G first / last",
-    "          J / K move signal down / up   Space select",
+    "          J / K move signal / group down / up   Space select",
     "          w / b next / previous edge (1-bit: rising)",
     "          e / ge next / previous falling edge",
     "          0 / $ start / end of time   , / . prev / next change",
@@ -213,7 +213,6 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
         Dialog::SplitBus => "Split Bus",
         Dialog::CreateBus => "Create Bus",
         Dialog::GroupName => "Rename Group",
-        Dialog::Filelist => "Load Filelist",
         Dialog::Settings => "Settings",
         Dialog::Keys => "Key Bindings",
         Dialog::About => "About",
@@ -299,16 +298,6 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
                     inner_w,
                     app,
                     ("Name: ", "Enter: rename group    Esc: cancel"),
-                );
-            }
-            Dialog::Filelist => {
-                cursor = draw_input(
-                    buf,
-                    area,
-                    inner_x,
-                    inner_w,
-                    app,
-                    ("Filelist: ", "Enter: load RTL sources    Esc: cancel"),
                 );
             }
             Dialog::Settings => draw_settings(buf, area, app),

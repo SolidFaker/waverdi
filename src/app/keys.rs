@@ -272,6 +272,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.jump_edge(false, Some(1));
             false
         }
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.focus == Focus::Source {
+                app.select_all_source();
+            }
+            false
+        }
         KeyCode::Char('a') => {
             match app.focus {
                 Focus::Tree => app.tree_enter(),
@@ -474,7 +480,6 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
             Some(Dialog::Goto) => app.apply_goto(),
             Some(Dialog::FindValue) => app.apply_find_value(),
             Some(Dialog::SplitBus) => app.apply_split_bus(),
-            Some(Dialog::Filelist) => app.apply_load_filelist(),
             Some(Dialog::GroupName) => app.apply_rename_group(),
             Some(Dialog::Find) => {
                 let matches = app.find_matches();
@@ -597,7 +602,7 @@ fn browser_key(app: &mut App, key: KeyEvent) {
         BrowserCmd::Stay => {}
         BrowserCmd::Close => app.dialog = None,
         BrowserCmd::Load(path) => {
-            app.load(&path);
+            app.browser_load(&path);
         }
     }
 }
@@ -1547,6 +1552,137 @@ mod tests {
         app.clear_all();
         add(&mut app, "assign x = arr[1][1];");
         assert_eq!(app.display, vec![3]);
+    }
+
+    #[test]
+    fn ctrl_a_selects_the_active_module() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        let dir = std::env::temp_dir().join(format!("waverdi_src_ctrla_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("two.sv");
+        std::fs::write(
+            &file,
+            "module other(input logic x);\n\
+             \x20   logic y;\n\
+             endmodule\n\
+             module tb(input logic clk);\n\
+             \x20   logic a;\n\
+             \x20   logic b;\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "tb".to_string();
+        app.tree_sel = 1;
+        app.sync_source();
+        assert_eq!(app.source_view.as_ref().unwrap().module, "tb");
+        app.focus = Focus::Source;
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        );
+        let view = app.source_view.as_ref().unwrap();
+        let ((first, col0), (last, col1)) = view.sel.expect("selection");
+        // Only the tb module region (lines 4-7), not the whole file.
+        assert_eq!((first, last), (3, 6));
+        assert_eq!(view.module_at_line(first), "tb");
+        assert_eq!(view.module_at_line(last), "tb");
+        assert_eq!(col0, 0);
+        assert_eq!(col1, view.lines[last].chars().count());
+        assert_eq!(app.focus, Focus::Source);
+    }
+
+    #[test]
+    fn j_k_move_selected_signals_as_a_block() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 ! a $end\n\
+            $var wire 1 \" b $end\n\
+            $var wire 1 # c $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        app.set_display(vec![0, 1, 2]);
+        app.selection = vec![0, 1];
+        app.sel_row = Some(1);
+        app.focus = Focus::List;
+        handle_key(&mut app, key(KeyCode::Char('J')));
+        assert_eq!(app.display, vec![2, 0, 1]);
+        assert_eq!(app.selection, vec![0, 1]);
+        handle_key(&mut app, key(KeyCode::Char('K')));
+        assert_eq!(app.display, vec![0, 1, 2]);
+        assert_eq!(app.selection, vec![0, 1]);
+    }
+
+    #[test]
+    fn j_k_reorder_groups() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        app.grow_groups(0);
+        app.move_signal_to(1, 1, 2); // signal 1 joins the empty G1
+                                     // Rows: G0, s0, G1, s1 -> select the G1 header.
+        app.sel_row = Some(2);
+        app.focus = Focus::List;
+        handle_key(&mut app, key(KeyCode::Char('K')));
+        assert_eq!(app.groups[0].id, 1);
+        assert_eq!(app.display, vec![1, 0]);
+        handle_key(&mut app, key(KeyCode::Char('J')));
+        assert_eq!(app.groups[0].id, 0);
+        assert_eq!(app.display, vec![0, 1]);
+    }
+
+    #[test]
+    fn single_element_array_resolves_to_its_group() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 8 ! e0 [7:0] $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\nb00000000 !\n";
+        let mut app = app_with(vcd);
+        app.wf.as_mut().unwrap().signals[0].name = "stage[0][7:0]".to_string();
+        app.wf.as_mut().unwrap().build_arrays();
+        let dir = std::env::temp_dir().join(format!("waverdi_src_single_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("common.sv");
+        std::fs::write(
+            &file,
+            "module pipe_reg(input logic clk);\n\
+             \x20   logic [7:0] stage [1];\n\
+             \x20   logic [7:0] x;\n\
+             \x20   assign x = stage;\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "pipe_reg".to_string();
+        app.tree_sel = 1;
+        app.sync_source();
+        app.focus = Focus::Source;
+
+        let (line, col) = {
+            let view = app.source_view.as_ref().unwrap();
+            let line = view
+                .lines
+                .iter()
+                .position(|line| line.contains("assign x = stage"))
+                .unwrap();
+            (line, view.lines[line].find("stage").unwrap())
+        };
+        app.set_source_cursor(line, col);
+        app.add_source_word();
+        // The synthesized `stage` group is appended after the dump signals.
+        assert_eq!(app.display, vec![1]);
+        assert_eq!(app.wf.as_ref().unwrap().signals[1].name, "stage");
     }
 
     #[test]

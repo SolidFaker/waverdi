@@ -27,8 +27,9 @@ pub fn draw_frame(buf: &mut Buffer, l: &Layout, t: &Theme, focused: bool) {
 }
 
 /// Columns of the instance table: (Hierarchy width, separator x, module x).
-pub fn columns(inner: Rect) -> (u16, u16, u16) {
-    let hier_w = (inner.width as u32 * 55 / 100) as u16;
+pub fn columns(inner: Rect, hier_pct: u16) -> (u16, u16, u16) {
+    let hier_w = ((inner.width as u32 * hier_pct as u32 / 100) as u16)
+        .clamp(4, inner.width.saturating_sub(4).max(4));
     let sep_x = inner.x + hier_w;
     (hier_w, sep_x, sep_x + 1)
 }
@@ -42,7 +43,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let (hier_w, sep_x, module_x) = columns(inner);
+    let (hier_w, sep_x, module_x) = columns(inner, app.splits.hier_pct);
 
     // Header: Hierarchy | Module.
     let header = Rect {
@@ -68,7 +69,8 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
             Style::new().fg(t.dim).add_modifier(Modifier::BOLD),
         );
     }
-    for row in inner.y..inner.bottom() {
+    // The divider spans the whole pane below the header.
+    for row in (inner.y + 1)..inner.bottom() {
         if let Some(cell) = buf.cell_mut((sep_x, row)) {
             cell.set_symbol("│");
             cell.set_fg(t.panel_border);
@@ -77,8 +79,16 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     }
 
     let nodes = app.tree_visible();
-    let height = inner.height.saturating_sub(1) as usize;
+    let height = l.tree_height().min(inner.height.saturating_sub(2) as usize);
     let scroll = app.tree_scroll.min(nodes.len().saturating_sub(height));
+    let name_w = hier_w.saturating_sub(1) as usize;
+    let module_w = inner.right().saturating_sub(module_x + 1) as usize;
+    let hier_content = app.tree_content_width();
+    let module_content = app.module_content_width();
+    let hier_offset = app.tree_h_scroll.min(hier_content.saturating_sub(name_w));
+    let module_offset = app
+        .module_h_scroll
+        .min(module_content.saturating_sub(module_w));
 
     for row in 0..height {
         let k = scroll + row;
@@ -100,26 +110,55 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         } else {
             Style::new().fg(t.text)
         };
-        let name_w = hier_w.saturating_sub(1) as usize;
-        text::put(buf, inner.x, y, &text::trunc(&label, name_w), style);
+        text::put(
+            buf,
+            inner.x,
+            y,
+            &text::scroll_slice(&label, hier_offset, name_w),
+            style,
+        );
         if module_x < inner.right() {
             let module_style = if selected {
                 Style::new().fg(Color::Black).bg(t.accent)
             } else {
                 Style::new().fg(t.scope)
             };
-            let module_w = inner.right().saturating_sub(module_x) as usize;
             text::put(
                 buf,
                 module_x,
                 y,
-                &text::trunc(&scope.module, module_w),
+                &text::scroll_slice(&scope.module, module_offset, module_w),
                 module_style,
             );
         }
     }
 
     draw_scrollbar(buf, &inner, nodes.len(), scroll, height, t);
+
+    // Bottom row: one horizontal scrollbar per column.
+    let bar_y = inner.bottom().saturating_sub(1);
+    text::h_scrollbar(
+        buf,
+        inner.x,
+        sep_x,
+        bar_y,
+        hier_content,
+        name_w,
+        hier_offset,
+        t.dim,
+        t.bg,
+    );
+    text::h_scrollbar(
+        buf,
+        module_x,
+        inner.right().saturating_sub(1),
+        bar_y,
+        module_content,
+        module_w,
+        module_offset,
+        t.dim,
+        t.bg,
+    );
 }
 
 fn draw_scrollbar(

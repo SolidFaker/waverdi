@@ -138,8 +138,101 @@ impl App {
         }
     }
 
+    /// Move the displayed signal at `from` to `to` and hand it to `group`,
+    /// which may be empty (the slot is where its signals would start).
+    /// Returns the signal's new display position.
+    #[cfg(test)]
+    pub fn move_signal_to(&mut self, from: usize, group: usize, to: usize) -> Option<usize> {
+        if from >= self.display.len() || group >= self.groups.len() {
+            return None;
+        }
+        let src = self.group_of_pos(from);
+        let to = to.min(self.display.len());
+        let sig = self.display.remove(from);
+        let to = if from < to { to - 1 } else { to }.min(self.display.len());
+        self.display.insert(to, sig);
+        if src != group {
+            self.groups[src].count = self.groups[src].count.saturating_sub(1);
+            self.groups[group].count += 1;
+        }
+        Some(to)
+    }
+
+    /// Keep an empty group at the end of the list. Called after a drop or a
+    /// keyboard move, never mid-drag, so dragging through the groups does not
+    /// create a trail of empty ones.
+    pub(crate) fn ensure_trailing_group(&mut self) {
+        if self
+            .groups
+            .last()
+            .map(|group| group.count > 0)
+            .unwrap_or(false)
+        {
+            let id = self.next_group_id();
+            self.groups.push(Group::new(id));
+        }
+    }
+
+    /// Move a group up / down (`J`/`K` on a group row or a header drag).
+    /// Groups keep their ids; only their order (and display blocks) changes.
+    pub fn move_group(&mut self, index: usize, delta: i64) {
+        let target = index as i64 + delta;
+        if delta == 0
+            || target < 0
+            || target as usize >= self.groups.len()
+            || index >= self.groups.len()
+        {
+            return;
+        }
+        let target = target as usize;
+        let mut blocks: Vec<Vec<usize>> = Vec::with_capacity(self.groups.len());
+        let mut start = 0;
+        for group in &self.groups {
+            let end = (start + group.count).min(self.display.len());
+            blocks.push(self.display[start..end].to_vec());
+            start = end;
+        }
+        self.groups.swap(index, target);
+        blocks.swap(index, target);
+        self.display = blocks.into_iter().flatten().collect();
+        self.sel_row = self
+            .list_rows()
+            .iter()
+            .position(|row| matches!(row, ListRow::Group { index, .. } if *index == target));
+        self.scroll_to_sel();
+        self.ensure_trailing_group();
+        self.msg(format!(
+            "moved {} to position {}",
+            self.groups[target].name,
+            target + 1
+        ));
+    }
+
     pub fn rows_len(&self) -> usize {
         self.list_rows().len()
+    }
+
+    /// Width (in characters) of the widest displayed signal name; used by the
+    /// Signal List horizontal scrollbar.
+    pub fn list_content_width(&self) -> usize {
+        let Some(wf) = &self.wf else {
+            return 0;
+        };
+        self.list_rows()
+            .iter()
+            .filter_map(|row| match row {
+                ListRow::Signal { sig, .. } => {
+                    let signal = &wf.signals[*sig];
+                    Some(if self.show_full_names {
+                        signal.full_name().chars().count()
+                    } else {
+                        signal.name.chars().count()
+                    })
+                }
+                ListRow::Group { .. } => None,
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn selected_row(&self) -> Option<ListRow> {
@@ -241,9 +334,74 @@ impl App {
         }
     }
 
-    /// Move the selected signal up / down (`J`/`K`). Movement crosses group
-    /// boundaries: the signal joins the group that owns its new position.
+    /// Width (in characters) of the widest Value column text at the cursor.
+    pub fn value_content_width(&self) -> usize {
+        self.display
+            .iter()
+            .map(|&sig| {
+                let radix = self.radix_for(sig);
+                self.wf
+                    .as_ref()
+                    .map(|wf| {
+                        wf.signals[sig]
+                            .display_value(self.cursor, radix)
+                            .chars()
+                            .count()
+                    })
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Width (in characters) of the widest Hierarchy label (indent + arrow).
+    pub fn tree_content_width(&self) -> usize {
+        let Some(wf) = &self.wf else {
+            return 0;
+        };
+        self.tree_visible()
+            .iter()
+            .map(|node| match node {
+                TreeNode::Scope { id, depth } => {
+                    let name = &wf.tree.nodes[*id].name;
+                    depth * 2 + 2 + name.chars().count()
+                }
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Width (in characters) of the widest Module name.
+    pub fn module_content_width(&self) -> usize {
+        let Some(wf) = &self.wf else {
+            return 0;
+        };
+        self.tree_visible()
+            .iter()
+            .map(|node| match node {
+                TreeNode::Scope { id, .. } => wf.tree.module_of(*id).chars().count(),
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Move the selected signal(s) up / down (`J`/`K`). With a multi-selection
+    /// every selected signal moves as one block; movement crosses group
+    /// boundaries. On a group row, the group itself is moved.
     pub fn move_selected_signal(&mut self, delta: i64) {
+        if let Some(ListRow::Group { index, .. }) = self.selected_row() {
+            self.move_group(index, delta);
+            return;
+        }
+        if !self.selection.is_empty() {
+            let anchor = self.selected_signal();
+            self.move_selection(delta);
+            if let Some(sig) = anchor {
+                self.select_signal_row(sig);
+            }
+            self.ensure_trailing_group();
+            return;
+        }
         let Some(sig) = self.selected_signal() else {
             self.msg("move signal: select a signal row first");
             return;
@@ -259,6 +417,7 @@ impl App {
                 // No slot below: hand the signal over to the next group.
                 self.groups[group].count = self.groups[group].count.saturating_sub(1);
                 self.groups[group + 1].count += 1;
+                self.grow_groups(group + 1);
             } else {
                 return;
             }
@@ -269,13 +428,64 @@ impl App {
                 // No slot above: hand the signal over to the previous group.
                 self.groups[group].count = self.groups[group].count.saturating_sub(1);
                 self.groups[group - 1].count += 1;
+                self.grow_groups(group - 1);
             } else {
                 return;
             }
         } else {
             return;
         }
+        self.ensure_trailing_group();
         self.scroll_to_row_of(sig);
+    }
+
+    /// Move every selected signal one step up / down as one block.
+    pub fn move_selection(&mut self, delta: i64) {
+        let mut positions: Vec<usize> = self
+            .display
+            .iter()
+            .enumerate()
+            .filter(|(_, sig)| self.selection.contains(sig))
+            .map(|(position, _)| position)
+            .collect();
+        if positions.is_empty() {
+            return;
+        }
+        positions.sort_unstable();
+        let count = positions.len();
+        if delta > 0 {
+            // A block at the very end of the display hands itself to the next
+            // group (same rule as a single signal).
+            if positions.last() == Some(&(self.display.len() - 1))
+                && positions == (self.display.len() - count..self.display.len()).collect::<Vec<_>>()
+            {
+                let group = self.group_of_pos(self.display.len() - count);
+                if group + 1 < self.groups.len() {
+                    self.groups[group].count = self.groups[group].count.saturating_sub(count);
+                    self.groups[group + 1].count += count;
+                    return;
+                }
+            }
+            for &position in positions.iter().rev() {
+                if position + 1 < self.display.len() {
+                    self.move_signal(position, position + 1);
+                }
+            }
+        } else if delta < 0 {
+            if positions.first() == Some(&0) && positions == (0..count).collect::<Vec<_>>() {
+                let group = self.group_of_pos(0);
+                if group > 0 {
+                    self.groups[group].count = self.groups[group].count.saturating_sub(count);
+                    self.groups[group - 1].count += count;
+                    return;
+                }
+            }
+            for &position in positions.iter() {
+                if position > 0 {
+                    self.move_signal(position, position - 1);
+                }
+            }
+        }
     }
 
     /// Double-click on a signal row: expand a multi-bit signal into its bits,
@@ -311,14 +521,21 @@ impl App {
             .copied()
             .filter(|child| self.display.contains(child))
             .collect();
-        if visible.is_empty() {
-            // Re-expand the bits created earlier, right below the parent.
+        if visible.len() < children.len() {
+            // Expand: add the children that are not displayed yet right below
+            // the parent (a partially expanded array must not collapse).
             let group = self.group_of_pos(pos);
-            for (offset, child) in children.iter().enumerate() {
+            let mut added = 0usize;
+            for (offset, child) in children
+                .iter()
+                .filter(|child| !visible.contains(child))
+                .enumerate()
+            {
                 self.display_insert(group, pos + 1 + offset, *child);
+                added += 1;
             }
             self.select_signal_row(sig);
-            self.msg(format!("expanded signal into {} bit(s)", children.len()));
+            self.msg(format!("expanded signal into {added} row(s)"));
         } else {
             // Collapse the whole subtree below this signal.
             let subtree = self.signal_subtree(sig);
@@ -678,7 +895,32 @@ impl App {
         out
     }
 
+    /// Maximum scroll offset of the Signal List rows.
+    pub fn row_max_scroll(&self) -> usize {
+        self.rows_len().saturating_sub(self.rows_h())
+    }
+
+    /// Clamp the row scroll after rows were collapsed / removed so the
+    /// drawing and the click mapping stay in sync.
+    pub(crate) fn clamp_row_scroll(&mut self) {
+        self.row_scroll = self.row_scroll.min(self.row_max_scroll());
+    }
+
+    /// Maximum scroll offset of the Instance pane: both the drawing and the
+    /// click mapping use it, so they never drift apart.
+    pub fn tree_max_scroll(&self) -> usize {
+        self.tree_visible()
+            .len()
+            .saturating_sub(self.layout().tree_height())
+    }
+
+    /// Clamp the Instance scroll offset after the tree size changed.
+    pub(crate) fn clamp_tree_scroll(&mut self) {
+        self.tree_scroll = self.tree_scroll.min(self.tree_max_scroll());
+    }
+
     pub(crate) fn tree_scroll_to_sel(&mut self) {
+        self.clamp_tree_scroll();
         let nodes = self.tree_visible();
         let h = self.layout().tree_height().max(1);
         if self.tree_sel >= nodes.len() {
@@ -827,6 +1069,109 @@ mod tests {
         assert_eq!(app.tree_visible().len(), 3); // expanding sub adds nothing
         app.toggle_scope(0);
         assert_eq!(app.tree_visible().len(), 1);
+    }
+
+    #[test]
+    fn the_trailing_empty_group_is_added_on_drop() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        app.grow_groups(0); // G1 stays empty
+        assert_eq!(app.groups.len(), 2);
+        // Moving (dragging) alone does not create groups...
+        app.move_signal_to(0, 1, 2);
+        assert_eq!(app.groups[1].count, 1);
+        assert_eq!(app.groups.len(), 2, "no empty group during the drag");
+        // ...only the drop does.
+        app.ensure_trailing_group();
+        assert_eq!(app.groups.len(), 3);
+        assert_eq!(app.groups[2].count, 0);
+        // The next signal can join the same group without another growth.
+        app.move_signal_to(0, 1, 3);
+        assert_eq!(app.groups[1].count, 2);
+        app.ensure_trailing_group();
+        assert_eq!(app.groups.len(), 3);
+    }
+
+    #[test]
+    fn expanding_a_multi_dim_array_keeps_the_signals_below_it() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 8 ! e0 [7:0] $end\n\
+            $var wire 8 \" e1 [7:0] $end\n\
+            $var wire 8 # e2 [7:0] $end\n\
+            $var wire 8 $ e3 [7:0] $end\n\
+            $var wire 1 % clk $end\n\
+            $enddefinitions $end\n#0\nb0 !\nb0 \"\nb0 #\nb0 $\n0%\n";
+        let mut app = app_with(vcd);
+        {
+            let signals = &mut app.wf.as_mut().unwrap().signals;
+            signals[0].name = "arr[0][0][7:0]".to_string();
+            signals[1].name = "arr[0][1][7:0]".to_string();
+            signals[2].name = "arr[1][0][7:0]".to_string();
+            signals[3].name = "arr[1][1][7:0]".to_string();
+        }
+        app.wf.as_mut().unwrap().build_arrays();
+        let root = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .signals
+            .iter()
+            .position(|signal| signal.name == "arr")
+            .unwrap();
+        let clk = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .signals
+            .iter()
+            .position(|signal| signal.name == "clk")
+            .unwrap();
+        app.set_display(vec![root, clk]);
+        app.toggle_signal_expand(root);
+        assert_eq!(app.display.len(), 4, "{:?}", app.display);
+        assert_eq!(app.display.last(), Some(&clk));
+    }
+
+    #[test]
+    fn expanding_a_partially_shown_array_adds_missing_children() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 8 ! e0 [7:0] $end\n\
+            $var wire 8 \" e1 [7:0] $end\n\
+            $var wire 8 # tail $end\n\
+            $enddefinitions $end\n#0\nb0 !\nb0 \"\n0#\n";
+        let mut app = app_with(vcd);
+        {
+            let signals = &mut app.wf.as_mut().unwrap().signals;
+            signals[0].name = "arr[0][7:0]".to_string();
+            signals[1].name = "arr[1][7:0]".to_string();
+        }
+        app.wf.as_mut().unwrap().build_arrays();
+        let find = |app: &crate::app::App, name: &str| {
+            app.wf
+                .as_ref()
+                .unwrap()
+                .signals
+                .iter()
+                .position(|signal| signal.name == name)
+                .unwrap()
+        };
+        let root = find(&app, "arr");
+        let child0 = find(&app, "arr[0][7:0]");
+        let child1 = find(&app, "arr[1][7:0]");
+        let tail = find(&app, "tail");
+        // One child is already on the list (added by hand): the first
+        // double-click must expand, not collapse and drop the rows below.
+        app.set_display(vec![root, child0, tail]);
+        app.toggle_signal_expand(root);
+        assert!(app.display.contains(&child1));
+        assert!(app.display.contains(&child0));
+        assert!(app.display.contains(&tail));
+        assert_eq!(app.display.len(), 4, "{:?}", app.display);
+        // Once every child is shown, the next double-click collapses.
+        app.toggle_signal_expand(root);
+        assert!(!app.display.contains(&child0));
+        assert!(!app.display.contains(&child1));
+        assert!(app.display.contains(&tail));
     }
 
     #[test]

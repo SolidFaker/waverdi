@@ -9,6 +9,8 @@ pub struct Splits {
     pub top_pct: u16,
     /// Width percentage of the Value column inside the Signal List.
     pub value_pct: u16,
+    /// Width percentage of the Hierarchy column inside the Instance pane.
+    pub hier_pct: u16,
 }
 
 impl Default for Splits {
@@ -18,6 +20,7 @@ impl Default for Splits {
             list_pct: 31,
             top_pct: 60,
             value_pct: 25,
+            hier_pct: 55,
         }
     }
 }
@@ -33,6 +36,9 @@ impl Splits {
     /// Bounds of the Value column inside the Signal List.
     pub const MIN_VALUE_PCT: u16 = 8;
     pub const MAX_VALUE_PCT: u16 = 50;
+    /// Bounds of the Hierarchy column inside the Instance pane.
+    pub const MIN_HIER_PCT: u16 = 15;
+    pub const MAX_HIER_PCT: u16 = 85;
 
     pub fn max_tree_pct(&self) -> u16 {
         (100 - self.list_pct - Self::MIN_WAVE_PCT).min(Self::MAX_PCT)
@@ -72,8 +78,9 @@ pub struct Layout {
 
 impl Layout {
     pub fn tree_height(&self) -> usize {
-        // Frame borders plus the Hierarchy/Module header row.
-        self.tree.height.saturating_sub(3) as usize
+        // Frame borders, the Hierarchy/Module header row and the bottom
+        // horizontal scrollbars.
+        self.tree.height.saturating_sub(4) as usize
     }
 
     /// Column of the instance/source border, which can be dragged to resize.

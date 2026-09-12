@@ -11,6 +11,7 @@ pub enum CtxItem {
     CreateBus,
     Remove,
     AddToWaveform,
+    SelectAllSource,
     NewGroup,
     RenameGroup,
     ExpandGroup,
@@ -62,7 +63,10 @@ pub const GROUP_MENU: &[CtxEntry] = &[
     CtxEntry::Item("Remove Group", CtxItem::RemoveGroup),
 ];
 
-pub const SOURCE_MENU: &[CtxEntry] = &[CtxEntry::Item("Add to Waveform", CtxItem::AddToWaveform)];
+pub const SOURCE_MENU: &[CtxEntry] = &[
+    CtxEntry::Item("Add to Waveform", CtxItem::AddToWaveform),
+    CtxEntry::Item("Select All Module Text", CtxItem::SelectAllSource),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CtxTarget {
@@ -151,7 +155,7 @@ impl App {
             (CtxTarget::Signal(sig), CtxItem::Radix(radix)) => {
                 let targets = self.action_targets(sig);
                 for &idx in &targets {
-                    self.radix.insert(idx, radix);
+                    self.apply_radix(idx, radix);
                 }
                 if targets.len() == 1 {
                     let name = self.signal_name(sig);
@@ -196,6 +200,7 @@ impl App {
                 }
             }
             (CtxTarget::Source, CtxItem::AddToWaveform) => self.add_source_selection(),
+            (CtxTarget::Source, CtxItem::SelectAllSource) => self.select_all_source(),
             _ => {}
         }
     }

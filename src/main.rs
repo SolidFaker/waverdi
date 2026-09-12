@@ -128,6 +128,7 @@ fn run_loop(term: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()
     loop {
         term.draw(|f| ui::render(f, app))?;
         if !crossterm::event::poll(Duration::from_millis(50))? {
+            app::tick(app);
             continue;
         }
         let quit = match crossterm::event::read()? {

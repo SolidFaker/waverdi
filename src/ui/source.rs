@@ -25,8 +25,8 @@ pub fn code_rect(l: &Layout) -> Rect {
 /// Column of the source scrollbar, when the file is longer than the pane.
 pub fn scrollbar_col(l: &Layout, view: &crate::rtl::SourceView) -> Option<u16> {
     let code = code_rect(l);
-    (code.height > 0 && view.lines.len() > code.height as usize)
-        .then(|| code.right().saturating_sub(1))
+    let rows = code.height.saturating_sub(1) as usize;
+    (code.height > 1 && view.lines.len() > rows).then(|| code.right().saturating_sub(1))
 }
 
 /// Width of the line-number gutter (digits plus one space).
@@ -113,13 +113,24 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
 
     // Code with line numbers, scrolling, selection and a keyboard cursor.
     let digits = view.lines.len().max(1).to_string().len();
+    let gutter = gutter_width(view);
     let focused = app.focus == crate::app::Focus::Source;
     let scrollbar = scrollbar_col(l, view);
     // Keep the scrollbar column free of code.
     let text_right = scrollbar
         .map(|_| code.right().saturating_sub(1))
         .unwrap_or(code.right());
-    for row in 0..code.height as usize {
+    let text_w = (text_right.saturating_sub(code.x + gutter)) as usize;
+    let content_w = view
+        .lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let max_h = content_w.saturating_sub(text_w);
+    let h = app.source_h_scroll.min(max_h);
+    let rows = code.height.saturating_sub(1) as usize;
+    for row in 0..rows {
         let index = view.scroll + row;
         let Some(spans) = view.spans.get(index) else {
             break;
@@ -136,7 +147,8 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
         let number = format!("{:>digits$} ", index + 1);
         text::put(buf, code.x, y, &number, Style::new().fg(t.dim).bg(bg));
 
-        let mut x = code.x + digits as u16 + 1;
+        let text_x = code.x + gutter;
+        let mut x = text_x;
         let mut col = 0usize;
         let active = view.module_at_line(index) == view.module;
         'line: for span in spans {
@@ -155,13 +167,18 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
                 }
             };
             for ch in span.text.chars() {
+                let column = col;
+                col += 1;
+                if column < h {
+                    continue;
+                }
                 if x >= text_right {
                     break 'line;
                 }
                 let in_sel = interval
-                    .map(|(from, to)| col >= from && col < to)
+                    .map(|(from, to)| column >= from && column < to)
                     .unwrap_or(false);
-                let (fg, bg) = if focused && index == view.line && col == view.col {
+                let (fg, bg) = if focused && index == view.line && column == view.col {
                     (t.bg, t.cursor)
                 } else if in_sel && span.kind == HlKind::Signal {
                     // Selected signal names stand out.
@@ -173,7 +190,6 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
                 };
                 text::set_cell(buf, x, y, &ch.to_string(), fg, bg);
                 x += 1;
-                col += 1;
             }
         }
         if focused && index == view.line && view.col >= col && x < text_right {
@@ -186,6 +202,19 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
     if let Some(col) = scrollbar {
         draw_scrollbar(buf, l, view, col, t);
     }
+    // Bottom row: horizontal scrollbar of the code text.
+    let bar_y = code.bottom().saturating_sub(1);
+    text::h_scrollbar(
+        buf,
+        code.x + gutter,
+        code.right().saturating_sub(u16::from(scrollbar.is_some())),
+        bar_y,
+        content_w,
+        text_w,
+        h,
+        t.dim,
+        t.bg,
+    );
 }
 
 /// Vertical scrollbar on the right edge of the code area.
@@ -197,7 +226,7 @@ fn draw_scrollbar(
     t: &crate::theme::Theme,
 ) {
     let code = code_rect(l);
-    let height = code.height as usize;
+    let height = code.height.saturating_sub(1) as usize;
     if height == 0 {
         return;
     }

@@ -187,6 +187,25 @@ impl SourceView {
         }
     }
 
+    /// Select the whole region of a module (1-based inclusive line numbers).
+    pub fn select_region(&mut self, start: usize, end: usize, rows: usize) -> bool {
+        if self.lines.is_empty() {
+            return false;
+        }
+        let first = start.saturating_sub(1).min(self.lines.len() - 1);
+        let last = end.saturating_sub(1).min(self.lines.len() - 1);
+        if last < first {
+            return false;
+        }
+        let len = self.lines[last].chars().count();
+        self.anchor = Some((first, 0));
+        self.sel = Some(((first, 0), (last, len)));
+        self.line = first;
+        self.col = 0;
+        self.ensure_visible(rows);
+        true
+    }
+
     /// Finish a mouse selection: a click that did not drag picks the word
     /// under the cursor instead of a whole line.
     pub fn finish_selection(&mut self) {

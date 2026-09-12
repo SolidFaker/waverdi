@@ -9,9 +9,9 @@
 //!   `{{0, 1, 2}, {2, 3, 4}, {1, 2, 3}}`;
 //! * expanding a node in the Signal List reveals the next dimension.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use super::{fmt_real, Change, SigKind, Signal, Ticks, Value};
+use super::{fmt_bits, fmt_real, Change, Radix, SigKind, Signal, Ticks, Value};
 
 impl super::Waveform {
     /// Group per-element signals of unpacked arrays and add the synthesized
@@ -34,9 +34,6 @@ impl super::Waveform {
         }
 
         for ((scope, base), members) in groups {
-            if members.len() < 2 {
-                continue;
-            }
             let depth = members.keys().next().map(Vec::len).unwrap_or(0);
             if depth == 0 || members.keys().any(|key| key.len() != depth) {
                 continue;
@@ -100,6 +97,75 @@ impl super::Waveform {
             level = next;
         }
     }
+
+    /// Re-format the brace text of every array signal after radix changes.
+    /// An array override applies to the elements it contains; a leaf override
+    /// only affects that element (and the parents that embed it).
+    pub fn rebuild_array_texts(&mut self, radix: &HashMap<usize, Radix>) {
+        let roots: Vec<usize> = self
+            .signals
+            .iter()
+            .enumerate()
+            .filter(|(_, signal)| signal.var_type == "array" && signal.parent.is_none())
+            .map(|(index, _)| index)
+            .collect();
+        let mut children: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (index, signal) in self.signals.iter().enumerate() {
+            if let Some(parent) = signal.parent {
+                children.entry(parent).or_default().push(index);
+            }
+        }
+        for root in roots {
+            self.rebuild_array_node(root, None, radix, &children);
+        }
+    }
+
+    fn rebuild_array_node(
+        &mut self,
+        index: usize,
+        inherited: Option<Radix>,
+        radix: &HashMap<usize, Radix>,
+        children: &BTreeMap<usize, Vec<usize>>,
+    ) {
+        let current = radix.get(&index).copied().or(inherited);
+        let Some(list) = children.get(&index).cloned() else {
+            return;
+        };
+        if list.is_empty() {
+            return;
+        }
+        for &child in &list {
+            if self.signals[child].var_type == "array" {
+                self.rebuild_array_node(child, current, radix, children);
+            }
+        }
+        let mut times: BTreeSet<Ticks> = BTreeSet::new();
+        for &child in &list {
+            for change in &self.signals[child].changes {
+                times.insert(change.t);
+            }
+        }
+        let mut changes: Vec<Change> = Vec::new();
+        for t in times {
+            let parts: Vec<String> = list
+                .iter()
+                .map(|&child| {
+                    let signal = &self.signals[child];
+                    element_text_radix(signal, t, radix.get(&child).copied().or(current))
+                })
+                .collect();
+            let value = Value::Str(format!("{{{}}}", parts.join(", ")));
+            if changes
+                .last()
+                .map(|change| change.v == value)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            changes.push(Change { t, v: value });
+        }
+        self.signals[index].changes = changes;
+    }
 }
 
 /// `mem[0][7:0]` -> `("mem", [0])`; `arr[1][2]` -> `("arr", [1, 2])`.
@@ -162,25 +228,42 @@ fn array_changes(signals: &[Signal], children: &[usize]) -> Vec<Change> {
     changes
 }
 
-/// Text of one element at time `t`: decimal for bit vectors (unknown values as
-/// `x`), the real number, the string, or the nested braces of a sub-array.
-fn element_text(signal: &Signal, t: Ticks) -> String {
+/// Text of one element at time `t`: the bit vector in `radix` (decimal by
+/// default, unknown values as `x`), the real number, the string, or the nested
+/// braces of a sub-array.
+fn element_text_radix(signal: &Signal, t: Ticks, radix: Option<Radix>) -> String {
     match (signal.kind, signal.value_at(t)) {
         (SigKind::Bits, Some(Value::Bits(bits))) => {
             if bits.iter().any(|&bit| bit >= 2) {
                 "x".to_string()
             } else {
-                let mut value: u128 = 0;
-                for &bit in bits.iter().rev() {
-                    value = (value << 1) | bit as u128;
+                // Hex is the default radix for arrays, like for buses.
+                let radix = radix.unwrap_or(Radix::Hex);
+                let text = fmt_bits(bits, radix);
+                match radix {
+                    // Drop the `b`/`o`/`d`/`h` prefix and pad zeros so braces
+                    // stay compact.
+                    Radix::Ascii => text,
+                    _ => {
+                        let digits: String = text.chars().skip(1).collect();
+                        let trimmed = digits.trim_start_matches('0');
+                        if trimmed.is_empty() {
+                            "0".to_string()
+                        } else {
+                            trimmed.to_string()
+                        }
+                    }
                 }
-                value.to_string()
             }
         }
         (SigKind::Real, Some(Value::Real(real))) => fmt_real(*real),
         (SigKind::Str, Some(Value::Str(text))) => text.clone(),
         _ => "x".to_string(),
     }
+}
+
+fn element_text(signal: &Signal, t: Ticks) -> String {
+    element_text_radix(signal, t, None)
 }
 
 #[cfg(test)]
@@ -276,13 +359,53 @@ mod tests {
     }
 
     #[test]
-    fn single_element_groups_and_plain_buses_are_ignored() {
+    fn radix_overrides_reformat_the_brace_text() {
+        // Element 0 = 10, element 1 = 16 (bits are LSB first).
+        let mut wf = waveform(vec![
+            leaf("arr[0][7:0]", &[0, 1, 0, 1, 0, 0, 0, 0], 0),
+            leaf("arr[1][7:0]", &[0, 0, 0, 0, 1, 0, 0, 0], 0),
+        ]);
+        wf.build_arrays();
+        let root = wf.signals.iter().position(|s| s.name == "arr").unwrap();
+        // Hex is the default radix for arrays.
+        assert_eq!(
+            wf.signals[root].value_at(0),
+            Some(&Value::Str("{a, 10}".to_string()))
+        );
+        let mut radix = HashMap::new();
+        radix.insert(root, Radix::Hex);
+        wf.rebuild_array_texts(&radix);
+        assert_eq!(
+            wf.signals[root].value_at(0),
+            Some(&Value::Str("{a, 10}".to_string()))
+        );
+        // A leaf override only reformats that element.
+        radix.clear();
+        radix.insert(0, Radix::Bin);
+        wf.rebuild_array_texts(&radix);
+        assert_eq!(
+            wf.signals[root].value_at(0),
+            Some(&Value::Str("{1010, 10}".to_string()))
+        );
+    }
+
+    #[test]
+    fn single_element_arrays_are_grouped_too() {
         let mut wf = waveform(vec![
             leaf("count[7:0]", &[0, 0, 0, 0, 0, 0, 0, 1], 0),
             leaf("one[0][7:0]", &[0, 0, 0, 0, 0, 0, 0, 1], 0),
         ]);
         wf.build_arrays();
-        assert_eq!(wf.signals.len(), 2);
+        // The plain bus stays a leaf; the 1-element array gains a parent.
+        assert_eq!(wf.signals.len(), 3);
+        let root = wf
+            .signals
+            .iter()
+            .position(|signal| signal.name == "one")
+            .expect("array root");
+        assert_eq!(wf.signals[root].var_type, "array");
+        assert_eq!(wf.signals[1].parent, Some(root));
+        assert!(!wf.signals.iter().any(|signal| signal.name == "count"));
     }
 
     #[test]

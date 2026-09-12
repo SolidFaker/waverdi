@@ -1,10 +1,10 @@
-use crate::app::{App, CtxEntry, CtxTarget};
+use crate::app::{App, CtxEntry};
 use crate::theme::Theme;
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Clear, Widget as _};
 
 /// What the pointer hit inside an open context menu.
@@ -57,8 +57,7 @@ pub fn sub_rect(l: &Layout, app: &App, root: Rect, index: usize) -> Option<Rect>
         CtxEntry::Submenu(_, entries) => *entries,
         CtxEntry::Item(..) => return None,
     };
-    let title_width = entry.label().chars().count() as u16 + 4;
-    let width = entries_width(entries).max(title_width);
+    let width = entries_width(entries);
     let height = entries.len() as u16 + 2;
     let y = (root.y + 1 + index as u16)
         .min(l.area.bottom().saturating_sub(height))
@@ -103,25 +102,13 @@ pub fn item_at(app: &App, col: u16, row: u16) -> Option<CtxHit> {
     hit(root, col, row, app.ctx_root().len()).map(CtxHit::Root)
 }
 
-fn draw_popup(
-    buf: &mut Buffer,
-    area: Rect,
-    entries: &[CtxEntry],
-    sel: usize,
-    title: &str,
-    t: &Theme,
-) {
+fn draw_popup(buf: &mut Buffer, area: Rect, entries: &[CtxEntry], sel: usize, t: &Theme) {
     Clear.render(area, buf);
     buf.set_style(area, Style::new().bg(t.popup_bg));
     Block::bordered()
-        .title(format!(
-            " {} ",
-            text::trunc(title, area.width.saturating_sub(2) as usize)
-        ))
-        .title_style(Style::new().fg(t.accent).add_modifier(Modifier::BOLD))
         .border_style(Style::new().fg(t.accent))
         .render(area, buf);
-    let inner = area.width.saturating_sub(2) as usize;
+    let inner = area.width.saturating_sub(2);
     for (k, entry) in entries.iter().enumerate() {
         let selected = k == sel;
         let style = if selected {
@@ -129,10 +116,23 @@ fn draw_popup(
         } else {
             Style::new().fg(t.text)
         };
-        text::put(buf, area.x + 1, area.y + 1 + k as u16, entry.label(), style);
+        let y = area.y + 1 + k as u16;
+        if selected {
+            // Highlight the whole row, not only the label.
+            buf.set_style(
+                Rect {
+                    x: area.x + 1,
+                    y,
+                    width: inner,
+                    height: 1,
+                },
+                Style::new().bg(t.accent),
+            );
+        }
+        text::put(buf, area.x + 1, y, entry.label(), style);
         if matches!(entry, CtxEntry::Submenu(..)) {
-            let arrow_x = area.x + 1 + inner as u16 - 3;
-            text::put(buf, arrow_x, area.y + 1 + k as u16, " ▸", style);
+            let arrow_x = area.x + 1 + inner.saturating_sub(3);
+            text::put(buf, arrow_x, y, " ▸", style);
         }
     }
 }
@@ -141,36 +141,17 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
     let t = &app.theme;
     let Some(menu) = &app.ctx_menu else { return };
     let root = root_rect(l, app);
-    let title = match &menu.target {
-        CtxTarget::Signal(sig) => app
-            .wf
-            .as_ref()
-            .and_then(|wf| wf.signals.get(*sig))
-            .map(|sig| sig.full_name())
-            .unwrap_or_default(),
-        CtxTarget::Group(id) => app
-            .groups
-            .iter()
-            .find(|group| group.id == *id)
-            .map(|group| group.name.clone())
-            .unwrap_or_default(),
-        CtxTarget::Source => app
-            .selected_scope_module()
-            .unwrap_or_else(|| "Source".to_string()),
-    };
     draw_popup(
         buf,
         root,
         app.ctx_root(),
         menu.submenu.unwrap_or(menu.sel),
-        &title,
         t,
     );
 
     if let Some(index) = menu.submenu {
         if let Some(area) = sub_rect(l, app, root, index) {
-            let label = app.ctx_root().get(index).map(CtxEntry::label).unwrap_or("");
-            draw_popup(buf, area, app.ctx_level(), menu.sel, label, t);
+            draw_popup(buf, area, app.ctx_level(), menu.sel, t);
         }
     }
 }

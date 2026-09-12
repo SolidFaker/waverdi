@@ -1873,12 +1873,16 @@ fn scan_statement(parser: &mut Parser) -> (Idents, Idents, usize) {
     let mut uses = Vec::new();
     let mut end = parser.line();
     let mut depth = 0i32;
+    let mut paren_depth = 0i32;
     let mut block_depth = 0i32;
     let mut started_block = false;
     let mut cond_depth: Option<i32> = None;
     let mut last_cond = false;
     let mut last_punct: Option<char> = None;
     let mut pending: Option<(String, usize)> = None;
+    // Base identifier of an assignment target (`scratch` in
+    // `scratch[a][b] <= ...`), kept across index selectors.
+    let mut lhs_base: Option<(String, usize)> = None;
 
     while let Some(tok) = parser.peek().cloned() {
         let line = parser.line();
@@ -1913,6 +1917,9 @@ fn scan_statement(parser: &mut Parser) -> (Idents, Idents, usize) {
                 );
                 if !is_keyword(name) {
                     uses.push((name.clone(), line));
+                    if depth <= 0 && cond_depth.is_none() {
+                        lhs_base = Some((name.clone(), line));
+                    }
                     pending = Some((name.clone(), line));
                 }
                 last_punct = None;
@@ -1921,15 +1928,21 @@ fn scan_statement(parser: &mut Parser) -> (Idents, Idents, usize) {
             Tok::Punct(c) => {
                 let c = *c;
                 match c {
-                    '(' => {
-                        depth += 1;
-                        if last_cond {
-                            cond_depth = Some(depth);
+                    '(' | '[' | '{' => {
+                        if c == '(' {
+                            paren_depth += 1;
+                            if last_cond {
+                                cond_depth = Some(paren_depth);
+                            }
                         }
+                        depth += 1;
                     }
-                    ')' => {
-                        if cond_depth == Some(depth) {
-                            cond_depth = None;
+                    ')' | ']' | '}' => {
+                        if c == ')' {
+                            if cond_depth == Some(paren_depth) {
+                                cond_depth = None;
+                            }
+                            paren_depth -= 1;
                         }
                         depth -= 1;
                     }
@@ -1938,11 +1951,14 @@ fn scan_statement(parser: &mut Parser) -> (Idents, Idents, usize) {
                         parser.next();
                         break;
                     }
-                    '=' if cond_depth.is_none()
+                    '=' if depth <= 0
+                        && cond_depth.is_none()
                         && last_punct != Some('=')
                         && last_punct != Some('!') =>
                     {
-                        if let Some((name, driver_line)) = pending.take() {
+                        if let Some((name, driver_line)) =
+                            lhs_base.take().or_else(|| pending.take())
+                        {
                             drivers.push((name, driver_line));
                         }
                     }
@@ -2584,6 +2600,25 @@ endmodule
         assert_eq!(fifo.start, 14);
         assert_eq!(fifo.end, 20);
         assert!(fifo.signal("c").is_some());
+    }
+
+    #[test]
+    fn indexed_assignments_are_driven_by_their_base_signal() {
+        let text = r#"
+module m(input logic clk);
+    logic [7:0] mem [2][2];
+    always_ff @(posedge clk) begin
+        mem[a][b] <= 8'h01;
+    end
+endmodule
+"#;
+        let modules = parse_module_text(text, Path::new("m.sv"));
+        let block = &modules[0].always[0];
+        assert!(block
+            .drivers
+            .iter()
+            .any(|(name, line)| name == "mem" && *line == 5));
+        assert!(!block.drivers.iter().any(|(name, _)| name == "b"));
     }
 
     #[test]

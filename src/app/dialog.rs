@@ -7,7 +7,6 @@ pub enum Dialog {
     SplitBus,
     CreateBus,
     GroupName,
-    Filelist,
     Settings,
     Keys,
     About,

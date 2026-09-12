@@ -68,6 +68,59 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Slice `s` for a horizontally scrolled viewport: `offset` characters are
+/// skipped and the result is at most `width` cells. A leading ellipsis is
+/// only added when actual content (not just indentation) is hidden on the
+/// left.
+pub fn scroll_slice(s: &str, offset: usize, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let len = s.chars().count();
+    if offset == 0 && len <= width {
+        return s.to_string();
+    }
+    let left = s.chars().take(offset).any(|c| !c.is_whitespace());
+    let room = width.saturating_sub(usize::from(left));
+    let mut out = String::new();
+    if left {
+        out.push('…');
+    }
+    out.extend(s.chars().skip(offset).take(room));
+    out
+}
+
+/// Draw a horizontal scrollbar track from `x0` to `x1` (exclusive) on `y`.
+#[allow(clippy::too_many_arguments)]
+pub fn h_scrollbar(
+    buf: &mut Buffer,
+    x0: u16,
+    x1: u16,
+    y: u16,
+    content: usize,
+    view: usize,
+    offset: usize,
+    fg: Color,
+    bg: Color,
+) {
+    if content <= view || x1 <= x0 || y >= buf.area().bottom() {
+        return;
+    }
+    let span = (x1 - x0) as usize;
+    let max = content - view;
+    let offset = offset.min(max);
+    let thumb = ((view as f64 / content as f64) * span as f64).max(1.0) as usize;
+    let top = ((offset as f64 / max as f64) * span.saturating_sub(thumb) as f64) as usize;
+    for cell in 0..span {
+        let symbol = if cell >= top && cell < top + thumb {
+            "█"
+        } else {
+            "─"
+        };
+        set_cell(buf, x0 + cell as u16, y, symbol, fg, bg);
+    }
+}
+
 /// Draw a string, clipped to the buffer's right edge.
 pub fn put(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style) {
     let area = *buf.area();
@@ -89,7 +142,7 @@ pub fn set_cell(buf: &mut Buffer, x: u16, y: u16, symbol: &str, fg: Color, bg: C
 
 #[cfg(test)]
 mod tests {
-    use super::{trunc, trunc_left, wrap};
+    use super::{scroll_slice, trunc, trunc_left, wrap};
 
     #[test]
     fn wrap_breaks_at_spaces_and_splits_long_words() {
@@ -108,5 +161,15 @@ mod tests {
         assert_eq!(trunc_left("abcdef", 1), "…");
         assert_eq!(trunc_left("abcdef", 0), "");
         assert_eq!(trunc_left("wave.fsdb", 9), "wave.fsdb");
+    }
+
+    #[test]
+    fn scroll_slice_marks_only_hidden_content() {
+        // Scrolled-out indentation does not produce an ellipsis.
+        assert_eq!(scroll_slice("    name", 2, 8), "  name");
+        // Hidden identifiers do.
+        assert_eq!(scroll_slice("scope.name", 3, 8), "…pe.name");
+        assert_eq!(scroll_slice("abc", 0, 8), "abc");
+        assert_eq!(scroll_slice("abcdefghij", 0, 4), "abcd");
     }
 }

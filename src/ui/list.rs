@@ -40,6 +40,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
 
     let rows = app.list_rows();
     let scroll = app.row_scroll.min(rows.len().saturating_sub(l.rows_h));
+    let value_content = app.value_content_width();
     for visible in 0..l.rows_h {
         let k = scroll + visible;
         let Some(list_row) = rows.get(k) else { break };
@@ -105,19 +106,46 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                 } else {
                     Style::new().fg(t.name).bg(bg)
                 };
-                let shown = if app.show_full_names {
-                    signal.full_name()
+                let full = signal.full_name();
+                let (prefix, leaf) = if app.show_full_names {
+                    match full.rfind('.') {
+                        Some(dot) => (full[..=dot].to_string(), full[dot + 1..].to_string()),
+                        None => (String::new(), full),
+                    }
                 } else {
-                    signal.name.clone()
+                    (String::new(), signal.name.clone())
                 };
                 let indent = "  ".repeat(*depth);
-                // Right-aligned; when the name does not fit, keep its tail
-                // (the signal name) and drop the hierarchical prefix.
+                // Right-aligned by default; the horizontal scrollbar shifts
+                // the names to reveal the hierarchy of long names.
                 let width = name_width(l, value_w);
-                let name = text::trunc_left(&format!("{indent}{shown}"), width);
-                let len = name.chars().count().min(width);
-                let x = l.list.x + (width.saturating_sub(len)) as u16;
-                buf.set_string(x, y, &name, name_style);
+                let content_w = app.list_content_width().max(width);
+                let h = app.list_h_scroll.min(content_w - width);
+                let full_text = format!("{indent}{prefix}{leaf}");
+                let full_len = full_text.chars().count();
+                let x0 = l.list.x as i64 + (content_w - full_len) as i64 - h as i64;
+                let left = l.list.x as i64;
+                let right = grip as i64;
+                let skip = (left - x0).max(0) as usize;
+                let ellipsis = skip > 0;
+                let start = if ellipsis { left + 1 } else { x0.max(left) };
+                if start < right {
+                    let room = (right - start) as usize;
+                    let visible: String = full_text.chars().skip(skip).take(room).collect();
+                    if ellipsis {
+                        text::set_cell(buf, l.list.x, y, "…", t.dim, bg);
+                    }
+                    // The hierarchy path is dim; the signal name keeps its colour.
+                    let split = indent.chars().count() + prefix.chars().count();
+                    let prefix_cells = (split as i64 - skip as i64)
+                        .clamp(0, visible.chars().count() as i64)
+                        as usize;
+                    let prefix_part: String = visible.chars().take(prefix_cells).collect();
+                    let leaf_part: String = visible.chars().skip(prefix_cells).collect();
+                    let start = start as u16;
+                    buf.set_string(start, y, &prefix_part, Style::new().fg(t.dim).bg(bg));
+                    buf.set_string(start + prefix_cells as u16, y, &leaf_part, name_style);
+                }
 
                 let radix = app.radix_for(*sig);
                 let (from, to) = app.cursor_column_range();
@@ -138,12 +166,66 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                     Style::new().fg(t.value).bg(bg)
                 };
                 // Keep the value inside its column: never over the divider.
-                text::put(buf, grip + 1, y, &text::trunc(&value, value_w), value_style);
+                let value_max = value_content.saturating_sub(value_w);
+                let value_offset = app.value_h_scroll.min(value_max);
+                text::put(
+                    buf,
+                    grip + 1,
+                    y,
+                    &text::scroll_slice(&value, value_offset, value_w),
+                    value_style,
+                );
             }
         }
     }
+
+    // The Signal List | Value divider runs to the bottom of the pane.
+    let border = if focused { t.accent } else { t.panel_border };
+    for y in (l.list.y + 2 + l.rows_h as u16)..l.list.bottom() {
+        text::set_cell(buf, grip, y, "│", border, t.bg);
+    }
+    draw_h_scrollbar(buf, l, app);
 }
 
-fn name_width(l: &Layout, value_w: usize) -> usize {
+/// Horizontal scrollbars of the Signal List: names (left) and values (right),
+/// aligned with the waveform scrollbar.
+fn draw_h_scrollbar(buf: &mut Buffer, l: &Layout, app: &App) {
+    let t = &app.theme;
+    if l.list.height == 0 {
+        return;
+    }
+    let value_w = l.value_col_width(app.splits.value_pct);
+    let name_w = name_width(l, value_w);
+    let grip = l.value_grip_x(app.splits.value_pct);
+    let y = l.list.bottom().saturating_sub(1);
+    let name_content = app.list_content_width();
+    let name_max = name_content.saturating_sub(name_w);
+    text::h_scrollbar(
+        buf,
+        l.list.x,
+        grip,
+        y,
+        name_content,
+        name_w,
+        app.list_h_scroll.min(name_max),
+        t.dim,
+        t.bg,
+    );
+    let value_content = app.value_content_width();
+    let value_max = value_content.saturating_sub(value_w);
+    text::h_scrollbar(
+        buf,
+        grip + 1,
+        l.list.right().saturating_sub(1).max(grip + 2),
+        y,
+        value_content,
+        value_w,
+        app.value_h_scroll.min(value_max),
+        t.dim,
+        t.bg,
+    );
+}
+
+pub fn name_width(l: &Layout, value_w: usize) -> usize {
     (l.list.width as usize).saturating_sub(value_w + 2)
 }

@@ -602,7 +602,6 @@ mod tests {
             crate::app::Dialog::SplitBus,
             crate::app::Dialog::CreateBus,
             crate::app::Dialog::GroupName,
-            crate::app::Dialog::Filelist,
             crate::app::Dialog::Settings,
             crate::app::Dialog::Keys,
             crate::app::Dialog::About,
@@ -668,6 +667,35 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_highlights_the_whole_row() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 ! clk $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.set_display(vec![0]);
+        app.open_context_menu(crate::app::CtxTarget::Signal(0), 5, 5);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        let root = super::context::root_rect(&l, &app);
+        // The selected (first) entry fills the inner width.
+        let y = root.y + 1;
+        let left = buffer.cell((root.x + 1, y)).unwrap();
+        let right = buffer.cell((root.right() - 2, y)).unwrap();
+        assert_eq!(left.bg, crate::theme::Theme::DARK.accent);
+        assert_eq!(right.bg, crate::theme::Theme::DARK.accent);
+        // No name/title on the top border any more.
+        let top: String = (root.x..root.right())
+            .map(|x| buffer.cell((x, root.y)).unwrap().symbol())
+            .collect();
+        assert!(!top.contains("clk"), "{top}");
+    }
+
+    #[test]
     fn menu_dropdown_renders() {
         let mut app = App::new();
         app.menu.open = Some(0);
@@ -704,6 +732,10 @@ mod tests {
         assert!(long.trim_end().ends_with("name"), "{long}");
         let short = row(l.list.y + 4);
         assert_eq!(short.trim(), "clk");
+        // The horizontal scrollbar is drawn on the pane's bottom row.
+        let bar = row(l.list.bottom() - 1);
+        assert!(bar.contains('█'), "{bar}");
+        assert!(bar.contains('─'), "{bar}");
         // Right-aligned: the name sits next to the value divider, not at the
         // left edge of the column.
         assert!(short.starts_with(' '), "{short:?}");
@@ -764,6 +796,81 @@ mod tests {
         assert!(bar.contains('█'), "{bar}");
         // The last column of code is kept free for the bar.
         assert_eq!(col, code.right() - 1);
+    }
+
+    #[test]
+    fn signal_list_dims_the_hierarchy_prefix() {
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $scope module dut $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.set_display(vec![0]);
+        app.show_full_names = true;
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        let grip = l.value_grip_x(app.splits.value_pct);
+        let y = l.list.y + 3; // G0 header, the signal row
+        let cell_fg = |symbol: &str| {
+            (l.list.x..grip)
+                .map(|x| buffer.cell((x, y)).unwrap())
+                .find(|cell| cell.symbol() == symbol)
+                .map(|cell| cell.fg)
+        };
+        // `tb.dut.clk`: the path is dim, the name keeps the signal colour.
+        assert_eq!(cell_fg("t"), Some(crate::theme::Theme::DARK.dim));
+        assert_eq!(cell_fg("d"), Some(crate::theme::Theme::DARK.dim));
+        assert_eq!(cell_fg("k"), Some(crate::theme::Theme::DARK.name));
+    }
+
+    #[test]
+    fn instance_pane_has_bottom_scrollbars_and_a_full_divider() {
+        let mut vcd = String::from("$timescale 1ns $end\n");
+        for (level, name) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            vcd.push_str(&format!("$scope module {name}{level} $end\n"));
+        }
+        for _ in 0..5 {
+            vcd.push_str("$upscope $end\n");
+        }
+        vcd.push_str("$enddefinitions $end\n#0\n");
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        let nodes = app.wf.as_ref().unwrap().tree.nodes.len();
+        app.expanded.extend(0..nodes);
+        for id in 1..nodes {
+            app.wf.as_mut().unwrap().tree.nodes[id].module = "counter_pipeline_stage".to_string();
+        }
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        let inner = super::layout::tree_inner(&l);
+        let (_, sep_x, _) = super::tree::columns(inner, app.splits.hier_pct);
+        // The divider reaches the bottom row of the pane.
+        assert_eq!(
+            buffer.cell((sep_x, inner.bottom() - 1)).unwrap().symbol(),
+            "│"
+        );
+        let bar: String = (inner.x..inner.right())
+            .map(|x| {
+                buffer
+                    .cell((x, inner.bottom() - 1))
+                    .unwrap()
+                    .symbol()
+                    .to_string()
+            })
+            .collect();
+        assert!(bar.contains('█'), "{bar}");
+        assert!(bar.contains('─'), "{bar}");
     }
 
     #[test]

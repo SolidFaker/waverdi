@@ -67,15 +67,22 @@ pub(crate) enum DragMode {
     Cursor,
     Range,
     Reorder,
+    GroupReorder,
     VScroll,
     HScroll,
     TreeScroll,
     SourceScroll,
+    SourceHScroll,
+    ListHScroll,
     DialogScroll,
     SplitTree,
     SplitList,
     SplitTop,
     SplitValue,
+    SplitHier,
+    TreeHScroll,
+    ModuleHScroll,
+    ValueHScroll,
     SourceSel,
 }
 
@@ -92,6 +99,14 @@ pub(crate) struct Drag {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TreeNode {
     Scope { id: usize, depth: usize },
+}
+
+/// Purpose of the built-in browser / native file dialog (`Open Waveform`
+/// versus `Load Filelist`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BrowserMode {
+    Waveform,
+    Filelist,
 }
 
 pub struct App {
@@ -116,6 +131,16 @@ pub struct App {
     /// Cut/paste register filled by `dd`.
     pub register: Vec<usize>,
     pub row_scroll: usize,
+    /// Horizontal scroll of the Signal List names (`usize::MAX` = right edge).
+    pub(crate) list_h_scroll: usize,
+    /// Horizontal scroll of the Source pane (in characters).
+    pub(crate) source_h_scroll: usize,
+    /// Horizontal scroll of the Value column.
+    pub(crate) value_h_scroll: usize,
+    /// Horizontal scroll of the Instance pane's Hierarchy column.
+    pub(crate) tree_h_scroll: usize,
+    /// Horizontal scroll of the Instance pane's Module column.
+    pub(crate) module_h_scroll: usize,
     pub focus: Focus,
     pub expanded: HashSet<usize>,
     pub tree_sel: usize,
@@ -154,6 +179,8 @@ pub struct App {
     /// Use the native GUI file dialog instead of the built-in browser.
     pub use_gui: bool,
     pub browser: Option<FileBrowser>,
+    /// What the next file-dialog pick should load.
+    pub(crate) browser_mode: BrowserMode,
     /// Active colour scheme.
     pub theme: Theme,
     pub theme_kind: ThemeKind,
@@ -188,6 +215,11 @@ impl App {
             visual: false,
             register: Vec::new(),
             row_scroll: 0,
+            list_h_scroll: usize::MAX,
+            source_h_scroll: 0,
+            value_h_scroll: 0,
+            tree_h_scroll: 0,
+            module_h_scroll: 0,
             focus: Focus::Tree,
             expanded: HashSet::new(),
             tree_sel: 0,
@@ -217,6 +249,7 @@ impl App {
             bus_builder: None,
             use_gui: crate::picker::detect_gui(),
             browser: None,
+            browser_mode: BrowserMode::Waveform,
             theme: Theme::DARK,
             theme_kind: ThemeKind::Dark,
             settings_sel: 0,
@@ -246,6 +279,8 @@ impl App {
             self.pending_fit = false;
             self.fit();
         }
+        self.clamp_tree_scroll();
+        self.clamp_row_scroll();
     }
 
     pub fn layout(&self) -> Layout {
@@ -301,16 +336,6 @@ impl App {
         }
     }
 
-    /// Load the filelist typed into the `Dialog::Filelist` prompt.
-    pub fn apply_load_filelist(&mut self) {
-        let path = self.input.as_string();
-        self.dialog = None;
-        let path = path.trim().to_string();
-        if !path.is_empty() {
-            self.load_filelist(&path);
-        }
-    }
-
     /// Load a VCS-style RTL filelist into the Source pane.
     pub fn load_filelist(&mut self, path: &str) {
         match SourceSet::from_filelist(Path::new(path)) {
@@ -331,6 +356,7 @@ impl App {
 
     /// Open the operating system's file dialog and load the selection.
     pub fn open_file_dialog(&mut self) {
+        self.browser_mode = BrowserMode::Waveform;
         if self.use_gui {
             if let Some(path) = crate::picker::pick_vcd() {
                 self.load(&path.display().to_string());
@@ -338,6 +364,32 @@ impl App {
             return;
         }
         self.open_tui_browser();
+    }
+
+    /// Open the same file dialog as `Open Waveform`, but load a filelist.
+    pub fn open_filelist_dialog(&mut self) {
+        self.browser_mode = BrowserMode::Filelist;
+        if self.use_gui {
+            if let Some(path) = crate::picker::pick_filelist() {
+                self.load_filelist(&path.display().to_string());
+            }
+            return;
+        }
+        self.open_tui_browser();
+    }
+
+    /// Finish a file-dialog / browser pick according to its purpose.
+    pub(crate) fn browser_load(&mut self, path: &str) {
+        match self.browser_mode {
+            BrowserMode::Waveform => {
+                self.load(path);
+            }
+            BrowserMode::Filelist => {
+                self.load_filelist(path);
+                self.dialog = None;
+            }
+        }
+        self.browser_mode = BrowserMode::Waveform;
     }
 
     /// Open the built-in terminal file browser (used over SSH / headless).
@@ -378,6 +430,11 @@ impl App {
         self.visual = false;
         self.register.clear();
         self.row_scroll = 0;
+        self.list_h_scroll = usize::MAX;
+        self.source_h_scroll = 0;
+        self.value_h_scroll = 0;
+        self.tree_h_scroll = 0;
+        self.module_h_scroll = 0;
         self.tree_sel = 0;
         self.tree_scroll = 0;
         self.range = None;
@@ -526,7 +583,8 @@ impl App {
     }
 
     fn source_rows(&self) -> usize {
-        self.layout().source.height.saturating_sub(2) as usize
+        // Borders plus the bottom horizontal scrollbar row.
+        self.layout().source.height.saturating_sub(3) as usize
     }
 
     pub fn move_source_cursor(&mut self, delta_line: i64, delta_col: i64) {
@@ -534,6 +592,7 @@ impl App {
         if let Some(view) = self.source_view.as_mut() {
             view.move_cursor(delta_line, delta_col, rows);
         }
+        self.ensure_source_col_visible();
     }
 
     pub fn set_source_cursor(&mut self, line: usize, col: usize) {
@@ -541,6 +600,7 @@ impl App {
         if let Some(view) = self.source_view.as_mut() {
             view.set_cursor(line, col, rows);
         }
+        self.ensure_source_col_visible();
     }
 
     pub fn scroll_source(&mut self, delta: i64) {
@@ -610,6 +670,7 @@ impl App {
         if let Some(view) = self.source_view.as_mut() {
             view.extend_selection_by(0, delta, rows);
         }
+        self.ensure_source_col_visible();
     }
 
     /// Extend the source selection to a concrete character (mouse drag).
@@ -630,6 +691,90 @@ impl App {
     pub fn select_source_word(&mut self) {
         if let Some(view) = self.source_view.as_mut() {
             view.select_word();
+        }
+    }
+
+    /// `Ctrl+A` / context menu: select all text of the active module.
+    pub fn select_all_source(&mut self) {
+        let rows = self.source_rows();
+        let Some(module) = self.source_view.as_ref().map(|view| view.module.clone()) else {
+            return;
+        };
+        let range = self
+            .rtl
+            .as_ref()
+            .and_then(|db| db.module(&module))
+            .map(|def| (def.start, def.end));
+        let Some((start, end)) = range else {
+            self.msg("source: no parsed module to select");
+            return;
+        };
+        if let Some(view) = self.source_view.as_mut() {
+            if view.select_region(start, end, rows) {
+                self.focus = Focus::Source;
+            }
+        }
+    }
+
+    /// Keep the Source cursor inside the horizontally scrolled viewport.
+    pub(crate) fn ensure_source_col_visible(&mut self) {
+        let Some(view) = &self.source_view else {
+            return;
+        };
+        let l = self.layout();
+        let code = crate::ui::source::code_rect(&l);
+        let gutter = crate::ui::source::gutter_width(view) as usize;
+        let vbar = crate::ui::source::scrollbar_col(&l, view).is_some();
+        let text_w = (code.width as usize).saturating_sub(gutter + usize::from(vbar));
+        let content = view
+            .lines
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0);
+        let max = content.saturating_sub(text_w);
+        let col = view.col;
+        let h = self.source_h_scroll.min(max);
+        let h = if col < h {
+            col
+        } else if text_w > 0 && col >= h + text_w {
+            (col + 1).saturating_sub(text_w)
+        } else {
+            h
+        };
+        self.source_h_scroll = h.min(max);
+    }
+
+    /// Called on idle ticks: auto-scroll a Source selection that is dragged
+    /// beyond the visible code area so more text can be selected.
+    pub fn tick_source_drag(&mut self) {
+        let Some(drag) = self.dragging else {
+            return;
+        };
+        if drag.mode != DragMode::SourceSel {
+            return;
+        }
+        let rect = crate::ui::source::code_rect(&self.layout());
+        let rows = rect.height.saturating_sub(1);
+        if rows == 0 {
+            return;
+        }
+        if drag.row < rect.y as usize {
+            self.scroll_source(-1);
+            let line = self
+                .source_view
+                .as_ref()
+                .map(|view| view.scroll)
+                .unwrap_or(0);
+            self.extend_source_selection_to(line, 0);
+        } else if drag.row >= rect.bottom() as usize {
+            self.scroll_source(1);
+            let line = self
+                .source_view
+                .as_ref()
+                .map(|view| view.scroll + rows as usize - 1)
+                .unwrap_or(0);
+            self.extend_source_selection_to(line, usize::MAX);
         }
     }
 
@@ -909,6 +1054,87 @@ impl App {
         true
     }
 
+    /// Double-click on a waveform: select the instance that owns the signal
+    /// and move the Source cursor to the logic that drives it - its drivers in
+    /// its own module, the parent's port connection for input ports, or its
+    /// declaration as a last resort.
+    pub fn jump_to_driver(&mut self, sig: usize) {
+        let Some(signal) = self.wf.as_ref().and_then(|wf| wf.signals.get(sig)).cloned() else {
+            return;
+        };
+        // A bit chunk or element is driven by the bus it came from.
+        let mut base_sig = sig;
+        while let Some(parent) = self
+            .wf
+            .as_ref()
+            .and_then(|wf| wf.signals.get(base_sig))
+            .and_then(|signal| signal.parent)
+        {
+            base_sig = parent;
+        }
+        let name = self
+            .wf
+            .as_ref()
+            .and_then(|wf| wf.signals.get(base_sig))
+            .map(|signal| {
+                signal
+                    .name
+                    .split('[')
+                    .next()
+                    .unwrap_or(&signal.name)
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let scope = signal.scope.clone();
+
+        let mut module = String::new();
+        let mut drivers: Option<(Vec<String>, usize)> = None;
+        let mut decl: Option<(Vec<String>, usize)> = None;
+        if let Some(rtl) = self.rtl.as_ref() {
+            if let Some(def) = rtl.module_at_scope(&scope) {
+                module = def.name.clone();
+                if let Some(trace) = rtl.trace(&module, &name) {
+                    if let Some(location) = trace.drivers.first() {
+                        drivers = Some((scope.clone(), location.line));
+                    }
+                    if let Some(location) = trace.decl.as_ref() {
+                        decl = Some((scope.clone(), location.line));
+                    }
+                }
+            }
+        }
+        // An input port is driven by the parent's port connection.
+        let mut port_driver: Option<(Vec<String>, usize)> = None;
+        if !scope.is_empty() {
+            let parent = &scope[..scope.len() - 1];
+            let instance = scope.last().cloned().unwrap_or_default();
+            if let Some(rtl) = self.rtl.as_ref() {
+                if let Some(def) = rtl.module_at_scope(parent) {
+                    if let Some(inst) = def.instances.iter().find(|inst| inst.name == instance) {
+                        if let Some((_, line)) = inst.ports.iter().find(|(port, _)| {
+                            port == &name || crate::rtl::scan::signal_name_matches(port, &name)
+                        }) {
+                            module = def.name.clone();
+                            port_driver = Some((parent.to_vec(), *line));
+                        }
+                    }
+                }
+            }
+        }
+
+        let Some((scope, line)) = drivers.or(port_driver).or(decl) else {
+            self.msg(format!("no driver found for {name}"));
+            return;
+        };
+        if !self.switch_scope(&scope) {
+            self.msg(format!("no driver found for {name}"));
+            return;
+        }
+        self.set_source_cursor(line.saturating_sub(1), 0);
+        self.focus = Focus::Source;
+        self.msg(format!("{name}: driver at {module}:{line}"));
+    }
+
     /// Find a dumped signal in exactly this scope (no descendant or global
     /// fallbacks), comparing the plain and the range-stripped name.
     fn find_signal_exact(&self, scope: &[String], name: &str) -> Option<usize> {
@@ -948,7 +1174,7 @@ impl App {
         let mut last = Radix::Bin;
         for &idx in &targets {
             let next = self.radix_for(idx).next();
-            self.radix.insert(idx, next);
+            self.apply_radix(idx, next);
             last = next;
         }
         if targets.len() == 1 {
@@ -961,6 +1187,37 @@ impl App {
                 last.name()
             ));
         }
+    }
+
+    /// Set the radix of a signal; array signals pass it on to their elements.
+    pub(crate) fn apply_radix(&mut self, idx: usize, radix: Radix) {
+        let mut stack = vec![idx];
+        while let Some(node) = stack.pop() {
+            self.radix.insert(node, radix);
+            let children: Vec<usize> = self
+                .wf
+                .as_ref()
+                .map(|wf| {
+                    wf.signals
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, signal)| signal.parent == Some(node))
+                        .map(|(index, _)| index)
+                        .collect()
+                })
+                .unwrap_or_default();
+            stack.extend(children);
+        }
+        self.refresh_arrays();
+    }
+
+    /// Re-format the brace values of array signals with the current radixes.
+    fn refresh_arrays(&mut self) {
+        let radix = std::mem::take(&mut self.radix);
+        if let Some(wf) = self.wf.as_mut() {
+            wf.rebuild_array_texts(&radix);
+        }
+        self.radix = radix;
     }
 
     /// Label of the current time base for the shortcut bar.
@@ -1070,6 +1327,12 @@ pub fn set_title(path: &str) {
     );
 }
 
+/// Idle tick from the event loop: time-based interactions keep running while
+/// no input events arrive (e.g. auto-scrolling a dragged Source selection).
+pub fn tick(app: &mut App) {
+    app.tick_source_drag();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1126,6 +1389,30 @@ mod tests {
         app.apply_parsed(dir.join("counter.fsdb").display().to_string(), out);
         let set = app.sources.as_ref().expect("discovered sources");
         assert!(set.files.iter().any(|file| file.ends_with("top.sv")));
+    }
+
+    #[test]
+    fn filelist_dialog_uses_the_browser() {
+        let dir =
+            std::env::temp_dir().join(format!("waverdi_app_fl_dialog_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("top.sv");
+        std::fs::write(&src, "module top; endmodule\n").unwrap();
+        let list = dir.join("files.f");
+        std::fs::write(&list, "top.sv\n").unwrap();
+
+        let mut app = App::new();
+        app.use_gui = false;
+        crate::app::Action::LoadFilelist.run(&mut app);
+        assert_eq!(app.dialog, Some(Dialog::Open));
+        assert!(app.browser.is_some());
+        app.browser_load(&list.display().to_string());
+        assert_eq!(app.dialog, None);
+        assert!(app.sources_explicit);
+        assert_eq!(app.sources.as_ref().unwrap().files, vec![src]);
+        // The mode was reset: the next pick loads a waveform again.
+        assert!(matches!(app.browser_mode, BrowserMode::Waveform));
     }
 
     #[test]
