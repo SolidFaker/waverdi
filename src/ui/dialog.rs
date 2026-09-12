@@ -217,7 +217,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
     let mut cursor = None;
     {
         let buf = frame.buffer_mut();
-        buf.set_style(l.area, Style::new().bg(t.overlay));
+        dim_outside(buf, l.area, area);
         Clear.render(area, buf);
         buf.set_style(area, Style::new().bg(t.popup_bg));
         let mut block = Block::bordered()
@@ -388,6 +388,39 @@ fn draw_settings(buf: &mut Buffer, area: Rect, app: &App) {
         "↑/↓ select   ←/→ change   Enter next   r reset   Esc close",
         Style::new().fg(t.dim),
     );
+}
+
+/// Dim everything outside the dialog in place, preserving each pane's own
+/// colours: the waveform background stays dark, the Signal List stays light.
+/// This keeps the panes independent of any single "overlay" theme colour.
+fn dim_outside(buf: &mut Buffer, screen: Rect, dialog: Rect) {
+    for y in screen.y..screen.bottom() {
+        for x in screen.x..screen.right() {
+            if x >= dialog.x && x < dialog.right() && y >= dialog.y && y < dialog.bottom() {
+                continue;
+            }
+            let Some(cell) = buf.cell_mut((x, y)) else {
+                continue;
+            };
+            if let Some(bg) = dim_color(cell.bg) {
+                cell.set_bg(bg);
+            }
+            if let Some(fg) = dim_color(cell.fg) {
+                cell.set_fg(fg);
+            }
+        }
+    }
+}
+
+/// Scale a colour down to 55% (RGB and plain white), leaving the terminal
+/// default and named colours untouched.
+fn dim_color(color: Color) -> Option<Color> {
+    let scale = |value: u8| (value as f32 * 0.55) as u8;
+    match color {
+        Color::Rgb(r, g, b) => Some(Color::Rgb(scale(r), scale(g), scale(b))),
+        Color::White => Some(Color::Rgb(150, 150, 150)),
+        _ => None,
+    }
 }
 
 fn draw_browser(buf: &mut Buffer, area: Rect, app: &App) {

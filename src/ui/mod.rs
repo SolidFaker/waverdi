@@ -483,6 +483,33 @@ mod tests {
     }
 
     #[test]
+    fn dialog_overlay_preserves_pane_backgrounds() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.set_display(vec![0]);
+        app.set_theme_kind(crate::theme::ThemeKind::Mixed);
+        app.open_dialog(crate::app::Dialog::Keys);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        let lum = |c: ratatui::style::Color| match c {
+            ratatui::style::Color::Rgb(r, g, b) => r as u32 + g as u32 + b as u32,
+            _ => 0,
+        };
+        // Outside the dialog the waveform stays dark and the list stays light:
+        // the overlay dims each pane instead of repainting one theme colour.
+        let wave = buffer.cell((l.wave.right() - 2, l.wave.y + 2)).unwrap().bg;
+        let list = buffer.cell((l.list.x + 1, l.list.y)).unwrap().bg;
+        assert!(lum(wave) < lum(list), "wave {wave:?} vs list {list:?}");
+        assert_ne!(wave, crate::theme::Theme::LIGHT.popup_bg);
+        assert!(lum(wave) < lum(crate::theme::Theme::DARK.bg) + 32);
+    }
+
+    #[test]
     fn dialogs_render() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();
