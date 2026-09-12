@@ -37,13 +37,13 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
             .map(|wf| wf.tree.nodes[wf.tree.root].name.clone())
     });
     if let Some(path) = selected {
-        text::put(
-            buf,
-            inner.x,
-            inner.y + 1,
-            &format!("instance: {path}"),
-            Style::new().fg(t.path),
-        );
+        let module = app.selected_scope_module().unwrap_or_default();
+        let label = if module.is_empty() || module == path {
+            format!("instance: {path}")
+        } else {
+            format!("instance: {path}   [module {module}]")
+        };
+        text::put(buf, inner.x, inner.y + 1, &label, Style::new().fg(t.path));
     }
     text::put(
         buf,

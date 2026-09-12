@@ -610,6 +610,16 @@ impl App {
         }
     }
 
+    /// Defining module of the instance selected in the Instance pane (FSDB).
+    pub fn selected_scope_module(&self) -> Option<String> {
+        let id = match self.tree_visible().get(self.tree_sel) {
+            Some(TreeNode::Scope { id, .. }) => *id,
+            _ => return None,
+        };
+        let module = self.wf.as_ref()?.tree.module_of(id).to_string();
+        (!module.is_empty()).then_some(module)
+    }
+
     /// Enter on the tree: toggle scopes, add signals to the waveform.
     pub fn tree_enter(&mut self) {
         let nodes = self.tree_visible();

@@ -42,7 +42,12 @@ struct Cli {
 fn print_tree(wf: &Waveform) {
     fn rec(wf: &Waveform, id: usize, depth: usize) {
         let node = &wf.tree.nodes[id];
-        println!("{}{}", "  ".repeat(depth), node.name);
+        let module = if node.module.is_empty() || node.module == node.name {
+            String::new()
+        } else {
+            format!("  ({})", node.module)
+        };
+        println!("{}{}{}", "  ".repeat(depth), node.name, module);
         for &sig in &node.signals {
             let signal = &wf.signals[sig];
             println!(

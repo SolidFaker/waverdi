@@ -1,4 +1,4 @@
-use crate::dump::ParseOut;
+﻿use crate::dump::ParseOut;
 use crate::waveform::{Change, ScopeTree, SigKind, Signal, TimeScale, Value, Waveform};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -86,7 +86,7 @@ fn visit_item(
     match item {
         ItemRef::Scope(scope_ref) => {
             let name = hierarchy[scope_ref].name(hierarchy).to_string();
-            let id = tree.add_scope(parent, name.clone());
+            let id = tree.add_scope(parent, name.clone(), String::new());
             scope.push(name);
             for child in hierarchy[scope_ref].items(hierarchy) {
                 visit_item(source, hierarchy, child, id, tree, signals, scope, cache);

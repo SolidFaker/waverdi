@@ -372,7 +372,7 @@ fn var_type_name(var_type: u32) -> String {
 extern "C" fn on_scope(
     user: *mut c_void,
     name: *const c_char,
-    _module: *const c_char,
+    module: *const c_char,
     time_unit: *const c_char,
     _scope_type: u32,
 ) {
@@ -388,9 +388,14 @@ extern "C" fn on_scope(
     let name = unsafe { CStr::from_ptr(name) }
         .to_string_lossy()
         .into_owned();
+    // The defining module of the instance, e.g. `dut` -> `counter`; empty for
+    // old dumps that do not record it. This is the anchor for the RTL view.
+    let module = unsafe { CStr::from_ptr(module) }
+        .to_string_lossy()
+        .into_owned();
     let tree = collector.tree.get_or_insert_with(ScopeTree::new);
     let parent = collector.scope_nodes.last().copied().unwrap_or(tree.root);
-    let id = tree.add_scope(parent, name.clone());
+    let id = tree.add_scope(parent, name.clone(), module);
     collector.scope_names.push(name);
     collector.scope_nodes.push(id);
     collector.current_node = id;

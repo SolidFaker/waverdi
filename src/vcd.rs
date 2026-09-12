@@ -1,4 +1,4 @@
-use crate::dump::ParseOut;
+﻿use crate::dump::ParseOut;
 use crate::waveform::{Change, ScopeTree, SigKind, Signal, Ticks, TimeScale, Value, Waveform};
 use std::collections::HashMap;
 use std::path::Path;
@@ -209,7 +209,7 @@ impl Parser {
                 let toks = split_ws(rest);
                 let name = str(toks.get(1).copied().unwrap_or(b"")).to_string();
                 let parent = *self.stack.last().unwrap_or(&self.wf.tree.root);
-                let id = self.wf.tree.add_scope(parent, name.clone());
+                let id = self.wf.tree.add_scope(parent, name.clone(), String::new());
                 self.stack.push(id);
                 self.cur_scope.push(name);
                 Ok((skip_to_end(lines, i)).min(lines.len()).saturating_add(1))
