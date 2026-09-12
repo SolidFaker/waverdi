@@ -2,3 +2,6 @@
 /reference
 /.opencode/
 /.ai
+/.cache
+/.vscode
+/log.txt
