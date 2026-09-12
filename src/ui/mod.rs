@@ -560,9 +560,13 @@ mod tests {
         app.expanded.insert(1);
         app.tree_sel = 2;
         app.sync_source();
-        app.set_source_cursor(2, 0);
-        app.begin_source_selection();
-        app.extend_source_selection_to(2);
+        let col = {
+            let view = app.source_view.as_ref().unwrap();
+            view.lines[2].find("count").unwrap()
+        };
+        app.set_source_cursor(2, col);
+        app.select_source_word();
+        app.set_source_cursor(2, 0); // move the cursor off the selected word
         app.focus = crate::app::Focus::Source;
 
         let backend = TestBackend::new(100, 40);
@@ -572,12 +576,17 @@ mod tests {
         let l = app.layout();
         let rect = super::source::code_rect(&l);
         let view = app.source_view.as_ref().unwrap();
-        let col = view.lines[2].find("count").unwrap();
         let gutter = super::source::gutter_width(view);
-        let cell = buffer
+        let count_cell = buffer
             .cell((rect.x + gutter + col as u16, rect.y + 2))
             .unwrap();
-        assert_eq!(cell.bg, crate::theme::Theme::DARK.src_signal);
+        assert_eq!(count_cell.bg, crate::theme::Theme::DARK.src_signal);
+        // The neighbouring signal on the same line is not selected.
+        let next_col = view.lines[2].find("next").unwrap();
+        let next_cell = buffer
+            .cell((rect.x + gutter + next_col as u16, rect.y + 2))
+            .unwrap();
+        assert_ne!(next_cell.bg, crate::theme::Theme::DARK.src_signal);
     }
 
     #[test]

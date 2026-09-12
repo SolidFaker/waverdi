@@ -58,7 +58,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
 
     // Header: selected instance, its module and the source file.
     let selected = app.selected_scope_path();
-    let module = app.selected_scope_module().unwrap_or_default();
+    let module = app.selected_module_name().unwrap_or_default();
     let file = app.source_view.as_ref().and_then(|view| {
         view.file
             .file_name()
@@ -142,49 +142,49 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
             break;
         };
         let y = code.y + row as u16;
-        let selected = view.is_line_selected(index);
-        let bg = if selected {
-            t.row_sel_bg
-        } else if focused && index == view.line {
+        let interval = view.selection_interval(index);
+        let bg = if focused && index == view.line {
             t.list_header_bg
         } else if index.is_multiple_of(2) {
             t.row_alt
         } else {
             t.bg
         };
-        let word_range = view
-            .word
-            .filter(|(line, _, _)| *line == index)
-            .map(|(_, start, end)| (start, end));
         let number = format!("{:>digits$} ", index + 1);
         text::put(buf, code.x, y, &number, Style::new().fg(t.dim).bg(bg));
 
         let mut x = code.x + digits as u16 + 1;
         let mut col = 0usize;
+        let active = view.module_at_line(index) == view.module;
         'line: for span in spans {
-            let fg = match span.kind {
-                HlKind::Plain => t.text,
-                HlKind::Keyword => t.src_keyword,
-                HlKind::Number => t.src_number,
-                HlKind::String => t.src_string,
-                HlKind::Comment => t.src_comment,
-                HlKind::Directive => t.src_directive,
-                HlKind::Signal => t.src_signal,
+            // Code of other modules in the same file is shown dimmed.
+            let fg = if !active {
+                t.dim
+            } else {
+                match span.kind {
+                    HlKind::Plain => t.text,
+                    HlKind::Keyword => t.src_keyword,
+                    HlKind::Number => t.src_number,
+                    HlKind::String => t.src_string,
+                    HlKind::Comment => t.src_comment,
+                    HlKind::Directive => t.src_directive,
+                    HlKind::Signal => t.src_signal,
+                }
             };
             for ch in span.text.chars() {
                 if x >= code.right() {
                     break 'line;
                 }
+                let in_sel = interval
+                    .map(|(from, to)| col >= from && col < to)
+                    .unwrap_or(false);
                 let (fg, bg) = if focused && index == view.line && col == view.col {
                     (t.bg, t.cursor)
-                } else if word_range
-                    .map(|(start, end)| col >= start && col < end)
-                    .unwrap_or(false)
-                {
-                    (t.bg, t.accent)
-                } else if selected && span.kind == HlKind::Signal {
-                    // Signal names inside a line selection stand out.
+                } else if in_sel && span.kind == HlKind::Signal {
+                    // Selected signal names stand out.
                     (t.bg, t.src_signal)
+                } else if in_sel {
+                    (fg, t.row_sel_bg)
                 } else {
                     (fg, bg)
                 };
@@ -207,11 +207,9 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
             .as_ref()
             .map(|wf| wf.signals[sig].name.clone())
             .unwrap_or_default();
-        if let Some(trace) = app
-            .rtl
-            .as_ref()
-            .and_then(|db| db.trace(&view.module, &name))
-        {
+        // The cursor may sit in another module of the same file.
+        let module = view.module_at_line(view.line);
+        if let Some(trace) = app.rtl.as_ref().and_then(|db| db.trace(module, &name)) {
             let lines = |locations: &[crate::rtl::scan::Location]| {
                 locations
                     .iter()
@@ -222,7 +220,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
             let always = app
                 .rtl
                 .as_ref()
-                .and_then(|db| db.module(&view.module))
+                .and_then(|db| db.module(module))
                 .and_then(|def| {
                     trace.drivers.iter().find_map(|loc| {
                         def.always

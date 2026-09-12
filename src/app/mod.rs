@@ -426,15 +426,31 @@ impl App {
 
     /// Reload the Source pane when the selected instance changed.
     pub fn sync_source(&mut self) {
-        let module = self.selected_scope_module();
+        let module = self.selected_module_name();
         if module == self.source_view.as_ref().map(|view| view.module.clone()) {
             return;
         }
         let loaded = module.and_then(|name| {
-            let def = self.rtl.as_ref()?.module(&name)?;
-            SourceView::load(def)
+            let rtl = self.rtl.as_ref()?;
+            let def = rtl.module(&name)?;
+            SourceView::load(def, rtl)
         });
         self.source_view = loaded;
+    }
+
+    /// Module of the selected instance: recorded by the dump (FSDB) or, for
+    /// VCD/FST, inferred by walking the elaborated RTL design hierarchy.
+    /// Tool-generated scopes (`unnamed$$_0`, `$attribute_root`) that the dump
+    /// labels with their own name fall back to the enclosing module.
+    pub fn selected_module_name(&self) -> Option<String> {
+        let rtl = self.rtl.as_ref();
+        if let Some(name) = self.selected_scope_module() {
+            if rtl.map(|db| db.module(&name).is_some()).unwrap_or(false) {
+                return Some(name);
+            }
+        }
+        let steps = self.selected_scope_steps();
+        rtl?.module_at_scope(&steps).map(|def| def.name.clone())
     }
 
     fn source_rows(&self) -> usize {
@@ -471,42 +487,66 @@ impl App {
 
     /// Add the identifier under the Source cursor to the Signal List.
     pub fn add_source_word(&mut self) {
-        let Some((word, module)) = self.source_view.as_ref().and_then(|view| {
-            view.word_at_cursor()
-                .map(|word| (word, view.module.clone()))
+        let Some((word, chain, module)) = self.source_view.as_ref().and_then(|view| {
+            let (start, _) = view.word_span_at_cursor()?;
+            let word = view.word_at_cursor()?;
+            Some((
+                word,
+                view.qualifier_chain(view.line, start),
+                view.module_at_line(view.line).to_string(),
+            ))
         }) else {
             self.msg("source: no signal name under the cursor (a: add)");
             return;
         };
-        match self.find_signal_in_scope(&word) {
+        match self.resolve_source_signal(&module, &chain, &word) {
             Some(index) => {
                 self.add_signal(index);
                 self.focus = Focus::Source;
-                self.msg(format!("added {word} from {module} to the Signal List"));
+                let switched = self.switch_to_module(&module);
+                let suffix = if switched { ", switched hierarchy" } else { "" };
+                self.msg(format!(
+                    "added {word} from {module} to the Signal List{suffix}"
+                ));
             }
             None => self.msg(format!("source: {word} was not dumped in this scope")),
         }
     }
 
-    /// Start a source line selection at the cursor (mouse down).
+    /// Start a source selection at the cursor (mouse down).
     pub fn begin_source_selection(&mut self) {
         if let Some(view) = self.source_view.as_mut() {
-            view.begin_line_selection();
+            view.begin_selection();
         }
     }
 
-    /// Extend the source line selection by one row (Shift+arrows).
+    /// Extend the source selection vertically (Shift+arrows).
     pub fn extend_source_selection(&mut self, delta: i64) {
         let rows = self.source_rows();
         if let Some(view) = self.source_view.as_mut() {
-            view.extend_line_selection(delta, rows);
+            view.extend_selection_by(delta, 0, rows);
         }
     }
 
-    /// Extend the source line selection to a concrete line (mouse drag).
-    pub fn extend_source_selection_to(&mut self, line: usize) {
+    /// Extend the source selection horizontally (Shift+Left/Right).
+    pub fn extend_source_selection_h(&mut self, delta: i64) {
+        let rows = self.source_rows();
         if let Some(view) = self.source_view.as_mut() {
-            view.select_lines(line);
+            view.extend_selection_by(0, delta, rows);
+        }
+    }
+
+    /// Extend the source selection to a concrete character (mouse drag).
+    pub fn extend_source_selection_to(&mut self, line: usize, col: usize) {
+        if let Some(view) = self.source_view.as_mut() {
+            view.extend_selection_to(line, col);
+        }
+    }
+
+    /// Finish a mouse selection: a plain click picks the word under it.
+    pub fn finish_source_selection(&mut self) {
+        if let Some(view) = self.source_view.as_mut() {
+            view.finish_selection();
         }
     }
 
@@ -517,56 +557,69 @@ impl App {
         }
     }
 
-    /// Signal names covered by the current Source selection (deduplicated,
-    /// only identifiers that are declared signals of the module).
-    pub fn source_selection_words(&self) -> Vec<String> {
+    /// Dump signals covered by the current Source selection, resolved through
+    /// the RTL design AST (deduplicated, in selection order). Also returns the
+    /// selected names that could not be resolved to a dumped signal, and the
+    /// module of the last resolved one (the hierarchy to switch to).
+    pub fn source_selection_signals(&self) -> (Vec<usize>, Vec<String>, Option<String>) {
         let Some(view) = &self.source_view else {
-            return Vec::new();
+            return (Vec::new(), Vec::new(), None);
         };
-        if let Some((line, start, end)) = view.word {
-            let word: String = view
-                .lines
-                .get(line)
-                .map(|text| text.chars().skip(start).take(end - start).collect())
-                .unwrap_or_default();
-            return (!word.is_empty()).then_some(word).into_iter().collect();
-        }
-        let Some((first, last)) = view.sel else {
-            return Vec::new();
+        let Some((first, last)) = view.sel.map(|(start, end)| (start.0, end.0)) else {
+            return (Vec::new(), Vec::new(), None);
         };
-        let mut words = Vec::new();
+        let mut signals = Vec::new();
+        let mut missing = Vec::new();
+        let mut last_module = None;
         for line in first..=last {
+            let Some((from, to)) = view.selection_interval(line) else {
+                continue;
+            };
             let Some(spans) = view.spans.get(line) else {
                 continue;
             };
+            let module = view.module_at_line(line).to_string();
+            let mut col = 0usize;
             for span in spans {
-                if span.kind == crate::rtl::view::HlKind::Signal && !words.contains(&span.text) {
-                    words.push(span.text.clone());
+                let span_start = col;
+                let span_end = col + span.text.chars().count();
+                col = span_end;
+                if span_end <= from || span_start >= to {
+                    continue;
+                }
+                if span.kind != crate::rtl::view::HlKind::Signal {
+                    continue;
+                }
+                let chain = view.qualifier_chain(line, span_start);
+                match self.resolve_source_signal(&module, &chain, &span.text) {
+                    Some(index) => {
+                        if !signals.contains(&index) {
+                            signals.push(index);
+                        }
+                        last_module = Some(module.clone());
+                    }
+                    None => {
+                        if !missing.contains(&span.text) {
+                            missing.push(span.text.clone());
+                        }
+                    }
                 }
             }
         }
-        words
+        (signals, missing, last_module)
     }
 
     /// `Ctrl+W` / context menu: add every selected source signal at once.
     pub fn add_source_selection(&mut self) {
-        let words = self.source_selection_words();
-        if words.is_empty() {
+        let (signals, missing, module) = self.source_selection_signals();
+        if signals.is_empty() && missing.is_empty() {
             self.msg("source: select signal names first (drag or Shift+arrows)");
             return;
         }
         let mut added = 0usize;
-        let mut missing = Vec::new();
-        for word in &words {
-            match self.find_signal_in_scope(word) {
-                Some(index) => {
-                    if !self.display.contains(&index) {
-                        self.add_signal(index);
-                        added += 1;
-                    }
-                }
-                None => missing.push(word.clone()),
-            }
+        for index in signals {
+            self.add_signal(index);
+            added += 1;
         }
         self.focus = Focus::Source;
         if !missing.is_empty() {
@@ -578,6 +631,13 @@ impl App {
         if added > 0 {
             self.msg(format!("added {added} signal(s) from the source selection"));
         }
+        if let Some(module) = module {
+            if self.switch_to_module(&module) {
+                self.msg(format!(
+                    "source: switched hierarchy to the {module} instance"
+                ));
+            }
+        }
     }
 
     /// Instance scope of the selected tree node (without the design root).
@@ -587,47 +647,125 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Find the dumped signal matching `name` in the selected instance.
+    /// Resolve a signal reference from the Source pane through the RTL AST.
     ///
-    /// FSDB stores vector names with their range (`count[7:0]`), so the plain
-    /// identifier from the source is matched against the base name too.
-    fn find_signal_in_scope(&self, name: &str) -> Option<usize> {
-        fn base(signal: &str) -> &str {
-            signal.split('[').next().unwrap_or(signal)
-        }
-        let scope = self.selected_scope_steps();
-        let wf = self.wf.as_ref()?;
-        let in_scope =
-            |sig: &crate::waveform::Signal| !scope.is_empty() && sig.scope.starts_with(&scope);
-        // Exact name first, then the range-stripped base name.
-        for wanted in [name, base(name)] {
-            if let Some(index) = wf
-                .signals
-                .iter()
-                .position(|sig| sig.name == wanted && sig.scope == scope)
-            {
-                return Some(index);
+    /// The qualifier chain (`u_dut.count`) is walked through the instances of
+    /// the module, and the plain name must be declared there. The dump is then
+    /// matched by *exact* scope, so equally named signals in different
+    /// hierarchies never collide. FSDB stores ranges (`count[7:0]`), so base
+    /// names are compared as well.
+    ///
+    /// Code from another module in the same file belongs to another instance:
+    /// its scope is found in the elaborated design instead of the active one.
+    fn resolve_source_signal(&self, module: &str, chain: &[String], name: &str) -> Option<usize> {
+        let Some(rtl) = self.rtl.as_ref() else {
+            // No AST at all: trust the dump at the exact scope.
+            return chain
+                .is_empty()
+                .then(|| self.find_signal_exact(&self.selected_scope_steps(), name))
+                .flatten();
+        };
+        let (path, signal) = rtl.resolve_reference(module, chain, name)?;
+        let active = self
+            .source_view
+            .as_ref()
+            .map(|view| view.module.as_str())
+            .unwrap_or_default();
+        let mut scope = if module == active {
+            self.selected_scope_steps()
+        } else {
+            self.foreign_scope(module)?
+        };
+        scope.extend(path);
+        self.find_signal_exact(&scope, &signal)
+    }
+
+    /// Instance scope of `module` to use when adding a signal from code that
+    /// belongs to another module of the same file. Prefers instances below the
+    /// active scope, then parents, then siblings in the same top.
+    fn foreign_scope(&self, module: &str) -> Option<Vec<String>> {
+        let rtl = self.rtl.as_ref()?;
+        let active = self.selected_scope_steps();
+        let mut best: Option<(u32, Vec<String>)> = None;
+        for (path, name) in rtl.placements() {
+            if name != module {
+                continue;
             }
-            let all: Vec<usize> = wf
-                .signals
-                .iter()
-                .enumerate()
-                .filter(|(_, sig)| in_scope(sig) && base(&sig.name) == wanted)
-                .map(|(index, _)| index)
-                .collect();
-            if all.len() == 1 {
-                return Some(all[0]);
+            let score = if active.is_empty() || path.starts_with(&active) {
+                (path.len() - active.len()) as u32
+            } else if active.starts_with(&path) {
+                (active.len() - path.len()) as u32 + 100
+            } else if path.first() == active.first() {
+                path.len() as u32 + 200
+            } else {
+                continue;
+            };
+            if best.as_ref().map(|(best, _)| score < *best).unwrap_or(true) {
+                best = Some((score, path));
             }
         }
-        // Last resort: a unique base-name match anywhere in the dump.
-        let all: Vec<usize> = wf
-            .signals
+        best.map(|(_, path)| path)
+    }
+
+    /// Select the instance of `module` in the Instance pane when the added
+    /// signal came from an inactive module; the Source pane follows.
+    fn switch_to_module(&mut self, module: &str) -> bool {
+        if self.source_view.as_ref().map(|view| view.module.as_str()) == Some(module) {
+            return false;
+        }
+        let Some(scope) = self.foreign_scope(module) else {
+            return false;
+        };
+        self.switch_scope(&scope)
+    }
+
+    /// Move the Instance pane selection to a dump scope, expanding ancestors.
+    fn switch_scope(&mut self, scope: &[String]) -> bool {
+        let (node, ancestors) = {
+            let Some(wf) = self.wf.as_ref() else {
+                return false;
+            };
+            let mut node = wf.tree.root;
+            let mut ancestors = Vec::new();
+            for step in scope {
+                let Some(child) = wf.tree.nodes[node]
+                    .children
+                    .iter()
+                    .copied()
+                    .find(|child| wf.tree.nodes[*child].name == *step)
+                else {
+                    return false;
+                };
+                ancestors.push(node);
+                node = child;
+            }
+            (node, ancestors)
+        };
+        self.expanded.extend(ancestors);
+        let Some(index) = self
+            .tree_visible()
             .iter()
-            .enumerate()
-            .filter(|(_, sig)| base(&sig.name) == name)
-            .map(|(index, _)| index)
-            .collect();
-        (all.len() == 1).then(|| all[0])
+            .position(|entry| matches!(entry, TreeNode::Scope { id, .. } if *id == node))
+        else {
+            return false;
+        };
+        self.tree_sel = index;
+        self.tree_scroll_to_sel();
+        self.sync_source();
+        true
+    }
+
+    /// Find a dumped signal in exactly this scope (no descendant or global
+    /// fallbacks), comparing the plain and the range-stripped name.
+    fn find_signal_exact(&self, scope: &[String], name: &str) -> Option<usize> {
+        fn base(text: &str) -> &str {
+            text.split('[').next().unwrap_or(text)
+        }
+        let wf = self.wf.as_ref()?;
+        let want = base(name);
+        wf.signals.iter().position(|sig| {
+            sig.scope.as_slice() == scope && (sig.name == name || base(&sig.name) == want)
+        })
     }
 
     /// Open a dialog, resetting its body scroll.

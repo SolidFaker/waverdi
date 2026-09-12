@@ -335,7 +335,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Left => {
             if app.focus == Focus::Source {
-                app.move_source_cursor(0, -1);
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    app.extend_source_selection_h(-1);
+                } else {
+                    app.move_source_cursor(0, -1);
+                }
                 return false;
             }
             if let Some(ListRow::Group {
@@ -358,7 +362,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Right => {
             if app.focus == Focus::Source {
-                app.move_source_cursor(0, 1);
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    app.extend_source_selection_h(1);
+                } else {
+                    app.move_source_cursor(0, 1);
+                }
                 return false;
             }
             if let Some(ListRow::Group {
@@ -1007,7 +1015,7 @@ mod tests {
         // Select the always block lines (clk / en / count with duplicates).
         app.set_source_cursor(1, 0);
         app.begin_source_selection();
-        app.extend_source_selection_to(3);
+        app.extend_source_selection_to(3, usize::MAX);
         app.focus = Focus::Source;
         handle_key(
             &mut app,
@@ -1015,6 +1023,12 @@ mod tests {
         );
         assert_eq!(app.display, vec![0, 2, 1]);
         assert_eq!(app.focus, Focus::Source);
+        // The same operation deduplicates, a repeated one adds again.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.display, vec![0, 2, 1, 0, 2, 1]);
 
         // The right-click menu offers the same action for a word selection.
         app.clear_all();
@@ -1026,6 +1040,176 @@ mod tests {
         app.open_context_menu(crate::app::CtxTarget::Source, 5, 5);
         handle_key(&mut app, key(KeyCode::Enter));
         assert_eq!(app.display, vec![2]);
+    }
+
+    #[test]
+    fn same_name_in_another_hierarchy_is_not_confused() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 4 ! count [3:0] $end\n\
+            $scope module dut $end\n\
+            $var wire 4 \" count [3:0] $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\nb0000 !\nb1111 \"\n";
+        let mut app = app_with(vcd);
+        // FSDB stores vector names with their range (`count[3:0]`).
+        for signal in &mut app.wf.as_mut().unwrap().signals {
+            signal.name = "count[3:0]".to_string();
+        }
+        let dir = std::env::temp_dir().join(format!("waverdi_src_scope_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("counter.sv");
+        std::fs::write(
+            &file,
+            "module tb;\n\
+             logic [3:0] count;\n\
+             logic [3:0] x;\n\
+             counter dut(.count(count));\n\
+             assign x = dut.count;\n\
+             endmodule\n\
+             module counter(output logic [3:0] count);\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        // The AST infers the modules (`tb` top, `dut` -> `counter`); no
+        // dump module names are needed.
+        app.expanded.insert(1);
+
+        let add_from = |app: &mut crate::app::App, needle: &str| {
+            let (line, col) = {
+                let view = app.source_view.as_ref().unwrap();
+                let line = view
+                    .lines
+                    .iter()
+                    .position(|line| line.contains(needle))
+                    .unwrap();
+                (line, view.lines[line].rfind("count").unwrap())
+            };
+            app.set_source_cursor(line, col);
+            app.select_source_word();
+            app.add_source_selection();
+        };
+
+        // `count` declared in `counter`/`dut` resolves to tb.dut.count, not
+        // the same-named signal under tb.
+        app.tree_sel = 2;
+        app.sync_source();
+        add_from(&mut app, "module counter");
+        assert_eq!(app.display, vec![1]);
+
+        // A local `count` in tb resolves to tb.count.
+        app.clear_all();
+        app.tree_sel = 1;
+        app.sync_source();
+        add_from(&mut app, "logic [3:0] count;");
+        assert_eq!(app.display, vec![0]);
+
+        // A hierarchical reference `dut.count` walks the RTL AST.
+        app.clear_all();
+        app.tree_sel = 1;
+        app.sync_source();
+        add_from(&mut app, "dut.count");
+        assert_eq!(app.display, vec![1]);
+    }
+
+    #[test]
+    fn adding_from_another_module_switches_the_hierarchy() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 1 ! clk $end\n\
+            $var wire 4 \" count [3:0] $end\n\
+            $scope module dut $end\n\
+            $var wire 4 # count [3:0] $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\nb0000 \"\nb1111 #\n";
+        let mut app = app_with(vcd);
+        // FSDB stores range-suffixed vector names.
+        for signal in &mut app.wf.as_mut().unwrap().signals {
+            if signal.name == "count" {
+                signal.name = "count[3:0]".to_string();
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("waverdi_src_switch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("counter.sv");
+        std::fs::write(
+            &file,
+            "module counter(output logic [3:0] count);\n\
+             assign count = 4'b0;\n\
+             endmodule\n\
+             module tb;\n\
+             logic clk;\n\
+             logic [3:0] count;\n\
+             counter dut(.clk(clk), .count(count));\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.expanded.insert(1);
+        let node_id = |app: &crate::app::App, name: &str| {
+            app.wf
+                .as_ref()
+                .unwrap()
+                .tree
+                .nodes
+                .iter()
+                .position(|node| node.name == name)
+                .unwrap()
+        };
+
+        let cursor_to = |app: &mut crate::app::App, module: &str| {
+            let (line, col) = {
+                let view = app.source_view.as_ref().unwrap();
+                let (line, text) = view
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .find(|(index, text)| {
+                        view.module_at_line(*index) == module
+                            && text.contains("count")
+                            && !text.contains("counter")
+                    })
+                    .unwrap();
+                (line, text.rfind("count").unwrap())
+            };
+            app.set_source_cursor(line, col);
+        };
+
+        // Active scope is tb; `count` in the counter module must resolve to
+        // tb.dut.count and switch the hierarchy to the dut instance.
+        app.tree_sel = 1;
+        app.sync_source();
+        assert_eq!(app.source_view.as_ref().unwrap().module, "tb");
+        cursor_to(&mut app, "counter");
+        app.focus = Focus::Source;
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.display, vec![2]);
+        assert_eq!(app.source_view.as_ref().unwrap().module, "counter");
+        let dut = node_id(&app, "dut");
+        assert!(matches!(
+            app.tree_visible().get(app.tree_sel),
+            Some(crate::app::TreeNode::Scope { id, .. }) if *id == dut
+        ));
+
+        // Now the tb code: adding its own `count` switches back up to tb.
+        app.clear_all();
+        cursor_to(&mut app, "tb");
+        app.focus = Focus::Source;
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.display, vec![1]);
+        assert_eq!(app.source_view.as_ref().unwrap().module, "tb");
+        let tb = node_id(&app, "tb");
+        assert!(matches!(
+            app.tree_visible().get(app.tree_sel),
+            Some(crate::app::TreeNode::Scope { id, .. }) if *id == tb
+        ));
     }
 
     #[test]

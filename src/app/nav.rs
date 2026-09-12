@@ -1,4 +1,4 @@
-﻿use super::{App, Focus, TreeNode};
+use super::{App, Focus, TreeNode};
 use crate::waveform::{Ticks, Waveform};
 use std::collections::HashSet;
 
@@ -279,18 +279,25 @@ impl App {
     }
 
     pub fn add_signal(&mut self, idx: usize) {
-        if self.display.contains(&idx) {
-            return;
-        }
+        // The same signal may be added repeatedly; every add appends a row.
         let group = self.active_group();
         let at = self.group_range(group).end.min(self.display.len());
         self.display_insert(group, at, idx);
         self.grow_groups(group);
-        self.sel_row = self
-            .list_rows()
+        // Select the occurrence that was just inserted.
+        let occurrence = self.display[..=at]
             .iter()
-            .position(|row| matches!(row, ListRow::Signal { sig, .. } if *sig == idx))
-            .or(Some(self.rows_len().saturating_sub(1)));
+            .filter(|&&sig| sig == idx)
+            .count();
+        let mut seen = 0usize;
+        self.sel_row = self.list_rows().iter().position(|row| match row {
+            ListRow::Signal { sig, .. } if *sig == idx => {
+                seen += 1;
+                seen == occurrence
+            }
+            _ => false,
+        });
+        self.sel_row = self.sel_row.or(Some(self.rows_len().saturating_sub(1)));
         self.scroll_to_sel();
         self.focus = Focus::List;
     }
@@ -354,10 +361,49 @@ impl App {
             return;
         }
         match self.selected_row() {
-            Some(ListRow::Signal { sig, .. }) => self.remove_signal(sig),
+            Some(ListRow::Signal { sig, .. }) => {
+                // Remove the occurrence on the selected row, not just the
+                // first one (a signal may be displayed several times).
+                let rank = self
+                    .sel_row
+                    .map(|row| {
+                        let rows = self.list_rows();
+                        let end = (row + 1).min(rows.len());
+                        rows[..end]
+                            .iter()
+                            .filter(
+                                |row| matches!(row, ListRow::Signal { sig: s, .. } if *s == sig),
+                            )
+                            .count()
+                    })
+                    .unwrap_or(1)
+                    .max(1);
+                self.remove_occurrence(sig, rank);
+            }
             Some(ListRow::Group { index, .. }) => self.remove_group(index),
             None => {}
         }
+    }
+
+    /// Remove the `rank`-th displayed occurrence of a signal.
+    fn remove_occurrence(&mut self, sig: usize, rank: usize) {
+        let mut seen = 0usize;
+        let mut position = None;
+        for (index, &s) in self.display.iter().enumerate() {
+            if s == sig {
+                seen += 1;
+                if seen == rank {
+                    position = Some(index);
+                    break;
+                }
+            }
+        }
+        if let Some(position) = position {
+            let group = self.group_of_pos(position);
+            self.display.remove(position);
+            self.groups[group].count = self.groups[group].count.saturating_sub(1);
+        }
+        self.clamp_sel();
     }
 
     pub fn remove_signal(&mut self, sig: usize) {
@@ -697,11 +743,11 @@ mod tests {
         let mut app = app_with(VCD);
         app.add_signal(0);
         app.add_signal(1);
-        app.add_signal(0); // duplicate ignored
-        assert_eq!(app.display, vec![0, 1]);
-        assert_eq!(app.selected_signal(), Some(1));
+        app.add_signal(0); // the same signal may be added again
+        assert_eq!(app.display, vec![0, 1, 0]);
+        assert_eq!(app.selected_signal(), Some(0));
         app.remove_selected();
-        assert_eq!(app.display, vec![0]);
+        assert_eq!(app.display, vec![0, 1]);
         app.clear_all();
         assert!(app.display.is_empty());
         assert_eq!(app.sel_row, None);

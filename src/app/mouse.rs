@@ -118,6 +118,13 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
             false
         }
         MouseEventKind::Up(_) => {
+            if app
+                .dragging
+                .map(|drag| drag.mode == DragMode::SourceSel)
+                .unwrap_or(false)
+            {
+                app.finish_source_selection();
+            }
             app.dragging = None;
             false
         }
@@ -329,16 +336,31 @@ fn mouse_down(
                 .map(source::gutter_width)
                 .unwrap_or(0);
             let text_x = rect.x.saturating_add(gutter);
+            let char_col = col.saturating_sub(text_x) as usize;
             app.focus = Focus::Source;
-            app.set_source_cursor(index, col.saturating_sub(text_x) as usize);
             match btn {
-                MouseButton::Right => app.open_context_menu(CtxTarget::Source, col, row),
-                MouseButton::Left if is_double => app.select_source_word(),
+                MouseButton::Right => {
+                    app.set_source_cursor(index, char_col);
+                    app.open_context_menu(CtxTarget::Source, col, row);
+                }
+                MouseButton::Left if shift => {
+                    // Shift+click extends the previous selection (or the
+                    // cursor position) to the clicked character.
+                    app.extend_source_selection_to(index, char_col);
+                    app.dragging = Some(Drag {
+                        mode: DragMode::SourceSel,
+                        start_x: col,
+                        start_pct: 0.0,
+                        row: 0,
+                    });
+                }
+                MouseButton::Left if is_double => {
+                    app.set_source_cursor(index, char_col);
+                    app.select_source_word();
+                }
                 MouseButton::Left => {
+                    app.set_source_cursor(index, char_col);
                     app.begin_source_selection();
-                    if shift {
-                        app.extend_source_selection_to(index);
-                    }
                     app.dragging = Some(Drag {
                         mode: DragMode::SourceSel,
                         start_x: col,
@@ -636,12 +658,13 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
         }
         DragMode::SourceSel => {
             let rect = source::code_rect(&l);
-            let line = app
-                .source_view
-                .as_ref()
-                .map(|view| view.scroll + row.saturating_sub(rect.y) as usize);
-            if let Some(line) = line {
-                app.extend_source_selection_to(line);
+            let target = app.source_view.as_ref().map(|view| {
+                let line = view.scroll + row.saturating_sub(rect.y) as usize;
+                let gutter = source::gutter_width(view);
+                (line, col.saturating_sub(rect.x + gutter) as usize)
+            });
+            if let Some((line, char_col)) = target {
+                app.extend_source_selection_to(line, char_col);
             }
         }
     }
@@ -861,6 +884,16 @@ mod tests {
         assert_eq!(view.line, line);
         assert_eq!(view.col, col);
         assert_eq!(view.word_at_cursor().as_deref(), Some("count"));
+
+        // Releasing without dragging selects only the clicked signal word.
+        let up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        crate::app::handle_mouse(&mut app, up);
+        assert_eq!(app.source_selection_signals().0, vec![0]);
     }
 
     #[test]
