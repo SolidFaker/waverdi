@@ -12,6 +12,22 @@ pub fn trunc(s: &str, width: usize) -> String {
     }
 }
 
+/// Keep the right end of `s` in `width` cells, adding a leading ellipsis.
+/// Used where the tail carries the meaning (file names, signal names).
+pub fn trunc_left(s: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let len = s.chars().count();
+    if len <= width {
+        return s.to_string();
+    }
+    let skip = len - (width - 1);
+    let mut out = String::from('…');
+    out.extend(s.chars().skip(skip));
+    out
+}
+
 /// Word-wrap into display lines of at most `width` cells. Words longer than
 /// the width are split; an empty input yields one empty line.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -73,7 +89,7 @@ pub fn set_cell(buf: &mut Buffer, x: u16, y: u16, symbol: &str, fg: Color, bg: C
 
 #[cfg(test)]
 mod tests {
-    use super::wrap;
+    use super::{trunc, trunc_left, wrap};
 
     #[test]
     fn wrap_breaks_at_spaces_and_splits_long_words() {
@@ -82,5 +98,15 @@ mod tests {
         assert_eq!(wrap("abcdefgh", 3), vec!["abc", "def", "gh"]);
         assert_eq!(wrap("a b c d", 3), vec!["a b", "c d"]);
         assert_eq!(wrap("", 4), vec![""]);
+    }
+
+    #[test]
+    fn truncation_keeps_the_requested_end() {
+        assert_eq!(trunc("abcdef", 4), "abc…");
+        assert_eq!(trunc_left("abcdef", 4), "…def");
+        assert_eq!(trunc_left("abcdef", 10), "abcdef");
+        assert_eq!(trunc_left("abcdef", 1), "…");
+        assert_eq!(trunc_left("abcdef", 0), "");
+        assert_eq!(trunc_left("wave.fsdb", 9), "wave.fsdb");
     }
 }

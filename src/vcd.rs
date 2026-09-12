@@ -252,6 +252,7 @@ impl Parser {
                         changes: Vec::new(),
                         min: f64::INFINITY,
                         max: f64::NEG_INFINITY,
+                        parent: None,
                     };
                     self.wf.signals.push(sig);
                     self.idmap.insert(id, idx);

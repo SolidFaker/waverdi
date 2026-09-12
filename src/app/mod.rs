@@ -70,6 +70,7 @@ pub(crate) enum DragMode {
     VScroll,
     HScroll,
     TreeScroll,
+    SourceScroll,
     DialogScroll,
     SplitTree,
     SplitList,
@@ -164,6 +165,8 @@ pub struct App {
     pub rtl: Option<RtlDb>,
     /// Highlighted source of the instance selected in the Instance pane.
     pub source_view: Option<SourceView>,
+    /// Last trace line pushed to the log (avoids repeating it every frame).
+    pub(crate) last_source_trace: Option<String>,
     /// True once a filelist was given explicitly (disables auto-discovery).
     pub sources_explicit: bool,
     pending_fit: bool,
@@ -220,6 +223,7 @@ impl App {
             sources: None,
             rtl: None,
             source_view: None,
+            last_source_trace: None,
             sources_explicit: false,
             pending_fit: false,
         };
@@ -421,6 +425,7 @@ impl App {
             }
         }
         self.source_view = None;
+        self.last_source_trace = None;
         self.sync_source();
     }
 
@@ -435,7 +440,71 @@ impl App {
             let def = rtl.module(&name)?;
             SourceView::load(def, rtl)
         });
+        if let Some(view) = &loaded {
+            // The header that used to sit above the code is logged instead.
+            self.msg(format!(
+                "source: {} [module {}] {}",
+                self.selected_scope_steps().join("."),
+                view.module,
+                view.file.display()
+            ));
+        }
         self.source_view = loaded;
+    }
+
+    /// Frame title of the Source pane:
+    /// `Source - tb.u_proc.u_cluster(/path/cluster.sv)`.
+    pub fn source_title(&self) -> Option<String> {
+        let view = self.source_view.as_ref()?;
+        let scope = self.selected_scope_steps().join(".");
+        Some(format!("Source - {scope}({})", view.file.display()))
+    }
+
+    /// Trace line that used to sit below the source code: declaration,
+    /// drivers and loads of the selected Signal List signal in the module
+    /// under the Source cursor.
+    pub fn source_trace_line(&self) -> Option<String> {
+        let view = self.source_view.as_ref()?;
+        let wf = self.wf.as_ref()?;
+        let signal = wf.signals.get(self.selected_signal()?)?.name.clone();
+        let module = view.module_at_line(view.line);
+        let rtl = self.rtl.as_ref()?;
+        let trace = rtl.trace(module, &signal)?;
+        let lines = |locations: &[crate::rtl::scan::Location]| {
+            locations
+                .iter()
+                .map(|loc| loc.line.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let always = rtl
+            .module(module)
+            .and_then(|def| {
+                trace.drivers.iter().find_map(|loc| {
+                    def.always
+                        .iter()
+                        .find(|block| block.start <= loc.line && loc.line <= block.end)
+                })
+            })
+            .map(|block| format!("  always {}-{}", block.start, block.end))
+            .unwrap_or_default();
+        Some(format!(
+            "{signal}: decl {}  drivers [{}]  loads [{}]{always}",
+            trace.decl.as_ref().map(|loc| loc.line).unwrap_or(0),
+            lines(&trace.drivers),
+            lines(&trace.loads)
+        ))
+    }
+
+    /// Append the source trace to the message log when it changes.
+    pub fn sync_source_trace(&mut self) {
+        let trace = self.source_trace_line();
+        if trace != self.last_source_trace {
+            if let Some(trace) = &trace {
+                self.msg(format!("source trace: {trace}"));
+            }
+            self.last_source_trace = trace;
+        }
     }
 
     /// Module of the selected instance: recorded by the dump (FSDB) or, for
@@ -454,7 +523,7 @@ impl App {
     }
 
     fn source_rows(&self) -> usize {
-        self.layout().source.height.saturating_sub(3) as usize
+        self.layout().source.height.saturating_sub(2) as usize
     }
 
     pub fn move_source_cursor(&mut self, delta_line: i64, delta_col: i64) {
@@ -487,19 +556,23 @@ impl App {
 
     /// Add the identifier under the Source cursor to the Signal List.
     pub fn add_source_word(&mut self) {
-        let Some((word, chain, module)) = self.source_view.as_ref().and_then(|view| {
-            let (start, _) = view.word_span_at_cursor()?;
-            let word = view.word_at_cursor()?;
-            Some((
-                word,
-                view.qualifier_chain(view.line, start),
-                view.module_at_line(view.line).to_string(),
-            ))
-        }) else {
+        let Some((word, chain, module, index, port_line)) =
+            self.source_view.as_ref().and_then(|view| {
+                let (start, end) = view.word_span_at_cursor()?;
+                let word = view.word_at_cursor()?;
+                Some((
+                    word,
+                    view.qualifier_chain(view.line, start),
+                    view.module_at_line(view.line).to_string(),
+                    view.index_after(view.line, end),
+                    view.dotted_port(view.line, start).then_some(view.line),
+                ))
+            })
+        else {
             self.msg("source: no signal name under the cursor (a: add)");
             return;
         };
-        match self.resolve_source_signal(&module, &chain, &word) {
+        match self.resolve_source_reference(&module, &chain, &word, index.as_deref(), port_line) {
             Some(index) => {
                 self.add_signal(index);
                 self.focus = Focus::Source;
@@ -591,7 +664,15 @@ impl App {
                     continue;
                 }
                 let chain = view.qualifier_chain(line, span_start);
-                match self.resolve_source_signal(&module, &chain, &span.text) {
+                let index = view.index_after(line, span_end);
+                let port_line = view.dotted_port(line, span_start).then_some(line);
+                match self.resolve_source_reference(
+                    &module,
+                    &chain,
+                    &span.text,
+                    index.as_deref(),
+                    port_line,
+                ) {
                     Some(index) => {
                         if !signals.contains(&index) {
                             signals.push(index);
@@ -647,6 +728,46 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Resolve a Source reference, first trying `.port` selections as named
+    /// port connections of the child instance on that line (`.valid_i` of
+    /// `u_cluster` -> `...u_cluster.valid_i`).
+    fn resolve_source_reference(
+        &self,
+        module: &str,
+        chain: &[String],
+        name: &str,
+        index: Option<&str>,
+        port_line: Option<usize>,
+    ) -> Option<usize> {
+        if chain.is_empty() {
+            if let Some(line) = port_line {
+                if let Some(instance) = self.port_instance(module, line, name) {
+                    if let Some(found) =
+                        self.resolve_source_signal(module, &[instance], name, index)
+                    {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        self.resolve_source_signal(module, chain, name, index)
+    }
+
+    /// Instance of `module` whose named port connection on `line` (0-based
+    /// view line) is `port`.
+    fn port_instance(&self, module: &str, line: usize, port: &str) -> Option<String> {
+        let rtl = self.rtl.as_ref()?;
+        let def = rtl.module(module)?;
+        def.instances
+            .iter()
+            .find(|inst| {
+                inst.ports
+                    .iter()
+                    .any(|(name, at)| name == port && *at == line + 1)
+            })
+            .map(|inst| inst.name.clone())
+    }
+
     /// Resolve a signal reference from the Source pane through the RTL AST.
     ///
     /// The qualifier chain (`u_dut.count`) is walked through the instances of
@@ -655,9 +776,20 @@ impl App {
     /// hierarchies never collide. FSDB stores ranges (`count[7:0]`), so base
     /// names are compared as well.
     ///
+    /// When the selected scope is a `generate` block (`...genblk1[1]`), the
+    /// module's own signals live on the enclosing instance
+    /// (`...u_proc.clk`), and genvars bound by the block (e.g. `i = 1`)
+    /// resolve indexes like `cluster_valid[i]` or `data_chain[k]`.
+    ///
     /// Code from another module in the same file belongs to another instance:
     /// its scope is found in the elaborated design instead of the active one.
-    fn resolve_source_signal(&self, module: &str, chain: &[String], name: &str) -> Option<usize> {
+    fn resolve_source_signal(
+        &self,
+        module: &str,
+        chain: &[String],
+        name: &str,
+        index: Option<&str>,
+    ) -> Option<usize> {
         let Some(rtl) = self.rtl.as_ref() else {
             // No AST at all: trust the dump at the exact scope.
             return chain
@@ -665,18 +797,32 @@ impl App {
                 .then(|| self.find_signal_exact(&self.selected_scope_steps(), name))
                 .flatten();
         };
-        let (path, signal) = rtl.resolve_reference(module, chain, name)?;
         let active = self
             .source_view
             .as_ref()
             .map(|view| view.module.as_str())
             .unwrap_or_default();
-        let mut scope = if module == active {
-            self.selected_scope_steps()
+        let (base, bindings) = if module == active {
+            match rtl.scope_info(&self.selected_scope_steps()) {
+                Some(found) => (found.instance_scope, found.env),
+                None => (self.selected_scope_steps(), Default::default()),
+            }
         } else {
-            self.foreign_scope(module)?
+            (self.foreign_scope(module)?, Default::default())
         };
+        let (path, signal) = rtl.resolve_reference_with(module, chain, name, &bindings)?;
+        let mut scope = base;
         scope.extend(path);
+        // `name[i]` with a bound genvar selects an element of an unpacked
+        // array; packed vectors fall back to the whole signal.
+        if let Some(value) = index
+            .and_then(crate::rtl::scan::parse_expr_text)
+            .and_then(|expr| crate::rtl::scan::eval(&expr, &bindings))
+        {
+            if let Some(index) = self.find_signal_exact(&scope, &format!("{signal}[{value}]")) {
+                return Some(index);
+            }
+        }
         self.find_signal_exact(&scope, &signal)
     }
 
@@ -758,13 +904,9 @@ impl App {
     /// Find a dumped signal in exactly this scope (no descendant or global
     /// fallbacks), comparing the plain and the range-stripped name.
     fn find_signal_exact(&self, scope: &[String], name: &str) -> Option<usize> {
-        fn base(text: &str) -> &str {
-            text.split('[').next().unwrap_or(text)
-        }
         let wf = self.wf.as_ref()?;
-        let want = base(name);
         wf.signals.iter().position(|sig| {
-            sig.scope.as_slice() == scope && (sig.name == name || base(&sig.name) == want)
+            sig.scope.as_slice() == scope && crate::rtl::scan::signal_name_matches(&sig.name, name)
         })
     }
 

@@ -45,8 +45,16 @@ pub fn draw_status(buf: &mut Buffer, l: &Layout, app: &App) {
     if app.path.is_empty() {
         write(" no file", Style::new().fg(t.dim));
     } else {
+        // Right-aligned path box: keep the file name (tail) readable when the
+        // path is too long, and shrink the box on narrow terminals.
+        const PATH_W: usize = 30;
+        let avail = l.status.right().saturating_sub(l.status.x + 1) as usize;
+        let width = avail.min(PATH_W);
+        let shown = text::trunc_left(&app.path, width);
+        let pad = width.saturating_sub(shown.chars().count());
         write(" ", Style::new().fg(t.path));
-        write(&text::trunc(&app.path, 30), Style::new().fg(t.path));
+        write(&" ".repeat(pad), Style::new().fg(t.path));
+        write(&shown, Style::new().fg(t.path));
     }
     write(" | ", sep);
     if let Some(wf) = &app.wf {

@@ -63,6 +63,8 @@ pub struct Instance {
     pub line: usize,
     /// `#(.NAME(expr))` parameter overrides, in source order.
     pub overrides: Vec<(String, Expr)>,
+    /// Named port connections (`.port(...)`): port name and source line.
+    pub ports: Vec<(String, usize)>,
 }
 
 /// Small constant expression used for parameters and generate bounds.
@@ -138,6 +140,16 @@ pub enum Body {
     If(GenIf),
 }
 
+/// Where a dump scope path lands in the elaborated design.
+pub(crate) struct ScopeMatch<'a> {
+    pub module: &'a ModuleDef,
+    /// Parameter/genvar bindings along the path, e.g. `i = 1`.
+    pub env: ParamEnv,
+    /// Dump scope of the instance that owns the module's signals, without
+    /// generate-block segments (`tb.u_proc.genblk1[1]` -> `tb.u_proc`).
+    pub instance_scope: Vec<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ModuleDef {
     pub name: String,
@@ -174,6 +186,28 @@ impl ModuleDef {
 /// Identifier without a packed range: `count[7:0]` -> `count`.
 fn base_name(text: &str) -> &str {
     text.split('[').next().unwrap_or(text)
+}
+
+/// Whether a dumped signal name matches a source reference. FSDB stores
+/// ranges (`count[7:0]`) and unpacked array elements (`data_chain[1][7:0]`),
+/// so a trailing packed range is ignored when comparing.
+pub(crate) fn signal_name_matches(dumped: &str, wanted: &str) -> bool {
+    dumped == wanted || strip_range(dumped) == wanted
+}
+
+/// Remove a trailing packed range (`[7:0]`) from a dumped name.
+fn strip_range(name: &str) -> &str {
+    let Some(body) = name.strip_suffix(']') else {
+        return name;
+    };
+    let Some(open) = body.rfind('[') else {
+        return name;
+    };
+    if body[open + 1..].contains(':') {
+        &body[..open]
+    } else {
+        name
+    }
 }
 
 /// Values a `generate for` loop takes: `(label, index)` names in a dump scope
@@ -364,6 +398,15 @@ impl RtlDb {
     /// `generate if` branches) to the module instantiated at a dump scope
     /// path, e.g. `["tb", "gen_clusters[0]", "u_cluster"]` -> `cluster`.
     pub fn module_at_scope(&self, steps: &[String]) -> Option<&ModuleDef> {
+        self.scope_info(steps).map(|found| found.module)
+    }
+
+    /// Like [`module_at_scope`](Self::module_at_scope) but also reports the
+    /// parameter/genvar bindings along the path and the dump scope of the
+    /// instance that owns the module's signals (trailing generate-block
+    /// segments removed), e.g. `tb.u_proc.genblk1[1]` -> `tb.u_proc` with
+    /// `i = 1`.
+    pub(crate) fn scope_info(&self, steps: &[String]) -> Option<ScopeMatch<'_>> {
         if steps.is_empty() {
             return None;
         }
@@ -375,22 +418,32 @@ impl RtlDb {
                 continue;
             };
             let env = self.default_env(def);
-            if let Some(module) = self.walk_scope(def, &env, &def.body, &steps[start + 1..]) {
-                return Some(module);
+            let base = vec![top.clone()];
+            if let Some(found) =
+                self.walk_scope(def, &env, &def.body, &base, &base, &steps[start + 1..])
+            {
+                return Some(found);
             }
         }
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn walk_scope<'a>(
         &'a self,
         def: &'a ModuleDef,
         env: &ParamEnv,
         items: &[Body],
+        path: &[String],
+        instance_scope: &[String],
         steps: &[String],
-    ) -> Option<&'a ModuleDef> {
+    ) -> Option<ScopeMatch<'a>> {
         if steps.is_empty() {
-            return Some(def);
+            return Some(ScopeMatch {
+                module: def,
+                env: env.clone(),
+                instance_scope: instance_scope.to_vec(),
+            });
         }
         let step = &steps[0];
         let rest = &steps[1..];
@@ -405,7 +458,11 @@ impl RtlDb {
                         continue;
                     };
                     let env = self.instance_env(instance, child, env);
-                    if let Some(found) = self.walk_scope(child, &env, &child.body, rest) {
+                    let mut path = path.to_vec();
+                    path.push(instance.name.clone());
+                    if let Some(found) =
+                        self.walk_scope(child, &env, &child.body, &path, &path, rest)
+                    {
                         return Some(found);
                     }
                 }
@@ -424,7 +481,11 @@ impl RtlDb {
                         }
                         let mut env = env.clone();
                         env.insert(gen.var.clone(), value);
-                        if let Some(found) = self.walk_scope(def, &env, &gen.items, rest) {
+                        let mut path = path.to_vec();
+                        path.push(block_dump_name(gen.label.as_deref(), number, Some(value)));
+                        if let Some(found) =
+                            self.walk_scope(def, &env, &gen.items, &path, instance_scope, rest)
+                        {
                             return Some(found);
                         }
                     }
@@ -443,7 +504,11 @@ impl RtlDb {
                         if index.is_some() {
                             continue;
                         }
-                        if let Some(found) = self.walk_scope(def, env, &block.items, rest) {
+                        let mut path = path.to_vec();
+                        path.push(block_dump_name(block.label.as_deref(), number, None));
+                        if let Some(found) =
+                            self.walk_scope(def, env, &block.items, &path, instance_scope, rest)
+                        {
                             return Some(found);
                         }
                     }
@@ -461,7 +526,11 @@ impl RtlDb {
                     if index.is_some() {
                         continue;
                     }
-                    if let Some(found) = self.walk_scope(def, env, &block.items, rest) {
+                    let mut path = path.to_vec();
+                    path.push(block_dump_name(block.label.as_deref(), number, None));
+                    if let Some(found) =
+                        self.walk_scope(def, env, &block.items, &path, instance_scope, rest)
+                    {
                         return Some(found);
                     }
                 }
@@ -470,7 +539,9 @@ impl RtlDb {
         // Unnamed generate blocks and tool-generated helper scopes carry no
         // meaning for the source mapping: skip them.
         if generated_scope_name(step) {
-            return self.walk_scope(def, env, items, rest);
+            let mut path = path.to_vec();
+            path.push(step.clone());
+            return self.walk_scope(def, env, items, &path, instance_scope, rest);
         }
         None
     }
@@ -486,8 +557,24 @@ impl RtlDb {
         chain: &[String],
         name: &str,
     ) -> Option<(Vec<String>, String)> {
+        self.resolve_reference_with(module, chain, name, &ParamEnv::new())
+    }
+
+    /// Like [`resolve_reference`](Self::resolve_reference), with extra
+    /// bindings (genvars of the selected generated scope) so that plain
+    /// instance names inside the matching loop iteration resolve correctly.
+    pub fn resolve_reference_with(
+        &self,
+        module: &str,
+        chain: &[String],
+        name: &str,
+        bindings: &ParamEnv,
+    ) -> Option<(Vec<String>, String)> {
         let def = self.module(module)?;
-        let env = self.default_env(def);
+        let mut env = self.default_env(def);
+        for (key, value) in bindings {
+            env.insert(key.clone(), *value);
+        }
         let (path, target) = self.walk_chain(def, &env, &def.body, chain)?;
         if target.declares(name) {
             let signal = target
@@ -615,7 +702,12 @@ impl RtlDb {
                     } else {
                         None
                     };
+                    // A genvar bound by the selected scope pins the iteration.
+                    let bound = env.get(&gen.var).copied();
                     for value in gen_values(gen, env) {
+                        if bound.is_some_and(|wanted| wanted != value) {
+                            continue;
+                        }
                         let mut env = env.clone();
                         env.insert(gen.var.clone(), value);
                         if let Some((rest, target)) = self.walk_chain(def, &env, &gen.items, chain)
@@ -1375,6 +1467,16 @@ fn parse_expr(parser: &mut Parser) -> Expr {
     cond
 }
 
+/// Parse a constant expression from source text, e.g. an index `[i]`.
+pub(crate) fn parse_expr_text(text: &str) -> Option<Expr> {
+    let mut parser = Parser::new(lex(text));
+    if parser.tokens.is_empty() {
+        return None;
+    }
+    let expr = parse_expr(&mut parser);
+    (parser.pos == parser.tokens.len()).then_some(expr)
+}
+
 fn parse_binary(parser: &mut Parser, min_precedence: u8) -> Expr {
     let mut lhs = parse_unary(parser);
     while let Some((op, precedence, width)) = peek_binop(parser) {
@@ -1763,11 +1865,16 @@ fn parse_process(parser: &mut Parser, module: &mut ModuleDef) {
 
 /// Scan one statement or `begin ... end` block, collecting assignments and
 /// identifier uses. Returns `(drivers, uses, end_line)`.
+///
+/// A `begin ... end` body is consumed as a whole (nested blocks, `if/else`
+/// chains and `case` statements included); a bare statement ends at its `;`.
 fn scan_statement(parser: &mut Parser) -> (Idents, Idents, usize) {
     let mut drivers = Vec::new();
     let mut uses = Vec::new();
     let mut end = parser.line();
     let mut depth = 0i32;
+    let mut block_depth = 0i32;
+    let mut started_block = false;
     let mut cond_depth: Option<i32> = None;
     let mut last_cond = false;
     let mut last_punct: Option<char> = None;
@@ -1777,6 +1884,29 @@ fn scan_statement(parser: &mut Parser) -> (Idents, Idents, usize) {
         let line = parser.line();
         match &tok {
             Tok::Ident(name) => {
+                match name.as_str() {
+                    "begin" | "fork" => {
+                        started_block = true;
+                        block_depth += 1;
+                    }
+                    "end" | "join" | "join_any" | "join_none" => {
+                        block_depth -= 1;
+                        if started_block && block_depth <= 0 {
+                            // `end else ...`: the alternative branch continues
+                            // the same statement.
+                            if matches!(parser.peek_at(1), Some(Tok::Ident(word)) if word == "else")
+                            {
+                                end = line;
+                                parser.next();
+                                continue;
+                            }
+                            end = line;
+                            parser.next();
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
                 last_cond = matches!(
                     name.as_str(),
                     "if" | "while" | "for" | "case" | "casex" | "casez"
@@ -1803,7 +1933,7 @@ fn scan_statement(parser: &mut Parser) -> (Idents, Idents, usize) {
                         }
                         depth -= 1;
                     }
-                    ';' if depth <= 0 => {
+                    ';' if depth <= 0 && block_depth <= 0 => {
                         end = line;
                         parser.next();
                         break;
@@ -1884,7 +2014,34 @@ fn parse_instance(parser: &mut Parser, module: &ModuleDef) -> Option<Instance> {
         }
     }
     parser.take_ident(); // instance name
-    parser.skip_balanced(); // port list
+    let mut ports = Vec::new();
+    if parser.eat_punct('(') {
+        loop {
+            match parser.peek() {
+                Some(Tok::Punct(')')) | None => {
+                    parser.eat_punct(')');
+                    break;
+                }
+                Some(Tok::Punct('.')) => {
+                    parser.next();
+                    let line = parser.line();
+                    if let Some((name, _)) = parser.take_ident() {
+                        ports.push((name, line));
+                    }
+                    if matches!(parser.peek(), Some(Tok::Punct('('))) {
+                        parser.skip_balanced();
+                    }
+                }
+                Some(Tok::Punct(',')) => {
+                    parser.next();
+                }
+                Some(Tok::Punct('(' | '[' | '{')) => parser.skip_balanced(),
+                Some(_) => {
+                    parser.next();
+                }
+            }
+        }
+    }
     if matches!(parser.peek(), Some(Tok::Punct(';'))) {
         parser.next();
     }
@@ -1893,6 +2050,7 @@ fn parse_instance(parser: &mut Parser, module: &ModuleDef) -> Option<Instance> {
         name: instance,
         line,
         overrides,
+        ports,
     })
 }
 
@@ -2136,6 +2294,15 @@ endmodule
         assert_eq!(m.instances[0].module, "counter");
         assert_eq!(m.instances[0].name, "u_dut");
         assert_eq!(m.instances[0].line, 5);
+        assert_eq!(m.instances[0].ports.len(), 5);
+        assert!(m.instances[0]
+            .ports
+            .iter()
+            .any(|(name, line)| name == "clk" && *line == 6));
+        assert!(m.instances[0]
+            .ports
+            .iter()
+            .any(|(name, line)| name == "carry" && *line == 10));
     }
 
     #[test]
@@ -2360,6 +2527,63 @@ endmodule
             .resolve_reference("raw", &steps(&["u_raw"]), "q")
             .expect("unnamed loop instance");
         assert_eq!(path, steps(&["genblk1[0]", "u_raw"]));
+
+        // scope_info reports the bindings and instance scope behind a
+        // generate block scope.
+        let found = db
+            .scope_info(&steps(&["top", "u_mid", "gen_leaves[1]"]))
+            .expect("genblk scope");
+        assert_eq!(found.module.name, "mid");
+        assert_eq!(found.instance_scope, steps(&["top", "u_mid"]));
+        assert_eq!(found.env.get("i"), Some(&1));
+        // A genvar bound by the selected scope pins plain instance references.
+        let (path, _) = db
+            .resolve_reference_with("mid", &steps(&["u_odd"]), "q", &found.env)
+            .expect("pinned iteration");
+        assert_eq!(path, steps(&["gen_leaves[1]", "gen_odd", "u_odd"]));
+        // Index selectors are constant expressions over those bindings.
+        assert_eq!(eval(&parse_expr_text("i").unwrap(), &found.env), Some(1));
+    }
+
+    #[test]
+    fn always_blocks_with_begin_end_do_not_end_the_module() {
+        let text = r#"
+module pipe_reg(input logic clk, input logic rst_n, output logic q);
+    logic r;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            r <= 1'b0;
+        end else begin
+            r <= ~r;
+        end
+    end
+    assign q = r;
+endmodule
+
+module fifo(input logic clk, output logic [3:0] count);
+    logic [3:0] c;
+    always_ff @(posedge clk) begin
+        c <= c + 1'b1;
+    end
+    assign count = c;
+endmodule
+"#;
+        let modules = parse_module_text(text, Path::new("common.sv"));
+        assert_eq!(modules.len(), 2);
+        let pipe = &modules[0];
+        assert_eq!(pipe.name, "pipe_reg");
+        assert_eq!(pipe.end, 12); // the module ends at its `endmodule`
+        assert!(pipe.signal("r").is_some());
+        assert!(pipe.assigns.iter().any(|assign| assign.lhs == "q"));
+        assert!(pipe.always[0]
+            .drivers
+            .iter()
+            .any(|(name, line)| name == "r" && *line == 6));
+        let fifo = &modules[1];
+        assert_eq!(fifo.name, "fifo");
+        assert_eq!(fifo.start, 14);
+        assert_eq!(fifo.end, 20);
+        assert!(fifo.signal("c").is_some());
     }
 
     #[test]

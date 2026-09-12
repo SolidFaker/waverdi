@@ -24,6 +24,8 @@ pub struct Signal {
     pub changes: Vec<Change>,
     pub min: f64,
     pub max: f64,
+    /// Signal this one was expanded from (bit/chunk of a bus), if any.
+    pub parent: Option<usize>,
 }
 
 impl Signal {
@@ -108,6 +110,7 @@ mod tests {
             changes: vec![],
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
+            parent: None,
         }
     }
 

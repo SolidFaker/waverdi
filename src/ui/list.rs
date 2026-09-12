@@ -111,8 +111,13 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                     signal.name.clone()
                 };
                 let indent = "  ".repeat(*depth);
-                let name = text::trunc(&format!("{indent}{shown}"), name_width(l, value_w));
-                buf.set_string(l.list.x, y, &name, name_style);
+                // Right-aligned; when the name does not fit, keep its tail
+                // (the signal name) and drop the hierarchical prefix.
+                let width = name_width(l, value_w);
+                let name = text::trunc_left(&format!("{indent}{shown}"), width);
+                let len = name.chars().count().min(width);
+                let x = l.list.x + (width.saturating_sub(len)) as u16;
+                buf.set_string(x, y, &name, name_style);
 
                 let radix = app.radix_for(*sig);
                 let (from, to) = app.cursor_column_range();

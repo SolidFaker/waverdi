@@ -193,6 +193,7 @@ fn parse_open(
             changes,
             min,
             max,
+            parent: None,
         };
         let index = signals.len();
         signals.push(signal);

@@ -129,6 +129,7 @@ fn visit_item(
                 changes,
                 min,
                 max,
+                parent: None,
             };
             let index = signals.len();
             signals.push(signal);

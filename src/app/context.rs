@@ -313,20 +313,52 @@ impl App {
     /// Replace a multi-bit signal with one display signal per bit if
     /// `width == 1`, or per `width`-bit chunk otherwise.
     pub fn split_bus(&mut self, idx: usize, width: u32) {
-        let Some(source) = self.wf.as_ref().and_then(|wf| wf.signals.get(idx)).cloned() else {
+        let Some((first, last)) = self.append_bit_chunks(idx, width) else {
             return;
         };
+        let name = self
+            .wf
+            .as_ref()
+            .and_then(|wf| wf.signals.get(idx))
+            .map(|signal| signal.full_name())
+            .unwrap_or_default();
+        let pos = self
+            .display
+            .iter()
+            .position(|&s| s == idx)
+            .unwrap_or(self.display.len());
+        let group = self.group_of_pos(pos);
+        let start = (pos + 1).min(self.display.len());
+        for (offset, sig) in (first..last).enumerate() {
+            self.display_insert(group, start + offset, sig);
+        }
+        self.sel_row = None;
+        self.scroll_to_row_of(first);
+        let count = last - first;
+        self.msg(format!(
+            "split {name} into {count} chunks of {width} bit(s)"
+        ));
+    }
+
+    /// Create the bit/chunk signals of a bus and append them to the waveform.
+    /// Returns the `(first, last)` range of the new signals.
+    pub(crate) fn append_bit_chunks(&mut self, idx: usize, width: u32) -> Option<(usize, usize)> {
+        let source = self
+            .wf
+            .as_ref()
+            .and_then(|wf| wf.signals.get(idx))
+            .cloned()?;
         if source.kind != SigKind::Bits || source.bits < 2 {
-            self.msg("split bus: select a multi-bit logic signal");
-            return;
+            self.msg("bus: select a multi-bit logic signal");
+            return None;
         }
         let width = width.max(1);
         if width >= source.bits {
             self.msg(format!(
-                "split bus: width must be smaller than {} bits",
+                "bus: width must be smaller than {} bits",
                 source.bits
             ));
-            return;
+            return None;
         }
         let mut created = Vec::new();
         let mut offset = 0u32;
@@ -351,10 +383,11 @@ impl App {
                     v: value,
                 });
             }
+            let base = bus_base_name(&source.name);
             let name = if chunk_bits == 1 {
-                format!("{}[{}]", source.name, offset)
+                format!("{base}[{}]", offset)
             } else {
-                format!("{}[{}:{}]", source.name, hi - 1, offset)
+                format!("{base}[{}:{}]", hi - 1, offset)
             };
             created.push(Signal {
                 name,
@@ -365,6 +398,7 @@ impl App {
                 changes,
                 min: f64::INFINITY,
                 max: f64::NEG_INFINITY,
+                parent: Some(idx),
             });
             offset = hi;
         }
@@ -375,24 +409,8 @@ impl App {
             wf.signals.extend(created);
             first
         };
-        let pos = self
-            .display
-            .iter()
-            .position(|&s| s == idx)
-            .unwrap_or(self.display.len());
-        let group = self.group_of_pos(pos);
         let last = self.wf.as_ref().unwrap().signals.len();
-        let start = (pos + 1).min(self.display.len());
-        for (offset, sig) in (first..last).enumerate() {
-            self.display_insert(group, start + offset, sig);
-        }
-        self.sel_row = None;
-        self.scroll_to_row_of(first);
-        let name = source.full_name();
-        let count = last - first;
-        self.msg(format!(
-            "split {name} into {count} chunks of {width} bit(s)"
-        ));
+        Some((first, last))
     }
 
     /// Open the ordering window for building a bus out of the selected
@@ -485,6 +503,7 @@ impl App {
             changes,
             min,
             max,
+            parent: None,
         };
         let new_index = {
             let wf = self.wf.as_mut().unwrap();

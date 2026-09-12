@@ -325,6 +325,15 @@ fn mouse_down(
 
     if pt_in(source::code_rect(&l), col, row) {
         let rect = source::code_rect(&l);
+        // Right edge: draggable scrollbar when the file is longer than the pane.
+        if let Some(view) = app.source_view.as_ref() {
+            if source::scrollbar_col(&l, view) == Some(col) {
+                scroll_source(app, &l, row);
+                app.dragging = Some(new_drag(DragMode::SourceScroll, col, 0.0));
+                app.focus = Focus::Source;
+                return false;
+            }
+        }
         let line = app
             .source_view
             .as_ref()
@@ -406,6 +415,11 @@ fn mouse_down(
                     (MouseButton::Right, ListRow::Group { id, .. }) => {
                         app.open_context_menu(CtxTarget::Group(id), col, row)
                     }
+                    (MouseButton::Left, ListRow::Signal { sig, .. })
+                        if is_double && !shift && !ctrl =>
+                    {
+                        app.toggle_signal_expand(sig)
+                    }
                     (MouseButton::Left, ListRow::Signal { sig, .. }) if !shift && !ctrl => {
                         let from = app.display.iter().position(|&s| s == sig).unwrap_or(0);
                         app.dragging = Some(Drag {
@@ -485,6 +499,12 @@ fn mouse_down(
                     }
                 }
                 return false;
+            }
+            if is_double {
+                if let ListRow::Signal { sig, .. } = list_row {
+                    app.toggle_signal_expand(sig);
+                    return false;
+                }
             }
             app.sel_row = Some(index);
         }
@@ -628,6 +648,7 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
         }
         DragMode::VScroll => scroll_rows(app, &l, row),
         DragMode::TreeScroll => scroll_tree(app, &l, row),
+        DragMode::SourceScroll => scroll_source(app, &l, row),
         DragMode::DialogScroll => {}
         DragMode::HScroll => pan_to_col(app, &l, col),
         DragMode::SplitTree => {
@@ -695,6 +716,25 @@ fn scroll_tree(app: &mut App, l: &Layout, row: u16) {
     let denom = visible.saturating_sub(1).max(1) as f64;
     app.tree_scroll = (rel.min(denom) / denom * max_scroll as f64).round() as usize;
     app.tree_scroll = app.tree_scroll.min(max_scroll);
+}
+
+fn scroll_source(app: &mut App, l: &Layout, row: u16) {
+    let code = crate::ui::source::code_rect(l);
+    let Some(view) = app.source_view.as_ref() else {
+        return;
+    };
+    let total = view.lines.len();
+    let visible = code.height as usize;
+    if visible == 0 || total <= visible {
+        return;
+    }
+    let max_scroll = total - visible;
+    let rel = row.saturating_sub(code.y) as f64;
+    let denom = visible.saturating_sub(1).max(1) as f64;
+    let scroll = (rel.min(denom) / denom * max_scroll as f64).round() as usize;
+    if let Some(view) = app.source_view.as_mut() {
+        view.scroll = scroll.min(max_scroll);
+    }
 }
 
 fn pan_to_col(app: &mut App, l: &Layout, col: u16) {
@@ -1127,6 +1167,74 @@ mod tests {
         assert_eq!(app.row_scroll, bottom, "the list must not jump to the top");
         assert_eq!(app.display[bottom - 1], bottom);
         assert_eq!(app.display[bottom], bottom - 1);
+    }
+
+    #[test]
+    fn double_click_signal_expands_and_collapses_bits() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 4 ! bus [3:0] $end\n\
+            $enddefinitions $end\n#0\nb0000 !\n";
+        let mut app = app_with(vcd);
+        app.set_display(vec![0]);
+        let row = app.layout().list.y + 3; // the signal row (after the G0 header)
+        crate::app::handle_mouse(&mut app, click(30, row));
+        crate::app::handle_mouse(&mut app, click(30, row));
+        assert_eq!(app.display, vec![0, 1, 2, 3, 4]);
+        assert_eq!(app.wf.as_ref().unwrap().signals[1].name, "bus[0]");
+        assert_eq!(app.wf.as_ref().unwrap().signals[4].name, "bus[3]");
+        assert_eq!(app.wf.as_ref().unwrap().signals[1].parent, Some(0));
+        assert_eq!(app.wf.as_ref().unwrap().signals[4].parent, Some(0));
+        app.dragging = None;
+        app.last_click = None; // long enough pause for a new double click
+        crate::app::handle_mouse(&mut app, click(30, row));
+        crate::app::handle_mouse(&mut app, click(30, row));
+        assert_eq!(app.display, vec![0]);
+        // Expanding again reuses the already created bit signals.
+        app.dragging = None;
+        app.last_click = None;
+        crate::app::handle_mouse(&mut app, click(30, row));
+        crate::app::handle_mouse(&mut app, click(30, row));
+        assert_eq!(app.display, vec![0, 1, 2, 3, 4]);
+        assert_eq!(app.wf.as_ref().unwrap().signals.len(), 5);
+    }
+
+    #[test]
+    fn source_scrollbar_drag_scrolls_the_file() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        let dir = std::env::temp_dir().join(format!("waverdi_src_bar_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("long.sv");
+        let mut text = String::from("module long(input logic clk);\n");
+        for line in 0..80 {
+            text.push_str(&format!("    assign w{line} = clk;\n"));
+        }
+        text.push_str("endmodule\n");
+        std::fs::write(&file, text).unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "long".to_string();
+        app.tree_sel = 1;
+        app.sync_source();
+
+        let l = app.layout();
+        let view = app.source_view.as_ref().unwrap();
+        let col = crate::ui::source::scrollbar_col(&l, view).expect("scrollbar");
+        let code = crate::ui::source::code_rect(&l);
+        crate::app::handle_mouse(&mut app, click(col, code.y));
+        assert!(matches!(
+            app.dragging.map(|drag| drag.mode),
+            Some(crate::app::DragMode::SourceScroll)
+        ));
+        crate::app::handle_mouse(&mut app, drag(col, code.y + code.height.saturating_sub(1)));
+        assert!(app.source_view.as_ref().unwrap().scroll > 0);
+        app.dragging = None;
     }
 
     #[test]

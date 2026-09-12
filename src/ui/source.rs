@@ -1,4 +1,4 @@
-﻿use crate::app::App;
+use crate::app::App;
 use crate::rtl::view::HlKind;
 use crate::ui::layout::Layout;
 use crate::ui::text;
@@ -17,15 +17,16 @@ pub fn inner_rect(l: &Layout) -> Rect {
     }
 }
 
-/// Code area: the inner rect minus the instance header row.
+/// Code area: the whole inner rect (no header row).
 pub fn code_rect(l: &Layout) -> Rect {
-    let inner = inner_rect(l);
-    Rect {
-        x: inner.x,
-        y: inner.y.saturating_add(1),
-        width: inner.width,
-        height: inner.height.saturating_sub(1),
-    }
+    inner_rect(l)
+}
+
+/// Column of the source scrollbar, when the file is longer than the pane.
+pub fn scrollbar_col(l: &Layout, view: &crate::rtl::SourceView) -> Option<u16> {
+    let code = code_rect(l);
+    (code.height > 0 && view.lines.len() > code.height as usize)
+        .then(|| code.right().saturating_sub(1))
 }
 
 /// Width of the line-number gutter (digits plus one space).
@@ -33,11 +34,12 @@ pub fn gutter_width(view: &crate::rtl::SourceView) -> u16 {
     view.lines.len().max(1).to_string().len() as u16 + 1
 }
 
-/// Bordered frame of the RTL source pane; the title names the module.
+/// Bordered frame of the RTL source pane; the title names the instance and
+/// file, e.g. `Source - tb.u_proc.u_cluster(/path/cluster.sv)`.
 pub fn draw_frame(buf: &mut Buffer, l: &Layout, app: &App) {
     let t = &app.theme;
-    let title = match app.source_view.as_ref().map(|view| view.module.clone()) {
-        Some(module) => format!(" Source — {module} "),
+    let title = match app.source_title() {
+        Some(title) => format!(" {title} "),
         None => " Source ".to_string(),
     };
     Block::bordered()
@@ -47,7 +49,7 @@ pub fn draw_frame(buf: &mut Buffer, l: &Layout, app: &App) {
         .render(l.source, buf);
 }
 
-/// Instance header + highlighted RTL source of its module.
+/// Highlighted RTL source of the selected instance's module.
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
     let t = &app.theme;
     let inner = inner_rect(l);
@@ -55,30 +57,6 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
         return;
     }
     let width = inner.width as usize;
-
-    // Header: selected instance, its module and the source file.
-    let selected = app.selected_scope_path();
-    let module = app.selected_module_name().unwrap_or_default();
-    let file = app.source_view.as_ref().and_then(|view| {
-        view.file
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-    });
-    let header = match (&selected, module.is_empty()) {
-        (Some(path), false) => match &file {
-            Some(file) => format!("instance: {path}   [module {module}]   {file}"),
-            None => format!("instance: {path}   [module {module}]"),
-        },
-        (Some(path), true) => format!("instance: {path}"),
-        (None, _) => "RTL source view".to_string(),
-    };
-    text::put(
-        buf,
-        inner.x,
-        inner.y,
-        &text::trunc(&header, width),
-        Style::new().fg(t.path),
-    );
 
     let code = code_rect(l);
     let Some(view) = &app.source_view else {
@@ -136,6 +114,11 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
     // Code with line numbers, scrolling, selection and a keyboard cursor.
     let digits = view.lines.len().max(1).to_string().len();
     let focused = app.focus == crate::app::Focus::Source;
+    let scrollbar = scrollbar_col(l, view);
+    // Keep the scrollbar column free of code.
+    let text_right = scrollbar
+        .map(|_| code.right().saturating_sub(1))
+        .unwrap_or(code.right());
     for row in 0..code.height as usize {
         let index = view.scroll + row;
         let Some(spans) = view.spans.get(index) else {
@@ -172,7 +155,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
                 }
             };
             for ch in span.text.chars() {
-                if x >= code.right() {
+                if x >= text_right {
                     break 'line;
                 }
                 let in_sel = interval
@@ -193,56 +176,40 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
                 col += 1;
             }
         }
-        if focused && index == view.line && view.col >= col && x < code.right() {
+        if focused && index == view.line && view.col >= col && x < text_right {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_bg(t.cursor);
             }
         }
     }
 
-    // Trace of the selected signal on the last row (declaration/driver/load).
-    if let Some(sig) = app.selected_signal() {
-        let name = app
-            .wf
-            .as_ref()
-            .map(|wf| wf.signals[sig].name.clone())
-            .unwrap_or_default();
-        // The cursor may sit in another module of the same file.
-        let module = view.module_at_line(view.line);
-        if let Some(trace) = app.rtl.as_ref().and_then(|db| db.trace(module, &name)) {
-            let lines = |locations: &[crate::rtl::scan::Location]| {
-                locations
-                    .iter()
-                    .map(|loc| loc.line.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            };
-            let always = app
-                .rtl
-                .as_ref()
-                .and_then(|db| db.module(module))
-                .and_then(|def| {
-                    trace.drivers.iter().find_map(|loc| {
-                        def.always
-                            .iter()
-                            .find(|block| block.start <= loc.line && loc.line <= block.end)
-                    })
-                })
-                .map(|block| format!("  always {}-{}", block.start, block.end))
-                .unwrap_or_default();
-            let label = format!(
-                "{name}: decl {}  drivers [{}]  loads [{}]{always}",
-                trace.decl.as_ref().map(|loc| loc.line).unwrap_or(0),
-                lines(&trace.drivers),
-                lines(&trace.loads)
-            );
-            text::put(
-                buf,
-                code.x,
-                code.bottom().saturating_sub(1),
-                &text::trunc(&label, width),
-                Style::new().fg(t.cursor),
-            );
-        }
+    if let Some(col) = scrollbar {
+        draw_scrollbar(buf, l, view, col, t);
+    }
+}
+
+/// Vertical scrollbar on the right edge of the code area.
+fn draw_scrollbar(
+    buf: &mut Buffer,
+    l: &Layout,
+    view: &crate::rtl::SourceView,
+    col: u16,
+    t: &crate::theme::Theme,
+) {
+    let code = code_rect(l);
+    let height = code.height as usize;
+    if height == 0 {
+        return;
+    }
+    let total = view.lines.len();
+    let thumb = ((height as f64 / total as f64) * height as f64).max(1.0) as usize;
+    let top = ((view.scroll as f64 / total as f64) * height as f64) as usize;
+    for row in 0..height {
+        let symbol = if row >= top && row < top + thumb {
+            "█"
+        } else {
+            "│"
+        };
+        text::set_cell(buf, col, code.y + row as u16, symbol, t.dim, t.bg);
     }
 }

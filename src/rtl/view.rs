@@ -286,6 +286,55 @@ impl SourceView {
         let chars: Vec<char> = text.chars().collect();
         identifier_chain(&chars, start)
     }
+
+    /// Whether the identifier at `start` follows the `.` of a named port
+    /// connection (`.port`), rather than a field access (`sig.field`).
+    pub fn dotted_port(&self, line: usize, start: usize) -> bool {
+        let Some(text) = self.lines.get(line) else {
+            return false;
+        };
+        let chars: Vec<char> = text.chars().collect();
+        if start == 0 || chars.get(start - 1) != Some(&'.') {
+            return false;
+        }
+        start < 2 || !is_ident_char(chars[start - 2])
+    }
+
+    /// Text of the `[...]` selector directly after `start` on `line`: for
+    /// `data_chain[k]` this returns `k`.
+    pub fn index_after(&self, line: usize, start: usize) -> Option<String> {
+        let text = self.lines.get(line)?;
+        let chars: Vec<char> = text.chars().collect();
+        let mut i = start.min(chars.len());
+        while chars.get(i) == Some(&' ') {
+            i += 1;
+        }
+        if chars.get(i) != Some(&'[') {
+            return None;
+        }
+        let mut depth = 0i32;
+        let mut out = String::new();
+        while i < chars.len() {
+            match chars[i] {
+                '[' => {
+                    depth += 1;
+                    if depth > 1 {
+                        out.push('[');
+                    }
+                }
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(out);
+                    }
+                    out.push(']');
+                }
+                c => out.push(c),
+            }
+            i += 1;
+        }
+        None
+    }
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -345,12 +394,22 @@ fn module_signal_names(db: &RtlDb) -> HashMap<&str, HashSet<&str>> {
 }
 
 /// Character positions of identifiers that the RTL AST resolves to a signal
-/// only through an instance chain, e.g. `count` in `u_dut.count`.
+/// although the plain name is not declared in the line's module: instance
+/// chains (`count` in `u_dut.count`) and named port connections (`.count`).
 fn qualified_references(
     lines: &[String],
     line_modules: &[String],
     db: &RtlDb,
 ) -> HashSet<(usize, usize)> {
+    let mut ports: HashMap<&str, HashSet<(usize, &str)>> = HashMap::new();
+    for (name, def) in &db.modules {
+        let entries = def
+            .instances
+            .iter()
+            .flat_map(|inst| inst.ports.iter().map(|(port, line)| (*line, port.as_str())))
+            .collect();
+        ports.insert(name.as_str(), entries);
+    }
     let mut qualified = HashSet::new();
     for (index, line) in lines.iter().enumerate() {
         let module = line_modules
@@ -367,6 +426,13 @@ fn qualified_references(
                 }
                 let word: String = chars[start..i].iter().collect();
                 if !is_keyword(&word) {
+                    if ports
+                        .get(module)
+                        .is_some_and(|set| set.contains(&(index + 1, word.as_str())))
+                    {
+                        qualified.insert((index, start));
+                        continue;
+                    }
                     let chain = identifier_chain(&chars, start);
                     if !chain.is_empty() && db.resolve_reference(module, &chain, &word).is_some() {
                         qualified.insert((index, start));
@@ -638,6 +704,45 @@ mod tests {
         assert!(view.spans[4]
             .iter()
             .any(|span| span.kind == HlKind::Signal && span.text == "only_b"));
+    }
+
+    #[test]
+    fn modules_with_always_blocks_keep_their_own_lines() {
+        const FILE: &str = "module pipe_reg(input logic clk, input logic rst_n, output logic q);\n\
+                            logic r;\n\
+                            always_ff @(posedge clk or negedge rst_n) begin\n\
+                            if (!rst_n) begin\n\
+                            r <= 1'b0;\n\
+                            end else begin\n\
+                            r <= ~r;\n\
+                            end\n\
+                            end\n\
+                            assign q = r;\n\
+                            endmodule\n\
+                            module fifo(input logic clk);\n\
+                            logic c;\n\
+                            always_ff @(posedge clk) begin\n\
+                            c <= c + 1'b1;\n\
+                            end\n\
+                            endmodule\n";
+        let dir = std::env::temp_dir().join(format!("waverdi_view_always_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("common.sv");
+        fs::write(&file, FILE).unwrap();
+        let set = crate::rtl::SourceSet::from_files(vec![file], "test");
+        let db = RtlDb::parse_sources(&set);
+        let view = SourceView::load(db.module("fifo").expect("fifo"), &db).expect("view");
+        // Every line of pipe_reg (including the assign after its always block)
+        // stays inactive while fifo is the active module.
+        let pipe = db.module("pipe_reg").unwrap();
+        for line in pipe.start - 1..pipe.end {
+            assert_eq!(view.module_at_line(line), "pipe_reg", "line {}", line + 1);
+        }
+        let fifo = db.module("fifo").unwrap();
+        for line in fifo.start - 1..fifo.end {
+            assert_eq!(view.module_at_line(line), "fifo", "line {}", line + 1);
+        }
     }
 
     #[test]

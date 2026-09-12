@@ -278,6 +278,77 @@ impl App {
         self.scroll_to_row_of(sig);
     }
 
+    /// Double-click on a signal row: expand a multi-bit signal into its bits,
+    /// or collapse the bit rows created earlier (also those of `Split Bus`).
+    pub fn toggle_signal_expand(&mut self, sig: usize) {
+        let children: Vec<usize> = match &self.wf {
+            Some(wf) => wf
+                .signals
+                .iter()
+                .enumerate()
+                .filter(|(_, signal)| signal.parent == Some(sig))
+                .map(|(index, _)| index)
+                .collect(),
+            None => return,
+        };
+        let Some(pos) = self.display.iter().position(|&s| s == sig) else {
+            return;
+        };
+        if children.is_empty() {
+            let Some((first, last)) = self.append_bit_chunks(sig, 1) else {
+                return;
+            };
+            let group = self.group_of_pos(pos);
+            for (offset, child) in (first..last).enumerate() {
+                self.display_insert(group, pos + 1 + offset, child);
+            }
+            self.select_signal_row(sig);
+            self.msg(format!("expanded signal into {} bit(s)", last - first));
+            return;
+        }
+        let visible: Vec<usize> = children
+            .iter()
+            .copied()
+            .filter(|child| self.display.contains(child))
+            .collect();
+        if visible.is_empty() {
+            // Re-expand the bits created earlier, right below the parent.
+            let group = self.group_of_pos(pos);
+            for (offset, child) in children.iter().enumerate() {
+                self.display_insert(group, pos + 1 + offset, *child);
+            }
+            self.select_signal_row(sig);
+            self.msg(format!("expanded signal into {} bit(s)", children.len()));
+        } else {
+            let mut positions: Vec<usize> = self
+                .display
+                .iter()
+                .enumerate()
+                .filter(|(_, signal)| children.contains(signal))
+                .map(|(position, _)| position)
+                .collect();
+            positions.sort_unstable_by(|a, b| b.cmp(a));
+            for position in positions {
+                let group = self.group_of_pos(position);
+                self.display.remove(position);
+                self.groups[group].count = self.groups[group].count.saturating_sub(1);
+            }
+            self.selection.retain(|signal| !children.contains(signal));
+            self.select_signal_row(sig);
+            self.msg(format!("collapsed {} bit(s)", visible.len()));
+        }
+    }
+
+    /// Select the row of `sig` and keep it visible.
+    fn select_signal_row(&mut self, sig: usize) {
+        self.sel_row = self
+            .list_rows()
+            .iter()
+            .position(|row| matches!(row, ListRow::Signal { sig: s, .. } if *s == sig));
+        self.scroll_to_sel();
+        self.focus = Focus::List;
+    }
+
     pub fn add_signal(&mut self, idx: usize) {
         // The same signal may be added repeatedly; every add appends a row.
         let group = self.active_group();

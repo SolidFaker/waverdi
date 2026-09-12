@@ -1213,6 +1213,275 @@ mod tests {
     }
 
     #[test]
+    fn generated_scope_resolves_enclosing_signals_and_genvar_indexes() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 1 ! clk $end\n\
+            $var wire 3 \" cluster_valid [2:0] $end\n\
+            $var wire 8 # chain0 [7:0] $end\n\
+            $var wire 8 $ chain1 [7:0] $end\n\
+            $var wire 8 % chain2 [7:0] $end\n\
+            $scope module genblk1[1] $end\n\
+            $scope module u_cluster $end\n\
+            $var wire 1 ' clk $end\n\
+            $var wire 8 & data [7:0] $end\n\
+            $upscope $end\n$upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\nb000 \"\nb00000000 #\nb00000000 $\n\
+            b00000000 %\n0'\nb00000000 &\n";
+        let mut app = app_with(vcd);
+        {
+            let signals = &mut app.wf.as_mut().unwrap().signals;
+            signals[1].name = "cluster_valid[2:0]".to_string();
+            signals[2].name = "chain[0][7:0]".to_string();
+            signals[3].name = "chain[1][7:0]".to_string();
+            signals[4].name = "chain[2][7:0]".to_string();
+        }
+        let dir = std::env::temp_dir().join(format!("waverdi_src_gen_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tb.sv");
+        std::fs::write(
+            &file,
+            "module tb #(parameter int N_CLUSTER = 2) (\n\
+             \x20   input  logic       clk,\n\
+             \x20   output logic [2:0] cluster_valid\n\
+             );\n\
+             \x20   logic [7:0] chain [N_CLUSTER+1];\n\
+             \x20   genvar i;\n\
+             \x20   generate\n\
+             \x20       for (i = 0; i < N_CLUSTER; i++) begin\n\
+             \x20           assign cluster_valid[i] = clk;\n\
+             \x20           assign chain[i] = 8'h00;\n\
+             \x20           cluster u_cluster(.clk(clk));\n\
+             \x20       end\n\
+             \x20   endgenerate\n\
+             endmodule\n\
+             module cluster(input logic clk);\n\
+             \x20   logic [7:0] data;\n\
+             \x20   assign data = 8'h00;\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.expanded.insert(1);
+
+        let genblk = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .tree
+            .nodes
+            .iter()
+            .position(|node| node.name == "genblk1[1]")
+            .unwrap();
+        let nodes = app.tree_visible();
+        app.tree_sel = nodes
+            .iter()
+            .position(
+                |node| matches!(node, crate::app::TreeNode::Scope { id, .. } if *id == genblk),
+            )
+            .unwrap();
+        app.sync_source();
+        // The dump does not name the module of a generate scope; the AST maps
+        // it to the enclosing instance's module.
+        assert_eq!(app.source_view.as_ref().unwrap().module, "tb");
+
+        let cursor_to = |app: &mut crate::app::App, line_needle: &str, word: &str| {
+            let (line, col) = {
+                let view = app.source_view.as_ref().unwrap();
+                let (line, text) = view
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .find(|(index, text)| {
+                        view.module_at_line(*index) == "tb" && text.contains(line_needle)
+                    })
+                    .unwrap();
+                (line, text.find(word).unwrap())
+            };
+            app.set_source_cursor(line, col);
+        };
+        app.focus = Focus::Source;
+
+        // Ports belong to the enclosing instance (`tb.clk`), not the generate
+        // scope.
+        cursor_to(&mut app, "input  logic", "clk");
+        app.add_source_word();
+        assert_eq!(app.display, vec![0]);
+
+        // `cluster_valid[i]` with i = 1 selects the vector in the instance.
+        app.clear_all();
+        cursor_to(&mut app, "assign cluster_valid", "cluster_valid");
+        app.add_source_word();
+        assert_eq!(app.display, vec![1]);
+
+        // `chain[i]` selects the unpacked element `chain[1]`.
+        app.clear_all();
+        cursor_to(&mut app, "assign chain", "chain");
+        app.add_source_word();
+        assert_eq!(app.display, vec![3]);
+
+        // Signals declared in the generated instance itself use its scope.
+        app.clear_all();
+        app.expanded.insert(genblk);
+        let nodes = app.tree_visible();
+        let cluster = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .tree
+            .nodes
+            .iter()
+            .position(|node| node.name == "u_cluster")
+            .unwrap();
+        app.tree_sel = nodes
+            .iter()
+            .position(
+                |node| matches!(node, crate::app::TreeNode::Scope { id, .. } if *id == cluster),
+            )
+            .unwrap();
+        app.sync_source();
+        assert_eq!(app.source_view.as_ref().unwrap().module, "cluster");
+        let (line, col) = {
+            let view = app.source_view.as_ref().unwrap();
+            let (line, text) = view
+                .lines
+                .iter()
+                .enumerate()
+                .find(|(index, text)| {
+                    view.module_at_line(*index) == "cluster" && text.contains("assign data")
+                })
+                .unwrap();
+            (line, text.find("data").unwrap())
+        };
+        app.set_source_cursor(line, col);
+        app.add_source_word();
+        assert_eq!(app.display, vec![6]);
+    }
+
+    #[test]
+    fn named_port_connections_resolve_to_the_child_instance() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 1 ! clk $end\n\
+            $var wire 3 \" cluster_valid [2:0] $end\n\
+            $scope module genblk1[1] $end\n\
+            $scope module u_cluster $end\n\
+            $var wire 1 ' clk $end\n\
+            $var wire 1 ( valid_i $end\n\
+            $upscope $end\n$upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\nb000 \"\n0'\n0(\n";
+        let mut app = app_with(vcd);
+        {
+            let signals = &mut app.wf.as_mut().unwrap().signals;
+            signals[1].name = "cluster_valid[2:0]".to_string();
+        }
+        let dir = std::env::temp_dir().join(format!("waverdi_src_port_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tb.sv");
+        std::fs::write(
+            &file,
+            "module tb #(parameter int N_CLUSTER = 2) (\n\
+             \x20   input  logic       clk,\n\
+             \x20   input  logic       valid_i,\n\
+             \x20   output logic [2:0] cluster_valid\n\
+             );\n\
+             \x20   genvar i;\n\
+             \x20   generate\n\
+             \x20       for (i = 0; i < N_CLUSTER; i++) begin\n\
+             \x20           cluster u_cluster(\n\
+             \x20               .clk(clk),\n\
+             \x20               .valid_i(cluster_valid[i])\n\
+             \x20           );\n\
+             \x20       end\n\
+             \x20   endgenerate\n\
+             endmodule\n\
+             module cluster(input logic clk, input logic valid_i);\n\
+             \x20   logic [7:0] data;\n\
+             \x20   assign data = 8'h00;\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.expanded.insert(1);
+        let genblk = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .tree
+            .nodes
+            .iter()
+            .position(|node| node.name == "genblk1[1]")
+            .unwrap();
+        let nodes = app.tree_visible();
+        app.tree_sel = nodes
+            .iter()
+            .position(
+                |node| matches!(node, crate::app::TreeNode::Scope { id, .. } if *id == genblk),
+            )
+            .unwrap();
+        app.sync_source();
+        assert_eq!(app.source_view.as_ref().unwrap().module, "tb");
+
+        // `.valid_i` is a port of the u_cluster instance, not the tb port.
+        let (line, col) = {
+            let view = app.source_view.as_ref().unwrap();
+            let (line, text) = view
+                .lines
+                .iter()
+                .enumerate()
+                .find(|(index, text)| {
+                    view.module_at_line(*index) == "tb" && text.contains(".valid_i(")
+                })
+                .unwrap();
+            (line, text.find("valid_i").unwrap())
+        };
+        app.set_source_cursor(line, col);
+        app.focus = Focus::Source;
+        app.add_source_word();
+        let port = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .signals
+            .iter()
+            .position(|sig| {
+                sig.scope
+                    == vec![
+                        "tb".to_string(),
+                        "genblk1[1]".to_string(),
+                        "u_cluster".to_string(),
+                    ]
+                    && sig.name == "valid_i"
+            })
+            .unwrap();
+        assert_eq!(app.display, vec![port]);
+
+        // The connected expression still resolves to the tb vector.
+        app.clear_all();
+        let (line, col) = {
+            let view = app.source_view.as_ref().unwrap();
+            let (line, text) = view
+                .lines
+                .iter()
+                .enumerate()
+                .find(|(index, text)| {
+                    view.module_at_line(*index) == "tb" && text.contains("cluster_valid[i]")
+                })
+                .unwrap();
+            (line, text.find("cluster_valid").unwrap())
+        };
+        app.set_source_cursor(line, col);
+        app.add_source_word();
+        assert_eq!(app.display, vec![1]);
+    }
+
+    #[test]
     fn r_renames_a_group_and_h_toggles_names() {
         let mut app = app_with(VCD);
         app.add_signal(0);

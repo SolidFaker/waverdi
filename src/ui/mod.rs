@@ -20,6 +20,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     app.sync_layout(area);
     app.sync_source();
+    app.sync_source_trace();
     let l = compute_layout(area, app.splits);
     let t = &app.theme;
 
@@ -675,5 +676,144 @@ mod tests {
         app.menu.open = Some(4);
         let screen = render_app(&mut app, 80, 20);
         assert!(screen.contains("Key Bindings"));
+    }
+
+    #[test]
+    fn signal_list_right_aligns_names_and_keeps_tails() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 ! a_very_long_signal_name $end\n\
+            $var wire 1 \" clk $end\n\
+            $enddefinitions $end\n#0\n0!\n0\"\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.set_display(vec![0, 1]);
+        let backend = TestBackend::new(60, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        let grip = l.value_grip_x(app.splits.value_pct);
+        let row = |y: u16| -> String {
+            (l.list.x..grip)
+                .map(|x| buffer.cell((x, y)).map(|cell| cell.symbol()).unwrap_or(" "))
+                .collect()
+        };
+        let long = row(l.list.y + 3);
+        assert!(long.contains('…'), "{long}");
+        assert!(long.trim_end().ends_with("name"), "{long}");
+        let short = row(l.list.y + 4);
+        assert_eq!(short.trim(), "clk");
+        // Right-aligned: the name sits next to the value divider, not at the
+        // left edge of the column.
+        assert!(short.starts_with(' '), "{short:?}");
+    }
+
+    #[test]
+    fn status_bar_keeps_the_file_name_visible() {
+        let mut app = App::new();
+        app.path = "/home/some/very/long/path/to/the/waveform_dump.fsdb".to_string();
+        let screen = render_app(&mut app, 100, 20);
+        assert!(screen.contains("waveform_dump.fsdb"), "{screen}");
+    }
+
+    #[test]
+    fn source_scrollbar_is_drawn_for_long_files() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        let dir = std::env::temp_dir().join(format!("waverdi_src_bar_ui_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("long.sv");
+        let mut text = String::from("module long(input logic clk);\n");
+        for line in 0..80 {
+            text.push_str(&format!("    assign w{line} = clk;\n"));
+        }
+        text.push_str("endmodule\n");
+        std::fs::write(&path, text).unwrap();
+        app.sources = Some(SourceSet::from_files(vec![path], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "long".to_string();
+        app.tree_sel = 1;
+        app.sync_source();
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        let code = super::source::code_rect(&l);
+        let col = super::source::scrollbar_col(&l, app.source_view.as_ref().unwrap())
+            .expect("scrollbar column");
+        let bar: String = (code.y..code.bottom())
+            .map(|y| {
+                buffer
+                    .cell((col, y))
+                    .map(|cell| cell.symbol())
+                    .unwrap_or(" ")
+            })
+            .collect();
+        assert!(bar.contains('│'), "{bar}");
+        assert!(bar.contains('█'), "{bar}");
+        // The last column of code is kept free for the bar.
+        assert_eq!(col, code.right() - 1);
+    }
+
+    #[test]
+    fn source_pane_title_names_the_instance_and_file() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $scope module dut $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        let dir = std::env::temp_dir().join(format!("waverdi_src_title_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("counter.sv");
+        std::fs::write(
+            &path,
+            "module counter(input logic clk);\n\
+             logic [7:0] next;\n\
+             assign next = 8'h00;\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![path.clone()], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
+        app.expanded.insert(1);
+        app.tree_sel = 2;
+        app.sync_source();
+        // The old header/footer lines are logged instead of drawn.
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .contains("source: tb.dut [module counter]"));
+
+        let title = app.source_title().expect("title");
+        assert!(title.starts_with("Source - tb.dut("), "{title}");
+        assert!(title.ends_with("counter.sv)"), "{title}");
+        let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("Source - tb.dut("), "{screen}");
+        // The code area is the whole inner rect: no header/footer rows.
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        let l = app.layout();
+        assert_eq!(
+            super::source::code_rect(&l).height,
+            l.source.height.saturating_sub(2)
+        );
     }
 }
