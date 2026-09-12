@@ -1,4 +1,4 @@
-//! RTL source management: filelists and FSDB side-channel discovery.
+﻿//! RTL source management: filelists and FSDB side-channel discovery.
 //!
 //! Verdi shows RTL sources from its KDB (`simv.daidir`), which stores a plain
 //! text list of the compiled sources at `debug_dump/src_files_verilog`. When
@@ -10,6 +10,10 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+
+pub mod scan;
+
+pub use scan::RtlDb;
 
 /// RTL source files and compile options gathered from a filelist or a dump.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

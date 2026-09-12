@@ -156,8 +156,14 @@ The filelist uses the VCS format (`-f`/`-F` nesting, `-v`, `-y`, `+incdir+`,
 waverdi tries to recover the compiled source list from the Verdi KDB
 (`simv.daidir/debug_dump/src_files_verilog`) next to the dump — or from the
 KDB path recorded inside the FSDB — and falls back to scanning the dump
-directory for `.v`/`.sv` files. The instance's defining module (recorded by
-FSDB per scope) is shown next to the selected instance.
+directory for `.v`/`.sv` files.
+
+The resolved files are scanned with a lightweight SystemVerilog scanner:
+modules, ports and declarations, `assign` statements, `always`/`initial`
+blocks and module instantiations keep their file and line. Selecting an
+instance shows its module, the declared signals, and — for the selected
+signal — its declaration, driver and load lines (the first step of the RTL
+trace).
 
 The `waveform/` folder contains demos: `counter.vcd` (4-bit counter with
 enable/carry), `complex.vcd` (a small CPU/RAM/sensor design with 16 signals,

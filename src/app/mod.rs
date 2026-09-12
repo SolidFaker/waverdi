@@ -1,4 +1,4 @@
-mod action;
+﻿mod action;
 mod browser;
 mod context;
 mod dialog;
@@ -19,7 +19,7 @@ pub use keys::handle_key;
 pub use mouse::handle_mouse;
 pub use nav::{Group, ListRow};
 
-use crate::rtl::SourceSet;
+use crate::rtl::{RtlDb, SourceSet};
 use crate::theme::{Theme, ThemeKind, UiSetting, WaveSetting};
 use crate::ui::layout::{compute_layout, Layout, Splits};
 use crate::waveform::{Radix, Ticks, TimeBase, Waveform};
@@ -161,6 +161,8 @@ pub struct App {
     pub settings_sel: usize,
     /// RTL sources for the Source pane (filelist or discovered from the dump).
     pub sources: Option<SourceSet>,
+    /// Parsed RTL modules of `sources` (declaration/driver/load lines).
+    pub rtl: Option<RtlDb>,
     /// True once a filelist was given explicitly (disables auto-discovery).
     pub sources_explicit: bool,
     pending_fit: bool,
@@ -217,6 +219,7 @@ impl App {
             theme_kind: ThemeKind::Dark,
             settings_sel: 0,
             sources: None,
+            rtl: None,
             sources_explicit: false,
             pending_fit: false,
         };
@@ -315,6 +318,7 @@ impl App {
                 ));
                 self.sources = Some(set);
                 self.sources_explicit = true;
+                self.rebuild_rtl();
             }
             Ok(set) => self.msg(format!("filelist {}: no source files found", set.origin)),
             Err(e) => self.msg(format!("filelist error: {e}")),
@@ -400,6 +404,21 @@ impl App {
                     "RTL sources: {} file(s) from {}",
                     set.files.len(),
                     set.origin
+                ));
+            }
+            self.rebuild_rtl();
+        }
+    }
+
+    /// Parse the current source set into the RTL database.
+    fn rebuild_rtl(&mut self) {
+        self.rtl = self.sources.as_ref().map(RtlDb::parse_sources);
+        if let Some(db) = &self.rtl {
+            if !db.modules.is_empty() {
+                self.msg(format!(
+                    "RTL parsed: {} module(s) in {} file(s)",
+                    db.modules.len(),
+                    db.files.len()
                 ));
             }
         }
