@@ -121,6 +121,8 @@ pub struct App {
     pub cursor: Ticks,
     /// Time base of the ruler and status readouts (timescale by default).
     pub time_base: TimeBase,
+    /// Open time-base dropdown: highlighted entry index.
+    pub time_menu: Option<usize>,
     pub range: Option<(Ticks, Ticks)>,
     pub(crate) dragging: Option<Drag>,
     pub last_area: Rect,
@@ -177,6 +179,7 @@ impl App {
             scale: 1.0,
             cursor: 0,
             time_base: TimeBase::Scale,
+            time_menu: None,
             range: None,
             dragging: None,
             last_area: Rect::new(0, 0, 0, 0),
@@ -335,6 +338,7 @@ impl App {
         self.wf = Some(wf);
         self.dialog = None;
         self.dialog_scroll = 0;
+        self.time_menu = None;
         self.focus = Focus::Tree;
         self.pending_fit = true;
     }
@@ -396,9 +400,10 @@ impl App {
         }
     }
 
-    /// Cycle the ruler time base (toolbar button).
-    pub fn cycle_time_base(&mut self) {
-        self.time_base = self.time_base.next();
+    /// Select an explicit ruler time base from the shortcut-bar dropdown.
+    pub fn set_time_base(&mut self, base: TimeBase) {
+        self.time_base = base;
+        self.time_menu = None;
         let label = self.time_base_label();
         self.msg(format!("time base: {label}"));
     }

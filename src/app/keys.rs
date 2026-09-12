@@ -39,6 +39,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if app.ctx_menu.is_some() {
         return ctx_key(app, key);
     }
+    if app.time_menu.is_some() {
+        return time_menu_key(app, key);
+    }
     if app.menu.open.is_some() {
         return menu_key(app, key);
     }
@@ -564,6 +567,23 @@ fn ctx_key(app: &mut App, key: KeyEvent) -> bool {
             None => {}
         },
         _ => {}
+    }
+    false
+}
+
+/// Keys of the time-base dropdown in the nWave shortcut bar.
+fn time_menu_key(app: &mut App, key: KeyEvent) -> bool {
+    use crate::waveform::TimeBase;
+    let Some(sel) = app.time_menu else {
+        return false;
+    };
+    let count = TimeBase::CYCLE.len();
+    match key.code {
+        KeyCode::Esc => app.time_menu = None,
+        KeyCode::Up => app.time_menu = Some(sel.checked_sub(1).unwrap_or(count - 1)),
+        KeyCode::Down => app.time_menu = Some((sel + 1) % count),
+        KeyCode::Enter => app.set_time_base(TimeBase::CYCLE[sel]),
+        _ => app.time_menu = None,
     }
     false
 }

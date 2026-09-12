@@ -1,4 +1,4 @@
-﻿use super::{App, CtxTarget, Dialog, Drag, DragMode, Focus, ListRow, TreeNode};
+use super::{App, CtxTarget, Dialog, Drag, DragMode, Focus, ListRow, TreeNode};
 use crate::ui::layout::{pt_in, tree_inner, Layout, Splits};
 use crate::ui::menubar;
 use crate::ui::toolbar;
@@ -47,6 +47,37 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
             dialog_mouse(app, dialog, m);
         }
         return false;
+    }
+
+    if let Some(selected) = app.time_menu {
+        let l = app.layout();
+        let area = toolbar::time_menu_rect(l.toolbar, app);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if pt_in(area, col, row) {
+                    let index = (row - area.y - 1) as usize;
+                    if index < crate::waveform::TimeBase::CYCLE.len() {
+                        app.set_time_base(crate::waveform::TimeBase::CYCLE[index]);
+                    }
+                } else {
+                    app.time_menu = None;
+                }
+                return false;
+            }
+            MouseEventKind::ScrollUp => {
+                app.time_menu = Some(
+                    selected
+                        .checked_sub(1)
+                        .unwrap_or(crate::waveform::TimeBase::CYCLE.len() - 1),
+                );
+                return false;
+            }
+            MouseEventKind::ScrollDown => {
+                app.time_menu = Some((selected + 1) % crate::waveform::TimeBase::CYCLE.len());
+                return false;
+            }
+            _ => {}
+        }
     }
 
     if app.ctx_menu.is_some() {
@@ -514,7 +545,9 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
             if rows.is_empty() {
                 return;
             }
-            let hover = (row.saturating_sub(l.list.y + 2) as usize).min(rows.len() - 1);
+            // The pointer row maps to a row of the full list, not the viewport.
+            let hover =
+                (app.row_scroll + row.saturating_sub(l.list.y + 2) as usize).min(rows.len() - 1);
             // Drop before the nearest signal row (groups are not drop targets).
             let target = rows[hover..]
                 .iter()
@@ -909,18 +942,43 @@ mod tests {
     }
 
     #[test]
-    fn toolbar_time_base_button_cycles() {
+    fn toolbar_time_base_dropdown_selects_a_base() {
         let mut app = app_with(VCD);
         let l = app.layout();
-        let col = (l.toolbar.x..l.toolbar.right())
-            .find(|&col| {
-                crate::ui::toolbar::tool_at(l.toolbar, &app, col)
-                    == Some(crate::ui::toolbar::Tool::TimeBase)
-            })
-            .expect("time base button");
-        assert_eq!(app.time_base, crate::waveform::TimeBase::Scale);
-        crate::app::handle_mouse(&mut app, click(col, l.toolbar.y));
+        let button = crate::ui::toolbar::time_button(l.toolbar, &app);
+        crate::app::handle_mouse(&mut app, click(button.x + 1, button.y));
+        assert_eq!(app.time_menu, Some(0));
+        let area = crate::ui::toolbar::time_menu_rect(l.toolbar, &app);
+        // Entry 0 is the timescale, entry 1 is fs.
+        crate::app::handle_mouse(&mut app, click(area.x + 1, area.y + 2));
         assert_eq!(app.time_base, crate::waveform::TimeBase::Fs);
+        assert!(app.time_menu.is_none());
+    }
+
+    #[test]
+    fn reorder_while_scrolled_keeps_the_view() {
+        let mut vcd = String::from("$timescale 1ns $end\n");
+        let mut body = String::new();
+        for i in 0..20u8 {
+            let id = (b'!' + i) as char;
+            vcd.push_str(&format!("$var wire 1 {id} s{i} $end\n"));
+            body.push_str(&format!("0{id}\n"));
+        }
+        vcd.push_str("$enddefinitions $end\n#0\n");
+        vcd.push_str(&body);
+        let mut app = app_with(&vcd);
+        app.set_display((0..20).collect());
+        app.row_scroll = app.rows_len().saturating_sub(app.rows_h());
+        let bottom = app.row_scroll;
+        assert!(bottom >= 2);
+        let l = app.layout();
+        let y = l.list.y + 2; // first visible row
+        crate::app::handle_mouse(&mut app, click(30, y));
+        crate::app::handle_mouse(&mut app, drag(30, y + 1));
+        app.dragging = None;
+        assert_eq!(app.row_scroll, bottom, "the list must not jump to the top");
+        assert_eq!(app.display[bottom - 1], bottom);
+        assert_eq!(app.display[bottom], bottom - 1);
     }
 
     #[test]

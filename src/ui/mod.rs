@@ -54,6 +54,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             menubar::draw_dropdown(buf, &l, app, idx);
         }
         context::draw(buf, &l, app);
+        toolbar::draw_time_menu(buf, &l, app);
     }
 
     if let Some(dialog) = app.dialog {

@@ -2,9 +2,11 @@ use crate::app::{Action, App};
 use crate::theme::*;
 use crate::ui::layout::Layout;
 use crate::ui::text;
+use crate::waveform::TimeBase;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, Clear, Widget as _};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -52,7 +54,7 @@ const TOOLS: [(&str, Tool); 10] = [
 
 fn tool_label(tool: Tool, app: &App) -> String {
     match tool {
-        Tool::TimeBase => format!("Time: {}", app.time_base_label()),
+        Tool::TimeBase => format!("Time: {} ▾", app.time_base_label()),
         _ => TOOLS
             .iter()
             .find(|(_, t)| *t == tool)
@@ -87,9 +89,79 @@ pub fn tool_at(tb: Rect, app: &App, col: u16) -> Option<Tool> {
         .map(|(tool, _)| tool)
 }
 
+/// Rectangle of the Time button in the shortcut bar.
+pub fn time_button(tb: Rect, app: &App) -> Rect {
+    toolbar_rects(tb, app)
+        .into_iter()
+        .find(|(tool, _)| *tool == Tool::TimeBase)
+        .map(|(_, rect)| rect)
+        .unwrap_or(Rect {
+            x: tb.x,
+            y: tb.y,
+            width: 0,
+            height: 1,
+        })
+}
+
+/// Label of one time-base dropdown entry.
+fn base_label(base: TimeBase, app: &App) -> String {
+    match base {
+        TimeBase::Scale => match &app.wf {
+            Some(wf) => format!("ts ({})", wf.ts.label()),
+            None => "ts".to_string(),
+        },
+        other => other.label().to_string(),
+    }
+}
+
+/// Dropdown rectangle of the time-base selector.
+pub fn time_menu_rect(tb: Rect, app: &App) -> Rect {
+    let button = time_button(tb, app);
+    let width = TimeBase::CYCLE
+        .iter()
+        .map(|base| base_label(*base, app).chars().count())
+        .max()
+        .unwrap_or(6) as u16
+        + 4;
+    Rect {
+        x: button.x,
+        y: button.y + 1,
+        width,
+        height: TimeBase::CYCLE.len() as u16 + 2,
+    }
+}
+
+/// Draw the time-base dropdown (on top of the panes).
+pub fn draw_time_menu(buf: &mut Buffer, l: &Layout, app: &App) {
+    let Some(selected) = app.time_menu else {
+        return;
+    };
+    let area = time_menu_rect(l.toolbar, app);
+    Clear.render(area, buf);
+    buf.set_style(area, Style::new().bg(POPUP_BG));
+    Block::bordered()
+        .title(" Time base ")
+        .title_style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
+        .border_style(Style::new().fg(ACCENT))
+        .render(area, buf);
+    for (i, base) in TimeBase::CYCLE.iter().enumerate() {
+        let entry = base_label(*base, app);
+        let style = if i == selected {
+            Style::new().fg(Color::Black).bg(ACCENT)
+        } else {
+            Style::new().fg(Color::White)
+        };
+        text::put(buf, area.x + 1, area.y + 1 + i as u16, &entry, style);
+    }
+}
+
 pub fn run_tool(app: &mut App, tool: Tool) -> bool {
     if tool == Tool::TimeBase {
-        app.cycle_time_base();
+        let current = TimeBase::CYCLE
+            .iter()
+            .position(|base| *base == app.time_base)
+            .unwrap_or(0);
+        app.time_menu = Some(current);
         return false;
     }
     tool.action().run(app)

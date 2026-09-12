@@ -105,14 +105,6 @@ impl TimeBase {
             Self::S => Some(1.0),
         }
     }
-
-    pub fn next(self) -> Self {
-        let index = Self::CYCLE
-            .iter()
-            .position(|base| *base == self)
-            .unwrap_or(0);
-        Self::CYCLE[(index + 1) % Self::CYCLE.len()]
-    }
 }
 
 /// Render a tick count as a human readable time using the most fitting unit.
@@ -237,8 +229,6 @@ mod tests {
         assert_eq!(format_time_base(1500.0, &ns, TimeBase::Us), "1.5us");
         assert_eq!(format_time_base(1500.0, &ns, TimeBase::Ps), "1500000ps");
         assert_eq!(format_time_base(0.0, &ns, TimeBase::Us), "0us");
-        assert_eq!(TimeBase::Scale.next(), TimeBase::Fs);
-        assert_eq!(TimeBase::S.next(), TimeBase::Scale);
     }
 
     #[test]
