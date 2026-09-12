@@ -25,9 +25,10 @@ terminal.
 - **Waveform rendering** — thin high/low rails, `/` rising and `\` falling
   edges (dense activity collapses to `│`), inline bus values, analog rendering
   for `real` and logic signals.
-- **Hierarchy groups in the Signal List** — displayed signals are grouped by
-  scope and can be collapsed / expanded / removed. Groups are mirrored in the
-  waveform pane.
+- **Signal List groups** — user-defined groups (G0 by default) hold the
+  displayed signals; create / rename / remove them from the group context
+  menu. Group boundaries are marked in the waveform pane; the names only show
+  in the Signal List.
 - **Signal operations** — radix (Hex/Binary/Octal/Decimal/ASCII), digital ⇄
   analog waveform, split a bus into bits, merge consecutive 1-bit signals into
   a bus, search for a value (`v` then `n`/`N`), cursor time shown on the ruler.
@@ -152,6 +153,7 @@ override with `--gui` / `--no-gui`, or open the browser directly with `O`.
 | double click a group | collapse / expand it (rename with `r` or the context menu) |
 | double click | expand a scope in Instance, or add a signal |
 | dialog `✕` / scrollbar | close the dialog / drag the scrollbar |
+| Time button in the shortcut bar | cycle the ruler time base (timescale → fs … s) |
 
 > Windows Terminal reserves `Shift`+click for text selection and never
 > forwards it to the application; there the keyboard `V` / `Space` /

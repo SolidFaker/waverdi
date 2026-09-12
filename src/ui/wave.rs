@@ -72,9 +72,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         };
         let y = l.rows.y + row as u16;
         match list_row {
-            crate::app::ListRow::Group {
-                name, collapsed, ..
-            } => draw_group_row(buf, l, name, *collapsed, selected, y),
+            crate::app::ListRow::Group { .. } => draw_group_row(buf, l, selected, y),
             crate::app::ListRow::Signal { sig, .. } => {
                 draw_signal_row(buf, l, app, *sig, &wf.signals[*sig], row_bg, y);
             }
@@ -92,14 +90,8 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     draw_scrollbars(buf, l, app);
 }
 
-fn draw_group_row(
-    buf: &mut Buffer,
-    l: &Layout,
-    name: &str,
-    collapsed: bool,
-    selected: bool,
-    y: u16,
-) {
+/// Group boundary row: the group name is only shown in the Signal List.
+fn draw_group_row(buf: &mut Buffer, l: &Layout, selected: bool, y: u16) {
     let bg = if selected { ROW_SEL_BG } else { LIST_HEADER_BG };
     buf.set_style(
         ratatui::layout::Rect {
@@ -110,14 +102,12 @@ fn draw_group_row(
         },
         Style::new().bg(bg),
     );
-    let arrow = if collapsed { "▸" } else { "▾" };
-    let label = format!("{arrow} {name}");
-    let style = if selected {
-        Style::new().fg(Color::Black).bg(bg)
-    } else {
-        Style::new().fg(ACCENT).bg(bg).add_modifier(Modifier::BOLD)
-    };
-    text::put(buf, l.rows.x + 1, y, &label, style);
+    buf.set_string(
+        l.rows.x,
+        y,
+        "─".repeat(l.rows.width as usize),
+        Style::new().fg(DIM).bg(bg),
+    );
 }
 
 /// Pane label; highlighted while the waveform pane owns the focus.
@@ -138,6 +128,14 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     } else {
         TICK
     };
+    // Cursor time at the right edge of the ruler (like Verdi's cursor label).
+    // Reserve its space so tick labels never overlap it or the scrollbar.
+    let cursor_label = format!(
+        " {} ",
+        waveform::format_time_base(app.cursor as f64, &ts, app.time_base)
+    );
+    let cursor_w = cursor_label.chars().count() as u16;
+    let cursor_x = l.wave.right().saturating_sub(cursor_w + 1);
     let mut guard = 0;
     while t <= t_end && guard < 10_000 {
         guard += 1;
@@ -146,13 +144,11 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
             let x = l.wave.x as i64 + col;
             if x >= 0 && (x as usize) < l.wave.right() as usize {
                 text::set_cell(buf, x as u16, l.ruler.y + 1, RULER_TICK, tick_color, BG);
-                let label = waveform::format_time(t, &ts);
+                let label = waveform::format_time_base(t, &ts, app.time_base);
                 let lw = label.chars().count() as i64;
                 let lx = x - lw / 2;
-                if lx >= 0
-                    && lx >= last_label_end + 2
-                    && (lx + lw) as usize <= l.wave.right() as usize
-                {
+                // Never spill over the pane edge (divider / cursor label).
+                if lx >= l.wave.x as i64 && lx >= last_label_end + 2 && lx + lw <= cursor_x as i64 {
                     text::put(
                         buf,
                         lx as u16,
@@ -167,15 +163,11 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         t += step;
     }
 
-    // Cursor time at the right edge of the ruler (like Verdi's cursor label).
-    let label = format!(" {} ", waveform::format_time(app.cursor as f64, &ts));
-    let width = label.chars().count() as u16;
-    let x = l.wave.right().saturating_sub(width + 1);
     text::put(
         buf,
-        x,
+        cursor_x,
         l.ruler.y,
-        &label,
+        &cursor_label,
         Style::new().fg(CURSOR).add_modifier(Modifier::BOLD),
     );
 }

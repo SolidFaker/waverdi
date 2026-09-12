@@ -58,6 +58,63 @@ impl fmt::Display for TimeScale {
     }
 }
 
+/// User-selectable time base for the ruler and status readouts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TimeBase {
+    /// The dump's timescale, with a fitting unit chosen per value.
+    Scale,
+    Fs,
+    Ps,
+    Ns,
+    Us,
+    Ms,
+    S,
+}
+
+impl TimeBase {
+    pub const CYCLE: [TimeBase; 7] = [
+        Self::Scale,
+        Self::Fs,
+        Self::Ps,
+        Self::Ns,
+        Self::Us,
+        Self::Ms,
+        Self::S,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Scale => "ts",
+            Self::Fs => "fs",
+            Self::Ps => "ps",
+            Self::Ns => "ns",
+            Self::Us => "us",
+            Self::Ms => "ms",
+            Self::S => "s",
+        }
+    }
+
+    pub fn secs(self) -> Option<f64> {
+        match self {
+            Self::Scale => None,
+            Self::Fs => Some(1e-15),
+            Self::Ps => Some(1e-12),
+            Self::Ns => Some(1e-9),
+            Self::Us => Some(1e-6),
+            Self::Ms => Some(1e-3),
+            Self::S => Some(1.0),
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::CYCLE
+            .iter()
+            .position(|base| *base == self)
+            .unwrap_or(0);
+        Self::CYCLE[(index + 1) % Self::CYCLE.len()]
+    }
+}
+
 /// Render a tick count as a human readable time using the most fitting unit.
 pub fn format_time(t: f64, ts: &TimeScale) -> String {
     let secs = t * ts.secs_per_tick();
@@ -72,19 +129,35 @@ pub fn format_time(t: f64, ts: &TimeScale) -> String {
             break;
         }
     }
-    let v = secs / UNIT_SECS[sel].1;
-    let text = if v.fract() == 0.0 && v.abs() < 1e15 {
-        format!("{}", v as i64)
-    } else {
-        let s = format!("{v:.3}");
-        let t = s.trim_end_matches('0').trim_end_matches('.');
-        if t.is_empty() || t == "-" {
-            format!("{v:.2}")
-        } else {
-            t.to_string()
+    format!("{}{}", fmt_value(secs / UNIT_SECS[sel].1), UNIT_SECS[sel].0)
+}
+
+/// Render a tick count in a fixed time base (`TimeBase::Scale` behaves like
+/// [`format_time`]).
+pub fn format_time_base(t: f64, ts: &TimeScale, base: TimeBase) -> String {
+    match base.secs() {
+        None => format_time(t, ts),
+        Some(unit) => {
+            let value = t * ts.secs_per_tick() / unit;
+            format!("{}{}", fmt_value(value), base.label())
         }
-    };
-    format!("{}{}", text, UNIT_SECS[sel].0)
+    }
+}
+
+fn fmt_value(v: f64) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        return format!("{}", v as i64);
+    }
+    let s = format!("{v:.3}");
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() || trimmed == "-" {
+        format!("{v:.2}")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Pick a "nice" ruler step (1/2/5 * 10^n) of roughly `scale * 8` ticks.
@@ -154,6 +227,18 @@ mod tests {
             "1ns"
         );
         assert_eq!(format_time(0.5, &TimeScale { num: 1, unit: "fs" }), "0.5fs");
+    }
+
+    #[test]
+    fn format_time_base_respects_the_selected_unit() {
+        let ns = TimeScale { num: 1, unit: "ns" };
+        assert_eq!(format_time_base(1500.0, &ns, TimeBase::Scale), "1.5us");
+        assert_eq!(format_time_base(1500.0, &ns, TimeBase::Ns), "1500ns");
+        assert_eq!(format_time_base(1500.0, &ns, TimeBase::Us), "1.5us");
+        assert_eq!(format_time_base(1500.0, &ns, TimeBase::Ps), "1500000ps");
+        assert_eq!(format_time_base(0.0, &ns, TimeBase::Us), "0us");
+        assert_eq!(TimeBase::Scale.next(), TimeBase::Fs);
+        assert_eq!(TimeBase::S.next(), TimeBase::Scale);
     }
 
     #[test]

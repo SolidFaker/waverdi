@@ -4,7 +4,7 @@ mod tree;
 mod value;
 
 pub use signal::{Change, SigKind, Signal};
-pub use time::{format_time, nice_step, TimeScale};
+pub use time::{format_time, format_time_base, nice_step, TimeBase, TimeScale};
 pub use tree::ScopeTree;
 pub use value::{fmt_bits, fmt_real, Radix, Value};
 

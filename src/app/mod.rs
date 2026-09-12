@@ -1,4 +1,4 @@
-﻿mod action;
+mod action;
 mod browser;
 mod context;
 mod dialog;
@@ -20,7 +20,7 @@ pub use mouse::handle_mouse;
 pub use nav::{Group, ListRow};
 
 use crate::ui::layout::{compute_layout, Layout, Splits};
-use crate::waveform::{Radix, Ticks, Waveform};
+use crate::waveform::{Radix, Ticks, TimeBase, Waveform};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -119,6 +119,8 @@ pub struct App {
     pub t0: f64,
     pub scale: f64,
     pub cursor: Ticks,
+    /// Time base of the ruler and status readouts (timescale by default).
+    pub time_base: TimeBase,
     pub range: Option<(Ticks, Ticks)>,
     pub(crate) dragging: Option<Drag>,
     pub last_area: Rect,
@@ -174,6 +176,7 @@ impl App {
             t0: 0.0,
             scale: 1.0,
             cursor: 0,
+            time_base: TimeBase::Scale,
             range: None,
             dragging: None,
             last_area: Rect::new(0, 0, 0, 0),
@@ -379,6 +382,25 @@ impl App {
                 last.name()
             ));
         }
+    }
+
+    /// Label of the current time base for the shortcut bar.
+    pub fn time_base_label(&self) -> String {
+        match self.time_base {
+            TimeBase::Scale => self
+                .wf
+                .as_ref()
+                .map(|wf| wf.ts.label())
+                .unwrap_or_else(|| "ts".to_string()),
+            other => other.label().to_string(),
+        }
+    }
+
+    /// Cycle the ruler time base (toolbar button).
+    pub fn cycle_time_base(&mut self) {
+        self.time_base = self.time_base.next();
+        let label = self.time_base_label();
+        self.msg(format!("time base: {label}"));
     }
 
     /// Test helper: install a flat display list owned by the first group.

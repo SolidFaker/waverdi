@@ -1,4 +1,4 @@
-﻿use super::{App, ListRow};
+use super::{App, ListRow};
 use crate::waveform::{SigKind, Signal, Ticks, Value};
 
 impl App {
@@ -12,12 +12,26 @@ impl App {
     }
 
     pub fn zoom_at(&mut self, t: f64, factor: f64) {
-        if self.wf.is_none() {
+        let Some(wf) = &self.wf else {
+            return;
+        };
+        let cols = self.cols().max(1) as f64;
+        let total = wf.total_ticks() as f64;
+        let min_scale = if total > 0.0 {
+            total / cols
+        } else {
+            f64::MIN_POSITIVE
+        };
+        if factor > 1.0 && self.scale >= min_scale {
+            // The whole range is already visible: do not zoom out further.
             return;
         }
-        let cols = self.cols().max(1) as f64;
         let x_mid = ((t - self.t0) / self.scale).clamp(0.0, cols);
-        self.scale = (self.scale * factor).clamp(1e-9, 1e15);
+        let mut scale = self.scale * factor;
+        if factor > 1.0 {
+            scale = scale.min(min_scale);
+        }
+        self.scale = scale.clamp(1e-9, 1e15);
         self.t0 = t - x_mid * self.scale;
         self.clamp_view();
     }
@@ -178,6 +192,23 @@ mod tests {
         app.fit();
         assert_eq!(app.t0, 0.0);
         assert!((app.scale - 30.0 / app.cols() as f64).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zoom_out_stops_at_the_full_range() {
+        let mut app = app_with(VCD);
+        app.fit();
+        let fitted = app.scale;
+        app.zoom_out();
+        app.zoom_out();
+        assert!((app.scale - fitted).abs() < 1e-12);
+        // From a closer view, zooming out clamps to exactly the full range.
+        app.scale = fitted / 1.3 * 1.01;
+        app.zoom_out();
+        assert!((app.scale - fitted).abs() < fitted * 1e-9);
+        // Zooming in still works.
+        app.zoom_in();
+        assert!(app.scale < fitted);
     }
 
     #[test]

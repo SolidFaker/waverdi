@@ -232,7 +232,7 @@ fn mouse_down(
         return false;
     }
     if pt_in(l.toolbar, col, row) {
-        return match toolbar::tool_at(l.toolbar, col) {
+        return match toolbar::tool_at(l.toolbar, app, col) {
             Some(tool) => toolbar::run_tool(app, tool),
             None => false,
         };
@@ -906,6 +906,21 @@ mod tests {
         );
         assert!(app.dialog_scroll > 0);
         assert!(app.dragging.is_some());
+    }
+
+    #[test]
+    fn toolbar_time_base_button_cycles() {
+        let mut app = app_with(VCD);
+        let l = app.layout();
+        let col = (l.toolbar.x..l.toolbar.right())
+            .find(|&col| {
+                crate::ui::toolbar::tool_at(l.toolbar, &app, col)
+                    == Some(crate::ui::toolbar::Tool::TimeBase)
+            })
+            .expect("time base button");
+        assert_eq!(app.time_base, crate::waveform::TimeBase::Scale);
+        crate::app::handle_mouse(&mut app, click(col, l.toolbar.y));
+        assert_eq!(app.time_base, crate::waveform::TimeBase::Fs);
     }
 
     #[test]

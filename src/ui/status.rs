@@ -55,21 +55,24 @@ pub fn draw_status(buf: &mut Buffer, l: &Layout, app: &App) {
         write(" | ", sep);
         write("cursor ", Style::new().fg(DIM));
         write(
-            &waveform::format_time(app.cursor as f64, &wf.ts),
+            &waveform::format_time_base(app.cursor as f64, &wf.ts, app.time_base),
             Style::new().fg(CURSOR),
         );
         if let Some((a, b)) = app.range {
             write(" | ", sep);
             write("ΔT ", Style::new().fg(DIM));
             write(
-                &waveform::format_time((b - a) as f64, &wf.ts),
+                &waveform::format_time_base((b - a) as f64, &wf.ts, app.time_base),
                 Style::new().fg(Color::Yellow),
             );
         }
         write(" | ", sep);
         write("zoom ", Style::new().fg(DIM));
         write(
-            &format!("{}/char", waveform::format_time(app.scale, &wf.ts)),
+            &format!(
+                "{}/char",
+                waveform::format_time_base(app.scale, &wf.ts, app.time_base)
+            ),
             Style::new().fg(Color::White),
         );
         write(" | ", sep);

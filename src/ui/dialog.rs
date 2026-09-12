@@ -22,6 +22,7 @@ const KEYS: &[&str] = &[
     "          w / b next / previous edge (1-bit: rising)",
     "          e / ge next / previous falling edge",
     "          0 / $ start / end of time   , / . prev / next change",
+    "          Time button in the nWave bar cycles the time base",
     "          Home / End start / end   Tab cycle focus",
     "Signals   a / Enter add (Instance)   V visual   x cut (nWave)",
     "          dd cut selection   p paste below   Esc clear",

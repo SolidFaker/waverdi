@@ -721,11 +721,15 @@ mod tests {
     fn minus_and_equals_zoom() {
         let mut app = app_with(VCD);
         app.set_display(vec![0]);
-        let before = app.scale;
+        // The initial fit already shows the whole range: zooming out is a no-op.
+        let full = app.scale;
         handle_key(&mut app, key(KeyCode::Char('-')));
-        assert!(app.scale > before);
+        assert!((app.scale - full).abs() < full * 1e-12);
+        // Zooming in works, zooming out returns to the full range.
         handle_key(&mut app, key(KeyCode::Char('=')));
-        assert!((app.scale - before).abs() < before * 1e-9);
+        assert!(app.scale < full);
+        handle_key(&mut app, key(KeyCode::Char('-')));
+        assert!((app.scale - full).abs() < full * 1e-9);
     }
 
     #[test]
