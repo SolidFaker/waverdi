@@ -1191,9 +1191,11 @@ dependencies = [
 name = "waverdi"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "clap",
  "crossterm",
  "fst-writer",
+ "libc",
  "ratatui",
  "rfd",
  "wellen",

@@ -34,17 +34,30 @@ pub fn parse(path: &Path) -> Result<ParseOut, String> {
     match detect(path) {
         Format::Vcd => crate::vcd::parse_vcd(path),
         Format::Fst => crate::fst::parse_fst(path),
-        Format::Fsdb => Err(format!(
-            "{}: FSDB is a proprietary Synopsys format and can only be read with the \
-             Verdi FSDB Reader (FFR) library (nffr.dll / libnffr.so from VERDI_HOME). \
-             Convert the dump to VCD or FST (e.g. `fsdb2vcd`) and open that instead.",
-            path.display()
-        )),
+        Format::Fsdb => parse_fsdb(path),
         Format::Unknown => Err(format!(
             "{}: unsupported dump type (supported: .vcd, .fst; .fsdb requires Verdi FFR)",
             path.display()
         )),
     }
+}
+
+/// FSDB is read through the Verdi FSDB Reader (FFR) when the SDK was
+/// available at build time (`VERDI_HOME` set).
+#[cfg(fsdb_sdk)]
+fn parse_fsdb(path: &Path) -> Result<ParseOut, String> {
+    crate::fsdb::parse_fsdb(path)
+}
+
+#[cfg(not(fsdb_sdk))]
+fn parse_fsdb(path: &Path) -> Result<ParseOut, String> {
+    Err(format!(
+        "{}: FSDB is a proprietary Synopsys format and can only be read with the \
+         Verdi FSDB Reader (FFR) library (nffr.dll / libnffr.so from VERDI_HOME). \
+         Build with VERDI_HOME set (source ~/synopsys/env.sh) to enable FSDB support, \
+         or convert the dump to VCD or FST (e.g. `fsdb2vcd`) and open that instead.",
+        path.display()
+    ))
 }
 
 #[cfg(test)]
@@ -60,6 +73,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(fsdb_sdk))]
     fn fsdb_reports_verdi_hint() {
         let err = match parse(Path::new("missing.fsdb")) {
             Ok(_) => panic!("fsdb must not parse without the Verdi FFR library"),
@@ -67,5 +81,11 @@ mod tests {
         };
         assert!(err.contains("Verdi"), "{err}");
         assert!(err.contains("FFR"), "{err}");
+    }
+
+    #[test]
+    #[cfg(fsdb_sdk)]
+    fn fsdb_without_file_errors() {
+        assert!(parse(Path::new("missing.fsdb")).is_err());
     }
 }

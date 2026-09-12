@@ -7,6 +7,9 @@ mod ui;
 mod vcd;
 mod waveform;
 
+#[cfg(fsdb_sdk)]
+mod fsdb;
+
 use app::App;
 use clap::Parser;
 use std::io;
