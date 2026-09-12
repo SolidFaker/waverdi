@@ -1,4 +1,4 @@
-﻿use super::{App, Dialog, Focus, ListRow};
+use super::{App, Dialog, Focus, ListRow};
 use crate::ui::menubar;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -255,6 +255,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.move_cursor(step);
             false
         }
+        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Add the Source selection to the waveform (Verdi shortcut).
+            app.add_source_selection();
+            false
+        }
         KeyCode::Char('w') => {
             app.jump_edge(true, Some(1));
             false
@@ -291,7 +296,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
             match app.focus {
                 Focus::Tree => app.move_tree(-1),
-                Focus::Source => app.move_source_cursor(-1, 0),
+                Focus::Source => app.extend_source_selection(-1),
                 _ => app.extend_selection(-1),
             }
             false
@@ -299,7 +304,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
             match app.focus {
                 Focus::Tree => app.move_tree(1),
-                Focus::Source => app.move_source_cursor(1, 0),
+                Focus::Source => app.extend_source_selection(1),
                 _ => app.extend_selection(1),
             }
             false
@@ -964,6 +969,62 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Enter));
         assert_eq!(app.display, vec![0]);
         assert_eq!(app.focus, Focus::Source);
+    }
+
+    #[test]
+    fn source_selection_adds_deduplicated_signals() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $scope module dut $end\n\
+            $var wire 1 ! clk $end\n\
+            $var wire 4 \" count [3:0] $end\n\
+            $var wire 1 # en $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\nb0000 \"\n0#\n";
+        let mut app = app_with(vcd);
+        let dir = std::env::temp_dir().join(format!("waverdi_src_sel_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("counter.sv");
+        std::fs::write(
+            &file,
+            "module counter(input logic clk, input logic en, output logic [3:0] count);\n\
+             always_ff @(posedge clk) begin\n\
+             if (en) count <= count + 1'b1;\n\
+             end\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
+        app.expanded.insert(1);
+        app.tree_sel = 2;
+        app.sync_source();
+
+        // Select the always block lines (clk / en / count with duplicates).
+        app.set_source_cursor(1, 0);
+        app.begin_source_selection();
+        app.extend_source_selection_to(3);
+        app.focus = Focus::Source;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.display, vec![0, 2, 1]);
+        assert_eq!(app.focus, Focus::Source);
+
+        // The right-click menu offers the same action for a word selection.
+        app.clear_all();
+        let col = app.source_view.as_ref().unwrap().lines[2]
+            .find("en")
+            .unwrap();
+        app.set_source_cursor(2, col); // `en` in the if
+        app.select_source_word();
+        app.open_context_menu(crate::app::CtxTarget::Source, 5, 5);
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.display, vec![2]);
     }
 
     #[test]

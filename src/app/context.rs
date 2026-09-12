@@ -1,4 +1,4 @@
-﻿use super::{App, Dialog};
+use super::{App, Dialog};
 use crate::waveform::{Change, Radix, SigKind, Signal, Ticks, Value};
 use std::collections::BTreeSet;
 
@@ -10,6 +10,7 @@ pub enum CtxItem {
     SplitBus,
     CreateBus,
     Remove,
+    AddToWaveform,
     NewGroup,
     RenameGroup,
     ExpandGroup,
@@ -61,11 +62,15 @@ pub const GROUP_MENU: &[CtxEntry] = &[
     CtxEntry::Item("Remove Group", CtxItem::RemoveGroup),
 ];
 
+pub const SOURCE_MENU: &[CtxEntry] = &[CtxEntry::Item("Add to Waveform", CtxItem::AddToWaveform)];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CtxTarget {
     Signal(usize),
     /// Stable group id.
     Group(u32),
+    /// RTL source pane (selection).
+    Source,
 }
 
 #[derive(Clone, Debug)]
@@ -92,6 +97,7 @@ impl App {
     pub fn ctx_root(&self) -> &'static [CtxEntry] {
         match self.ctx_menu.as_ref().map(|menu| &menu.target) {
             Some(CtxTarget::Group(_)) => GROUP_MENU,
+            Some(CtxTarget::Source) => SOURCE_MENU,
             _ => SIGNAL_MENU,
         }
     }
@@ -189,6 +195,7 @@ impl App {
                     self.remove_group(index);
                 }
             }
+            (CtxTarget::Source, CtxItem::AddToWaveform) => self.add_source_selection(),
             _ => {}
         }
     }

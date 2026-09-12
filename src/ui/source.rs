@@ -1,6 +1,5 @@
-use crate::app::App;
+﻿use crate::app::App;
 use crate::rtl::view::HlKind;
-use crate::theme::Theme;
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use ratatui::buffer::Buffer;
@@ -29,10 +28,15 @@ pub fn code_rect(l: &Layout) -> Rect {
     }
 }
 
-/// Bordered frame of the RTL source pane.
-pub fn draw_frame(buf: &mut Buffer, l: &Layout, t: &Theme) {
+/// Bordered frame of the RTL source pane; the title names the module.
+pub fn draw_frame(buf: &mut Buffer, l: &Layout, app: &App) {
+    let t = &app.theme;
+    let title = match app.source_view.as_ref().map(|view| view.module.clone()) {
+        Some(module) => format!(" Source — {module} "),
+        None => " Source ".to_string(),
+    };
     Block::bordered()
-        .title(" Source ")
+        .title(title)
         .title_style(Style::new().fg(t.text).add_modifier(Modifier::BOLD))
         .border_style(Style::new().fg(t.panel_border))
         .render(l.source, buf);
@@ -124,7 +128,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
         return;
     };
 
-    // Code with line numbers, scrolling and a keyboard cursor.
+    // Code with line numbers, scrolling, selection and a keyboard cursor.
     let digits = view.lines.len().max(1).to_string().len();
     let focused = app.focus == crate::app::Focus::Source;
     for row in 0..code.height as usize {
@@ -133,13 +137,20 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
             break;
         };
         let y = code.y + row as u16;
-        let bg = if focused && index == view.line {
+        let selected = view.is_line_selected(index);
+        let bg = if selected {
             t.row_sel_bg
+        } else if focused && index == view.line {
+            t.list_header_bg
         } else if index.is_multiple_of(2) {
             t.row_alt
         } else {
             t.bg
         };
+        let word_range = view
+            .word
+            .filter(|(line, _, _)| *line == index)
+            .map(|(_, start, end)| (start, end));
         let number = format!("{:>digits$} ", index + 1);
         text::put(buf, code.x, y, &number, Style::new().fg(t.dim).bg(bg));
 
@@ -161,6 +172,11 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
                 }
                 let (fg, bg) = if focused && index == view.line && col == view.col {
                     (t.bg, t.cursor)
+                } else if word_range
+                    .map(|(start, end)| col >= start && col < end)
+                    .unwrap_or(false)
+                {
+                    (t.bg, t.accent)
                 } else {
                     (fg, bg)
                 };

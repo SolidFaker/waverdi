@@ -31,7 +31,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         let tree_focused = app.focus == crate::app::Focus::Tree;
         let nwave_focused = matches!(app.focus, crate::app::Focus::List | crate::app::Focus::Wave);
         wave::draw_nwave_frame(buf, &l, t, false);
-        source::draw_frame(buf, &l, t);
+        source::draw_frame(buf, &l, app);
         tree::draw_frame(buf, &l, t, tree_focused);
         if nwave_focused {
             // The shared row between the top row and nWave follows the focus.
@@ -508,6 +508,25 @@ mod tests {
         assert!(lum(wave) < lum(list), "wave {wave:?} vs list {list:?}");
         assert_ne!(wave, crate::theme::Theme::LIGHT.popup_bg);
         assert!(lum(wave) < lum(crate::theme::Theme::DARK.bg) + 32);
+    }
+
+    #[test]
+    fn instance_pane_shows_hierarchy_and_module_columns() {
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $scope module dut $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
+        app.expanded.insert(1);
+        let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("Hierarchy"), "{screen}");
+        assert!(screen.contains("Module"), "{screen}");
+        assert!(screen.contains("counter"), "{screen}");
     }
 
     #[test]

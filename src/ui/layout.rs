@@ -72,7 +72,8 @@ pub struct Layout {
 
 impl Layout {
     pub fn tree_height(&self) -> usize {
-        self.tree.height.saturating_sub(2) as usize
+        // Frame borders plus the Hierarchy/Module header row.
+        self.tree.height.saturating_sub(3) as usize
     }
 
     /// Column of the instance/source border, which can be dragged to resize.

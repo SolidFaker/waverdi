@@ -162,12 +162,19 @@ directory for `.v`/`.sv` files.
 The resolved files are scanned with a lightweight SystemVerilog scanner:
 modules, ports and declarations, `assign` statements, `always`/`initial`
 blocks and module instantiations keep their file and line. The **Instance**
-pane lists instances only (with their defining module); selecting one opens
-its module in the **Source** pane, highlighted (keywords, comments, strings,
-numbers, directives, declared signals) with line numbers and a keyboard
-cursor. Put the cursor on a signal and press `Enter` / `a` (or double click
-it) to add it to the Signal List; the last row shows the selected signal's
-declaration, driver and load lines.
+pane is a two-column table (`Hierarchy` | `Module`) listing instances only;
+selecting one opens its module in the **Source** pane, highlighted (keywords,
+comments, strings, numbers, directives, declared signals) with line numbers
+and a keyboard cursor. Signals are added from the source:
+
+- put the cursor on a name and press `Enter` / `a` (double click also picks a
+  name);
+- drag the mouse or use `Shift`+`↑`/`↓` to select lines, then `Ctrl+W` or
+  right-click ▸ **Add to Waveform** adds every selected signal at once
+  (duplicates removed).
+
+The last row of the source view shows the selected signal's declaration,
+driver and load lines.
 
 The `waveform/` folder contains demos: `counter.vcd` (4-bit counter with
 enable/carry), `complex.vcd` (a small CPU/RAM/sensor design with 16 signals,
@@ -206,7 +213,7 @@ override with `--gui` / `--no-gui`, or open the browser directly with `O`.
 | `dd` | cut the selected signal(s) into the register |
 | `p` | paste the register below the current signal / into the current group |
 | `Space` | toggle the row in the multi-selection |
-| `Shift`+`↑` / `↓` | extend the selection from its anchor |
+| `Shift`+`↑` / `↓` | Source: select lines; lists: extend the signal selection |
 | `Esc` | clear the multi-selection / leave visual mode |
 | `w` / `b` | next / previous edge (on 1-bit signals: next / previous rising edge) |
 | `e` / `ge` | next / previous falling edge (1-bit signals; on buses: next / previous change) |
@@ -216,6 +223,7 @@ override with `--gui` / `--no-gui`, or open the browser directly with `O`.
 | `a`, `Enter` | Instance: fold/unfold the scope; Source: add the signal under the cursor; Signal List: expand/collapse a group |
 | `j` / `k` / `h` / `l` | Source: move the code cursor |
 | `↑` / `↓` / `←` / `→` | Source: move the code cursor |
+| `Ctrl+W` | Source: add the selected signals to the waveform |
 | `←` / `→` | on a group row: collapse / expand |
 | `x` | in the waveform pane: cut the selection (alias for `dd`) |
 | `r` | cycle radix, or rename the selected group |
@@ -257,9 +265,10 @@ session.
 | right click signal / group | context menu (submenus for radix, waveform, bus) |
 | `Shift`/`Alt`+click a signal | add / remove it from the multi-selection |
 | `Ctrl`+click a signal | select every signal between the anchor and the click |
-| click / double click in Source | move the code cursor / add the signal under it |
+| click / double click in Source | move the code cursor / pick a signal name |
 | double click a group | collapse / expand it (rename with `r` or the context menu) |
 | double click | fold/unfold an instance in the Instance pane |
+| drag in Source / right-click | select lines / Add to Waveform |
 | dialog `✕` / scrollbar | close the dialog / drag the scrollbar |
 | Time button in the shortcut bar | cycle the ruler time base (timescale → fs … s) |
 

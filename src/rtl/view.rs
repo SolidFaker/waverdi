@@ -37,6 +37,12 @@ pub struct SourceView {
     pub scroll: usize,
     pub line: usize,
     pub col: usize,
+    /// Line the current line selection is anchored at.
+    pub anchor: Option<usize>,
+    /// Selected line range (inclusive, ordered).
+    pub sel: Option<(usize, usize)>,
+    /// Selected identifier: (line, start column, end column).
+    pub word: Option<(usize, usize, usize)>,
 }
 
 impl SourceView {
@@ -61,10 +67,14 @@ impl SourceView {
             scroll: line,
             line,
             col: 0,
+            anchor: None,
+            sel: None,
+            word: None,
         })
     }
 
     pub fn move_cursor(&mut self, delta_line: i64, delta_col: i64, rows: usize) {
+        self.clear_selection();
         let last = self.lines.len().saturating_sub(1) as i64;
         self.line = (self.line as i64 + delta_line).clamp(0, last.max(0)) as usize;
         let len = self
@@ -85,6 +95,57 @@ impl SourceView {
             .unwrap_or(0);
         self.col = col.min(len);
         self.ensure_visible(rows);
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.anchor = None;
+        self.sel = None;
+        self.word = None;
+    }
+
+    /// Start a line selection at the cursor (mouse down).
+    pub fn begin_line_selection(&mut self) {
+        self.anchor = Some(self.line);
+        self.sel = Some((self.line, self.line));
+        self.word = None;
+    }
+
+    /// Extend the line selection to `line`.
+    pub fn select_lines(&mut self, line: usize) {
+        let line = line.min(self.lines.len().saturating_sub(1));
+        let anchor = self.anchor.unwrap_or(self.line);
+        self.line = line;
+        self.sel = Some((anchor.min(line), anchor.max(line)));
+        self.word = None;
+    }
+
+    /// Extend the selection by moving the cursor one row (Shift+arrows).
+    pub fn extend_line_selection(&mut self, delta_line: i64, rows: usize) {
+        if self.anchor.is_none() {
+            self.anchor = Some(self.line);
+        }
+        let last = self.lines.len().saturating_sub(1) as i64;
+        self.line = (self.line as i64 + delta_line).clamp(0, last.max(0)) as usize;
+        if let Some(anchor) = self.anchor {
+            self.sel = Some((anchor.min(self.line), anchor.max(self.line)));
+        }
+        self.word = None;
+        self.ensure_visible(rows);
+    }
+
+    /// Select the identifier under the cursor (double click).
+    pub fn select_word(&mut self) {
+        if let Some((start, end)) = self.word_span_at_cursor() {
+            self.word = Some((self.line, start, end));
+            self.sel = None;
+            self.anchor = None;
+        }
+    }
+
+    pub fn is_line_selected(&self, line: usize) -> bool {
+        self.sel
+            .map(|(start, end)| line >= start && line <= end)
+            .unwrap_or(false)
     }
 
     pub fn ensure_visible(&mut self, rows: usize) {
@@ -111,6 +172,17 @@ impl SourceView {
     /// Identifier under the cursor (or immediately left of it), ignoring
     /// keywords so only real signal names can be picked.
     pub fn word_at_cursor(&self) -> Option<String> {
+        let (start, end) = self.word_span_at_cursor()?;
+        let line = self.lines.get(self.line)?;
+        let word: String = line.chars().skip(start).take(end - start).collect();
+        if word.is_empty() || word.chars().next()?.is_ascii_digit() || is_keyword(&word) {
+            return None;
+        }
+        Some(word)
+    }
+
+    /// Character span of the identifier under (or just left of) the cursor.
+    pub fn word_span_at_cursor(&self) -> Option<(usize, usize)> {
         let line = self.lines.get(self.line)?;
         let chars: Vec<char> = line.chars().collect();
         let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
@@ -129,11 +201,7 @@ impl SourceView {
         while end < chars.len() && is_word(chars[end]) {
             end += 1;
         }
-        let word: String = chars[start..end].iter().collect();
-        if word.is_empty() || word.chars().next()?.is_ascii_digit() || is_keyword(&word) {
-            return None;
-        }
-        Some(word)
+        (end > start).then_some((start, end))
     }
 }
 

@@ -1,4 +1,4 @@
-﻿use super::{App, CtxTarget, Dialog, Drag, DragMode, Focus, ListRow, TreeNode};
+use super::{App, CtxTarget, Dialog, Drag, DragMode, Focus, ListRow, TreeNode};
 use crate::ui::layout::{pt_in, tree_inner, Layout, Splits};
 use crate::ui::menubar;
 use crate::ui::source;
@@ -300,7 +300,10 @@ fn mouse_down(
             app.dragging = Some(new_drag(DragMode::TreeScroll, col, 0.0));
             return false;
         }
-        let k = app.tree_scroll + (row - inner.y) as usize;
+        if row == inner.y {
+            return false; // column header
+        }
+        let k = app.tree_scroll + (row - inner.y - 1) as usize;
         let nodes = app.tree_visible();
         if let Some(node) = nodes.get(k).copied() {
             app.tree_sel = k;
@@ -315,15 +318,29 @@ fn mouse_down(
 
     if pt_in(source::code_rect(&l), col, row) {
         let rect = source::code_rect(&l);
-        let index = app
+        if let Some(index) = app
             .source_view
             .as_ref()
-            .map(|view| view.scroll + (row - rect.y) as usize);
-        if let Some(index) = index {
+            .map(|view| view.scroll + (row - rect.y) as usize)
+        {
             app.focus = Focus::Source;
             app.set_source_cursor(index, col.saturating_sub(rect.x) as usize);
-            if is_double {
-                app.add_source_word();
+            match btn {
+                MouseButton::Right => app.open_context_menu(CtxTarget::Source, col, row),
+                MouseButton::Left if is_double => app.select_source_word(),
+                MouseButton::Left => {
+                    app.begin_source_selection();
+                    if shift {
+                        app.extend_source_selection_to(index);
+                    }
+                    app.dragging = Some(Drag {
+                        mode: DragMode::SourceSel,
+                        start_x: col,
+                        start_pct: 0.0,
+                        row: 0,
+                    });
+                }
+                _ => {}
             }
         }
         return false;
@@ -611,6 +628,16 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
             app.splits.value_pct =
                 pct.clamp(Splits::MIN_VALUE_PCT as f64, Splits::MAX_VALUE_PCT as f64) as u16;
         }
+        DragMode::SourceSel => {
+            let rect = source::code_rect(&l);
+            let line = app
+                .source_view
+                .as_ref()
+                .map(|view| view.scroll + row.saturating_sub(rect.y) as usize);
+            if let Some(line) = line {
+                app.extend_source_selection_to(line);
+            }
+        }
     }
 }
 
@@ -754,10 +781,11 @@ mod tests {
     fn double_click_tree_toggles_the_scope() {
         let mut app = app_with(VCD);
         let l = app.layout();
-        crate::app::handle_mouse(&mut app, click(2, l.tree.y + 1));
+        let row = l.tree.y + 2; // border, column header, first node
+        crate::app::handle_mouse(&mut app, click(2, row));
         assert_eq!(app.focus, Focus::Tree);
         let expanded = app.expanded.contains(&0);
-        crate::app::handle_mouse(&mut app, click(2, l.tree.y + 1));
+        crate::app::handle_mouse(&mut app, click(2, row));
         assert_eq!(app.expanded.contains(&0), !expanded);
         assert!(app.display.is_empty());
     }

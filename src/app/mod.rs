@@ -75,6 +75,7 @@ pub(crate) enum DragMode {
     SplitList,
     SplitTop,
     SplitValue,
+    SourceSel,
 }
 
 #[derive(Clone, Copy)]
@@ -484,6 +485,98 @@ impl App {
                 self.msg(format!("added {word} from {module} to the Signal List"));
             }
             None => self.msg(format!("source: {word} was not dumped in this scope")),
+        }
+    }
+
+    /// Start a source line selection at the cursor (mouse down).
+    pub fn begin_source_selection(&mut self) {
+        if let Some(view) = self.source_view.as_mut() {
+            view.begin_line_selection();
+        }
+    }
+
+    /// Extend the source line selection by one row (Shift+arrows).
+    pub fn extend_source_selection(&mut self, delta: i64) {
+        let rows = self.source_rows();
+        if let Some(view) = self.source_view.as_mut() {
+            view.extend_line_selection(delta, rows);
+        }
+    }
+
+    /// Extend the source line selection to a concrete line (mouse drag).
+    pub fn extend_source_selection_to(&mut self, line: usize) {
+        if let Some(view) = self.source_view.as_mut() {
+            view.select_lines(line);
+        }
+    }
+
+    /// Select the identifier under the cursor (double click).
+    pub fn select_source_word(&mut self) {
+        if let Some(view) = self.source_view.as_mut() {
+            view.select_word();
+        }
+    }
+
+    /// Signal names covered by the current Source selection (deduplicated,
+    /// only identifiers that are declared signals of the module).
+    pub fn source_selection_words(&self) -> Vec<String> {
+        let Some(view) = &self.source_view else {
+            return Vec::new();
+        };
+        if let Some((line, start, end)) = view.word {
+            let word: String = view
+                .lines
+                .get(line)
+                .map(|text| text.chars().skip(start).take(end - start).collect())
+                .unwrap_or_default();
+            return (!word.is_empty()).then_some(word).into_iter().collect();
+        }
+        let Some((first, last)) = view.sel else {
+            return Vec::new();
+        };
+        let mut words = Vec::new();
+        for line in first..=last {
+            let Some(spans) = view.spans.get(line) else {
+                continue;
+            };
+            for span in spans {
+                if span.kind == crate::rtl::view::HlKind::Signal && !words.contains(&span.text) {
+                    words.push(span.text.clone());
+                }
+            }
+        }
+        words
+    }
+
+    /// `Ctrl+W` / context menu: add every selected source signal at once.
+    pub fn add_source_selection(&mut self) {
+        let words = self.source_selection_words();
+        if words.is_empty() {
+            self.msg("source: select signal names first (drag or Shift+arrows)");
+            return;
+        }
+        let mut added = 0usize;
+        let mut missing = Vec::new();
+        for word in &words {
+            match self.find_signal_in_scope(word) {
+                Some(index) => {
+                    if !self.display.contains(&index) {
+                        self.add_signal(index);
+                        added += 1;
+                    }
+                }
+                None => missing.push(word.clone()),
+            }
+        }
+        self.focus = Focus::Source;
+        if !missing.is_empty() {
+            self.msg(format!(
+                "source: not dumped in this scope: {}",
+                missing.join(", ")
+            ));
+        }
+        if added > 0 {
+            self.msg(format!("added {added} signal(s) from the source selection"));
         }
     }
 

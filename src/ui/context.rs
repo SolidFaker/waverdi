@@ -154,6 +154,9 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
             .find(|group| group.id == *id)
             .map(|group| group.name.clone())
             .unwrap_or_default(),
+        CtxTarget::Source => app
+            .selected_scope_module()
+            .unwrap_or_else(|| "Source".to_string()),
     };
     draw_popup(
         buf,
