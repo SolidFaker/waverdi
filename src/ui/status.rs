@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::theme::*;
+use crate::theme::Theme;
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use crate::waveform;
@@ -7,7 +7,8 @@ use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier, Style};
 
 pub fn draw_messages(buf: &mut Buffer, l: &Layout, app: &App) {
-    buf.set_style(l.msg, Style::new().bg(MSG_BG));
+    let t = &app.theme;
+    buf.set_style(l.msg, Style::new().bg(t.msg_bg));
     let n = app.messages.len();
     for row in 0..3 {
         let k = n as i64 - 3 + row as i64;
@@ -15,9 +16,9 @@ pub fn draw_messages(buf: &mut Buffer, l: &Layout, app: &App) {
             continue;
         }
         let style = if row == 2 {
-            Style::new().fg(Color::White)
+            Style::new().fg(t.text)
         } else {
-            Style::new().fg(DIM)
+            Style::new().fg(t.dim)
         };
         text::put(
             buf,
@@ -30,10 +31,11 @@ pub fn draw_messages(buf: &mut Buffer, l: &Layout, app: &App) {
 }
 
 pub fn draw_status(buf: &mut Buffer, l: &Layout, app: &App) {
-    buf.set_style(l.status, Style::new().bg(STATUS_BG));
+    let t = &app.theme;
+    buf.set_style(l.status, Style::new().bg(t.status_bg));
     let y = l.status.y;
     let mut x = l.status.x;
-    let sep = Style::new().fg(DIM);
+    let sep = Style::new().fg(t.dim);
     let mut write = |s: &str, style: Style| {
         let shown = text::trunc(s, (l.status.right().saturating_sub(x)) as usize);
         buf.set_string(x, y, &shown, style);
@@ -41,49 +43,49 @@ pub fn draw_status(buf: &mut Buffer, l: &Layout, app: &App) {
     };
 
     if app.path.is_empty() {
-        write(" no file", Style::new().fg(DIM));
+        write(" no file", Style::new().fg(t.dim));
     } else {
-        write(" ", Style::new().fg(Color::Cyan));
-        write(&text::trunc(&app.path, 30), Style::new().fg(Color::Cyan));
+        write(" ", Style::new().fg(t.path));
+        write(&text::trunc(&app.path, 30), Style::new().fg(t.path));
     }
     write(" | ", sep);
     if let Some(wf) = &app.wf {
         write(
             &format!("timescale {}", wf.ts.label()),
-            Style::new().fg(Color::White),
+            Style::new().fg(t.text),
         );
         write(" | ", sep);
-        write("cursor ", Style::new().fg(DIM));
+        write("cursor ", Style::new().fg(t.dim));
         write(
             &waveform::format_time_base(app.cursor as f64, &wf.ts, app.time_base),
-            Style::new().fg(CURSOR),
+            Style::new().fg(t.cursor),
         );
         if let Some((a, b)) = app.range {
             write(" | ", sep);
-            write("ΔT ", Style::new().fg(DIM));
+            write("ΔT ", Style::new().fg(t.dim));
             write(
                 &waveform::format_time_base((b - a) as f64, &wf.ts, app.time_base),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(t.scope),
             );
         }
         write(" | ", sep);
-        write("zoom ", Style::new().fg(DIM));
+        write("zoom ", Style::new().fg(t.dim));
         write(
             &format!(
                 "{}/char",
                 waveform::format_time_base(app.scale, &wf.ts, app.time_base)
             ),
-            Style::new().fg(Color::White),
+            Style::new().fg(t.text),
         );
         write(" | ", sep);
-        write("signals ", Style::new().fg(DIM));
-        write(&app.display.len().to_string(), Style::new().fg(HIGH));
+        write("signals ", Style::new().fg(t.dim));
+        write(&app.display.len().to_string(), Style::new().fg(t.high));
         if !app.selection.is_empty() {
             write(" | ", sep);
-            write("sel ", Style::new().fg(DIM));
+            write("sel ", Style::new().fg(t.dim));
             write(
                 &app.selection.len().to_string(),
-                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
             );
         }
         if app.visual {
@@ -92,28 +94,25 @@ pub fn draw_status(buf: &mut Buffer, l: &Layout, app: &App) {
                 "VISUAL",
                 Style::new()
                     .fg(Color::Black)
-                    .bg(ACCENT)
+                    .bg(t.accent)
                     .add_modifier(Modifier::BOLD),
             );
         }
         if !app.register.is_empty() {
             write(" | ", sep);
-            write("reg ", Style::new().fg(DIM));
-            write(
-                &app.register.len().to_string(),
-                Style::new().fg(Color::Yellow),
-            );
+            write("reg ", Style::new().fg(t.dim));
+            write(&app.register.len().to_string(), Style::new().fg(t.scope));
         }
         write(" | ", sep);
-        write("focus ", Style::new().fg(DIM));
+        write("focus ", Style::new().fg(t.dim));
         write(
             app.focus.name(),
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
         );
     }
 }
 
-pub fn draw_empty(buf: &mut Buffer, l: &Layout) {
+pub fn draw_empty(buf: &mut Buffer, l: &Layout, t: &Theme) {
     let lines = [
         "waverdi — Verdi-style terminal RTL waveform viewer",
         "Press 'o' to open a VCD/FST dump, or run: waverdi <file>",
@@ -121,9 +120,9 @@ pub fn draw_empty(buf: &mut Buffer, l: &Layout) {
     ];
     for (i, line) in lines.iter().enumerate() {
         let style = if i == 0 {
-            Style::new().fg(ACCENT)
+            Style::new().fg(t.accent)
         } else {
-            Style::new().fg(Color::White)
+            Style::new().fg(t.text)
         };
         text::put(buf, l.wave.x + 2, l.wave.y + 4 + i as u16, line, style);
     }
@@ -132,6 +131,6 @@ pub fn draw_empty(buf: &mut Buffer, l: &Layout) {
         l.list.x + 1,
         l.list.y + 3,
         "no waveform",
-        Style::new().fg(DIM),
+        Style::new().fg(t.dim),
     );
 }

@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::theme::*;
+use crate::theme::Theme;
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use crate::waveform::{self, Signal, Value, Waveform};
@@ -18,23 +18,22 @@ const EDGE_FALL: &str = "\\";
 /// Bus traces and their change markers.
 const BUS_LINE: &str = "─";
 const BUS_CROSS: &str = "╳";
-const BUS_TEXT: Color = Color::Rgb(230, 230, 240);
 const RULER_TICK: &str = "┴";
 const SCROLL_THUMB: &str = "█";
 const SCROLL_TRACK: &str = "─";
 const HALF: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 
 /// Frame of the merged nWave window (Signal List + waveforms).
-pub fn draw_nwave_frame(buf: &mut Buffer, l: &Layout, focused: bool) {
+pub fn draw_nwave_frame(buf: &mut Buffer, l: &Layout, t: &Theme, focused: bool) {
     let border_style = if focused {
-        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::new().fg(t.accent).add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(PANEL_BORDER)
+        Style::new().fg(t.panel_border)
     };
     let title_style = if focused {
-        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::new().fg(t.accent).add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::new().fg(t.text).add_modifier(Modifier::BOLD)
     };
     Block::bordered()
         .title(" nWave ")
@@ -44,13 +43,14 @@ pub fn draw_nwave_frame(buf: &mut Buffer, l: &Layout, focused: bool) {
 }
 
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
+    let t = &app.theme;
     let canvas = ratatui::layout::Rect {
         x: l.wave.x,
         y: l.wave.y,
         width: l.wave.width,
         height: l.wave.height,
     };
-    buf.set_style(canvas, Style::new().bg(BG));
+    buf.set_style(canvas, Style::new().bg(t.wave_bg));
 
     draw_ruler(buf, l, app, wf);
 
@@ -62,17 +62,17 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         let selected = Some(k) == app.sel_row;
         let multi = matches!(list_row, crate::app::ListRow::Signal { sig, .. } if app.selection.contains(sig));
         let row_bg = if selected {
-            ROW_SEL_BG
+            t.row_sel_bg
         } else if multi {
-            MULTI_SEL_BG
+            t.multi_sel_bg
         } else if row.is_multiple_of(2) {
-            ROW_ALT
+            t.wave_alt
         } else {
-            BG
+            t.wave_bg
         };
         let y = l.rows.y + row as u16;
         match list_row {
-            crate::app::ListRow::Group { .. } => draw_group_row(buf, l, selected, y),
+            crate::app::ListRow::Group { .. } => draw_group_row(buf, l, t, selected, y),
             crate::app::ListRow::Signal { sig, .. } => {
                 draw_signal_row(buf, l, app, *sig, &wf.signals[*sig], row_bg, y);
             }
@@ -82,7 +82,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     if app.display.is_empty() {
         let msg = "Instance: select a signal, Enter / 'a' to add — or press 's' to search";
         let y = l.rows.y + (l.rows_h as u16 / 2);
-        text::put(buf, l.rows.x, y, msg, Style::new().fg(DIM));
+        text::put(buf, l.rows.x, y, msg, Style::new().fg(t.dim));
     }
 
     draw_range(buf, l, app);
@@ -91,8 +91,8 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
 }
 
 /// Group boundary row: the group name is only shown in the Signal List.
-fn draw_group_row(buf: &mut Buffer, l: &Layout, selected: bool, y: u16) {
-    let bg = if selected { ROW_SEL_BG } else { LIST_HEADER_BG };
+fn draw_group_row(buf: &mut Buffer, l: &Layout, t: &Theme, selected: bool, y: u16) {
+    let bg = if selected { t.row_sel_bg } else { t.wave_bg };
     buf.set_style(
         ratatui::layout::Rect {
             x: l.rows.x,
@@ -106,12 +106,13 @@ fn draw_group_row(buf: &mut Buffer, l: &Layout, selected: bool, y: u16) {
         l.rows.x,
         y,
         "─".repeat(l.rows.width as usize),
-        Style::new().fg(DIM).bg(bg),
+        Style::new().fg(t.dim).bg(bg),
     );
 }
 
 /// Pane label; highlighted while the waveform pane owns the focus.
 fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
+    let t = &app.theme;
     if l.cols == 0 || app.scale <= 0.0 {
         return;
     }
@@ -121,12 +122,12 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         return;
     }
     let t_end = app.t0 + l.cols as f64 * app.scale;
-    let mut t = (app.t0 / step).ceil() * step;
+    let mut tick = (app.t0 / step).ceil() * step;
     let mut last_label_end: i64 = i64::MIN;
     let tick_color = if app.focus == crate::app::Focus::Wave {
-        ACCENT
+        t.accent
     } else {
-        TICK
+        t.tick
     };
     // Cursor time at the right edge of the ruler (like Verdi's cursor label).
     // Reserve its space so tick labels never overlap it or the scrollbar.
@@ -137,14 +138,21 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     let cursor_w = cursor_label.chars().count() as u16;
     let cursor_x = l.wave.right().saturating_sub(cursor_w + 1);
     let mut guard = 0;
-    while t <= t_end && guard < 10_000 {
+    while tick <= t_end && guard < 10_000 {
         guard += 1;
-        let col = ((t - app.t0) / app.scale).round() as i64;
+        let col = ((tick - app.t0) / app.scale).round() as i64;
         if col >= 0 && (col as usize) < l.cols {
             let x = l.wave.x as i64 + col;
             if x >= 0 && (x as usize) < l.wave.right() as usize {
-                text::set_cell(buf, x as u16, l.ruler.y + 1, RULER_TICK, tick_color, BG);
-                let mut label = waveform::format_time_base(t, &ts, app.time_base);
+                text::set_cell(
+                    buf,
+                    x as u16,
+                    l.ruler.y + 1,
+                    RULER_TICK,
+                    tick_color,
+                    t.wave_bg,
+                );
+                let mut label = waveform::format_time_base(tick, &ts, app.time_base);
                 let mut lw = label.chars().count() as i64;
                 let mut lx = x - lw / 2;
                 // A label that would run under the list/wave divider is clipped
@@ -160,18 +168,12 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                 }
                 let gap = if clipped { 1 } else { 2 };
                 if lw > 1 && lx >= last_label_end + gap && lx + lw <= cursor_x as i64 {
-                    text::put(
-                        buf,
-                        lx as u16,
-                        l.ruler.y,
-                        &label,
-                        Style::new().fg(Color::White),
-                    );
+                    text::put(buf, lx as u16, l.ruler.y, &label, Style::new().fg(t.text));
                     last_label_end = lx + lw;
                 }
             }
         }
-        t += step;
+        tick += step;
     }
 
     text::put(
@@ -179,7 +181,7 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         cursor_x,
         l.ruler.y,
         &cursor_label,
-        Style::new().fg(CURSOR).add_modifier(Modifier::BOLD),
+        Style::new().fg(t.cursor).add_modifier(Modifier::BOLD),
     );
 }
 
@@ -207,6 +209,7 @@ fn draw_signal_row(
 
 /// Draw a single-bit signal as a square wave: high/low rails joined by edges.
 fn draw_bit_row(buf: &mut Buffer, l: &Layout, app: &App, sig: &Signal, row_bg: Color, y: u16) {
+    let t = &app.theme;
     let (t0, scale) = (app.t0, app.scale);
     let changes = &sig.changes;
     let n = changes.len();
@@ -230,17 +233,17 @@ fn draw_bit_row(buf: &mut Buffer, l: &Layout, app: &App, sig: &Signal, row_bg: C
         }
         let (symbol, fg) = match transitions {
             0 => match summarize(value) {
-                1 => (LEVEL_HIGH, HIGH),
-                0 => (LEVEL_LOW, LOW),
-                2 => (BUS_LINE, XCOL),
-                _ => (BUS_LINE, ZCOL),
+                1 => (LEVEL_HIGH, t.high),
+                0 => (LEVEL_LOW, t.low),
+                2 => (BUS_LINE, t.xcol),
+                _ => (BUS_LINE, t.zcol),
             },
             1 => match value {
-                Some(bits) if bits.first() == Some(&1) => (EDGE_RISE, HIGH),
-                Some(bits) if bits.first() == Some(&0) => (EDGE_FALL, LOW),
-                _ => (VLINE, rail_color(value)),
+                Some(bits) if bits.first() == Some(&1) => (EDGE_RISE, t.high),
+                Some(bits) if bits.first() == Some(&0) => (EDGE_FALL, t.low),
+                _ => (VLINE, rail_color(t, value)),
             },
-            _ => (VLINE, rail_color(value)),
+            _ => (VLINE, rail_color(t, value)),
         };
         text::set_cell(buf, l.rows.x + col as u16, y, symbol, fg, row_bg);
     }
@@ -257,6 +260,7 @@ fn draw_bus_row(
     row_bg: Color,
     y: u16,
 ) {
+    let t = &app.theme;
     let (t0, scale) = (app.t0, app.scale);
     let changes = &sig.changes;
     let n = changes.len();
@@ -272,7 +276,7 @@ fn draw_bus_row(
             transition = true;
         }
         let symbol = if transition { BUS_CROSS } else { BUS_LINE };
-        text::set_cell(buf, l.rows.x + col as u16, y, symbol, BUS, row_bg);
+        text::set_cell(buf, l.rows.x + col as u16, y, symbol, t.bus, row_bg);
     }
 
     if n == 0 || l.cols == 0 {
@@ -304,7 +308,7 @@ fn draw_bus_row(
                 l.rows.x + (c0 + 1) as u16,
                 y,
                 &value,
-                Style::new().fg(BUS_TEXT).bg(row_bg),
+                Style::new().fg(t.bus_text).bg(row_bg),
             );
         }
         j += 1;
@@ -320,6 +324,7 @@ fn draw_analog_row(
     y: u16,
     range: (f64, f64),
 ) {
+    let t = &app.theme;
     let (min, max) = if range.0.is_finite() && range.1.is_finite() {
         range
     } else {
@@ -356,7 +361,7 @@ fn draw_analog_row(
             l.rows.x + col as u16,
             y,
             HALF[half.min(7)],
-            ANALOG,
+            t.analog,
             row_bg,
         );
     }
@@ -395,12 +400,12 @@ fn summarize(value: Option<&[u8]>) -> u8 {
     }
 }
 
-fn rail_color(value: Option<&[u8]>) -> Color {
+fn rail_color(t: &Theme, value: Option<&[u8]>) -> Color {
     match summarize(value) {
-        1 => HIGH,
-        0 => LOW,
-        2 => XCOL,
-        _ => ZCOL,
+        1 => t.high,
+        0 => t.low,
+        2 => t.xcol,
+        _ => t.zcol,
     }
 }
 
@@ -413,6 +418,7 @@ fn segment_text(value: &Value, radix: waveform::Radix) -> String {
 }
 
 fn draw_range(buf: &mut Buffer, l: &Layout, app: &App) {
+    let t = &app.theme;
     let Some((a, b)) = app.range else { return };
     if l.cols == 0 || l.rows_h == 0 {
         return;
@@ -422,13 +428,14 @@ fn draw_range(buf: &mut Buffer, l: &Layout, app: &App) {
     for y in l.rows.y..l.rows.bottom() {
         for col in c0..c1 {
             if let Some(cell) = buf.cell_mut((l.rows.x + col as u16, y)) {
-                cell.set_bg(RANGE_BG);
+                cell.set_bg(t.range_bg);
             }
         }
     }
 }
 
 fn draw_cursor(buf: &mut Buffer, l: &Layout, app: &App) {
+    let t = &app.theme;
     if l.cols == 0 {
         return;
     }
@@ -441,13 +448,14 @@ fn draw_cursor(buf: &mut Buffer, l: &Layout, app: &App) {
         if let Some(cell) = buf.cell_mut((x, y)) {
             let bg = cell.bg;
             cell.set_symbol(VLINE);
-            cell.set_fg(CURSOR);
+            cell.set_fg(t.cursor);
             cell.set_bg(bg);
         }
     }
 }
 
 fn draw_vscroll(buf: &mut Buffer, l: &Layout, app: &App) {
+    let t = &app.theme;
     let total = app.rows_len();
     let visible = l.rows_h;
     if total <= visible {
@@ -457,11 +465,11 @@ fn draw_vscroll(buf: &mut Buffer, l: &Layout, app: &App) {
     let top = ((app.row_scroll as f64 / total as f64) * visible as f64) as usize;
     for row in 0..visible {
         let (symbol, fg) = if row >= top && row < top + thumb {
-            (SCROLL_THUMB, ACCENT)
+            (SCROLL_THUMB, t.accent)
         } else {
-            (VLINE, DIM)
+            (VLINE, t.dim)
         };
-        text::set_cell(buf, l.vscroll_x, l.rows.y + row as u16, symbol, fg, BG);
+        text::set_cell(buf, l.vscroll_x, l.rows.y + row as u16, symbol, fg, t.bg);
     }
 }
 
@@ -492,6 +500,7 @@ pub(crate) fn hscroll_thumb(
 }
 
 fn draw_hscroll(buf: &mut Buffer, l: &Layout, app: &App) {
+    let t = &app.theme;
     let Some(wf) = &app.wf else { return };
     if l.cols == 0 {
         return;
@@ -505,9 +514,9 @@ fn draw_hscroll(buf: &mut Buffer, l: &Layout, app: &App) {
     for col in 0..l.cols {
         let on_thumb = col >= thumb_x && col < thumb_x + thumb_w;
         let (symbol, fg) = if on_thumb {
-            (SCROLL_THUMB, ACCENT)
+            (SCROLL_THUMB, t.accent)
         } else {
-            (SCROLL_TRACK, DIM)
+            (SCROLL_TRACK, t.dim)
         };
         text::set_cell(
             buf,
@@ -515,7 +524,7 @@ fn draw_hscroll(buf: &mut Buffer, l: &Layout, app: &App) {
             l.hscroll.y,
             symbol,
             fg,
-            TOOLBAR_BG,
+            t.toolbar_bg,
         );
     }
 }

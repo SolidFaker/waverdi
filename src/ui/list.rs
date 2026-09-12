@@ -1,5 +1,4 @@
-﻿use crate::app::{App, Focus, ListRow};
-use crate::theme::*;
+use crate::app::{App, Focus, ListRow};
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use crate::waveform::Waveform;
@@ -8,6 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
+    let t = &app.theme;
     let focused = app.focus == Focus::List;
     let header = Rect {
         x: l.list.x,
@@ -15,11 +15,11 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         width: l.list.width,
         height: 2,
     };
-    buf.set_style(header, Style::new().bg(LIST_HEADER_BG));
+    buf.set_style(header, Style::new().bg(t.list_header_bg));
     let title_style = if focused {
-        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::new().fg(t.accent).add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::new().fg(t.text).add_modifier(Modifier::BOLD)
     };
     buf.set_string(l.list.x, l.list.y, " Signal List", title_style);
     let value_w = value_col_width(l);
@@ -28,13 +28,13 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         l.list.right().saturating_sub(value_w as u16),
         l.list.y,
         "Value",
-        Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+        Style::new().fg(t.text).add_modifier(Modifier::BOLD),
     );
     buf.set_string(
         l.list.x,
         l.list.y + 1,
         "─".repeat(l.list.width as usize),
-        Style::new().fg(if focused { ACCENT } else { PANEL_BORDER }),
+        Style::new().fg(if focused { t.accent } else { t.panel_border }),
     );
 
     let rows = app.list_rows();
@@ -46,13 +46,13 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         let selected = Some(k) == app.sel_row;
         let multi = matches!(list_row, ListRow::Signal { sig, .. } if app.selection.contains(sig));
         let bg = if selected {
-            ROW_SEL_BG
+            t.row_sel_bg
         } else if multi {
-            MULTI_SEL_BG
+            t.multi_sel_bg
         } else if visible % 2 == 0 {
-            ROW_ALT
+            t.row_alt
         } else {
-            BG
+            t.bg
         };
         buf.set_style(
             Rect {
@@ -74,9 +74,12 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                 let arrow = if *collapsed { "▸" } else { "▾" };
                 let label = format!("{arrow} {name} ({count})");
                 let style = if selected {
-                    Style::new().fg(Color::Black).bg(ACCENT)
+                    Style::new().fg(Color::Black).bg(t.accent)
                 } else {
-                    Style::new().fg(ACCENT).bg(bg).add_modifier(Modifier::BOLD)
+                    Style::new()
+                        .fg(t.accent)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD)
                 };
                 buf.set_string(
                     l.list.x,
@@ -88,9 +91,9 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
             ListRow::Signal { sig, depth } => {
                 let signal = &wf.signals[*sig];
                 let name_style = if selected && app.focus == Focus::List {
-                    Style::new().fg(Color::White).bg(bg)
+                    Style::new().fg(t.text).bg(bg)
                 } else {
-                    Style::new().fg(Color::Rgb(190, 190, 200)).bg(bg)
+                    Style::new().fg(t.name).bg(bg)
                 };
                 let shown = if app.show_full_names {
                     signal.full_name()
@@ -110,11 +113,14 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                     _ => signal.display_value(app.cursor, radix),
                 };
                 let value_style = if on_edge {
-                    Style::new().fg(CURSOR).bg(bg).add_modifier(Modifier::BOLD)
+                    Style::new()
+                        .fg(t.cursor)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD)
                 } else if value.contains('x') || value.contains('z') {
-                    Style::new().fg(XCOL).bg(bg)
+                    Style::new().fg(t.xcol).bg(bg)
                 } else {
-                    Style::new().fg(Color::Rgb(220, 220, 230)).bg(bg)
+                    Style::new().fg(t.value).bg(bg)
                 };
                 text::put(
                     buf,

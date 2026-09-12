@@ -1,5 +1,5 @@
-﻿use crate::app::{App, Dialog, EntryKind};
-use crate::theme::*;
+use crate::app::{App, Dialog, EntryKind};
+use crate::theme::{color_name, Theme};
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use ratatui::buffer::Buffer;
@@ -12,7 +12,8 @@ use ratatui::Frame;
 const KEYS: &[&str] = &[
     "General   q quit   o open (system dialog when available)",
     "          O open browser   : goto time   g: ge / gg / G",
-    "          s search signal   F1 / ? help",
+    "          s search signal   F1 / ? help   F2 settings",
+    "          F2 settings: theme + waveform colours",
     "Search    v find value (hex/bin/oct/dec/ascii text)",
     "          n / N next / previous match (wraps around)",
     "View      z / Z / - / = zoom   f fit   c center",
@@ -83,6 +84,7 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
             .bus_builder()
             .map(|builder| builder.items.len() as u16 + 4)
             .unwrap_or(8),
+        Dialog::Settings => app.settings_len() as u16 + 5,
         _ => 7,
     };
     let width = 64u16
@@ -110,7 +112,15 @@ pub fn visible_rows(screen: Rect, app: &App, dialog: Dialog) -> usize {
     (area.height as usize).saturating_sub(reserved).max(1)
 }
 /// Right-edge scrollbar for a scrolled list.
-fn draw_scrollbar(buf: &mut Buffer, x: u16, top: u16, rows: usize, scroll: usize, total: usize) {
+fn draw_scrollbar(
+    buf: &mut Buffer,
+    x: u16,
+    top: u16,
+    rows: usize,
+    scroll: usize,
+    total: usize,
+    t: &Theme,
+) {
     if rows == 0 || total <= rows {
         return;
     }
@@ -124,7 +134,7 @@ fn draw_scrollbar(buf: &mut Buffer, x: u16, top: u16, rows: usize, scroll: usize
         } else {
             "│"
         };
-        text::set_cell(buf, x, top + row as u16, symbol, DIM, BG);
+        text::set_cell(buf, x, top + row as u16, symbol, t.dim, t.bg);
     }
 }
 
@@ -189,6 +199,7 @@ pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea
 }
 
 pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
+    let t = &app.theme;
     let title = match dialog {
         Dialog::Open => "Open Waveform",
         Dialog::Goto => "Go to Time",
@@ -197,6 +208,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
         Dialog::SplitBus => "Split Bus",
         Dialog::CreateBus => "Create Bus",
         Dialog::GroupName => "Rename Group",
+        Dialog::Settings => "Settings",
         Dialog::Keys => "Key Bindings",
         Dialog::About => "About",
     };
@@ -205,16 +217,16 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
     let mut cursor = None;
     {
         let buf = frame.buffer_mut();
-        buf.set_style(l.area, Style::new().bg(OVERLAY));
+        buf.set_style(l.area, Style::new().bg(t.overlay));
         Clear.render(area, buf);
         let mut block = Block::bordered()
             .title(format!(" {title} "))
-            .title_style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
-            .border_style(Style::new().fg(ACCENT));
+            .title_style(Style::new().fg(t.accent).add_modifier(Modifier::BOLD))
+            .border_style(Style::new().fg(t.accent));
         if dialog == Dialog::Open {
             block = block.title_bottom(
                 Line::from(" ↑↓ move   Enter open   Backspace parent   Esc cancel ")
-                    .style(Style::new().fg(DIM)),
+                    .style(Style::new().fg(t.dim)),
             );
         }
         block.render(area, buf);
@@ -225,7 +237,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
             close.x,
             close.y,
             " ✕ ",
-            Style::new().fg(XCOL).add_modifier(Modifier::BOLD),
+            Style::new().fg(t.xcol).add_modifier(Modifier::BOLD),
         );
 
         let inner_x = area.x + 2;
@@ -282,6 +294,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
                     ("Name: ", "Enter: rename group    Esc: cancel"),
                 );
             }
+            Dialog::Settings => draw_settings(buf, area, app),
             Dialog::Keys => {
                 let inner_w = area.width.saturating_sub(4) as usize;
                 let mut lines: Vec<String> = Vec::new();
@@ -297,7 +310,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
                         inner_x,
                         area.y + 1 + i as u16,
                         line,
-                        Style::new().fg(Color::White),
+                        Style::new().fg(t.text),
                     );
                 }
                 draw_scrollbar(
@@ -307,6 +320,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
                     rows,
                     scroll,
                     lines.len(),
+                    t,
                 );
             }
             Dialog::About => {
@@ -324,7 +338,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
                             inner_x,
                             area.y + 2 + row,
                             &part,
-                            Style::new().fg(Color::White),
+                            Style::new().fg(t.text),
                         );
                         row += 1;
                     }
@@ -337,14 +351,48 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
     }
 }
 
+/// Settings: colour scheme plus per-item waveform colours.
+fn draw_settings(buf: &mut Buffer, area: Rect, app: &App) {
+    let t = &app.theme;
+    let x = area.x + 2;
+    let width = area.width.saturating_sub(4) as usize;
+    let rows = area.height.saturating_sub(3) as usize;
+    for row in 0..app.settings_len().min(rows) {
+        let y = area.y + 1 + row as u16;
+        let selected = row == app.settings_sel;
+        let style = if selected {
+            Style::new().fg(Color::Black).bg(t.accent)
+        } else {
+            Style::new().fg(t.text)
+        };
+        if row == 0 {
+            let label = format!("theme                ◂ {:^7} ▸", app.theme_kind.name());
+            text::put(buf, x, y, &text::trunc(&label, width), style);
+        } else if let Some(setting) = app.settings_setting(row) {
+            let color = setting.get(t);
+            let label = format!("{:<18} {:<9}", setting.label(), color_name(color));
+            text::put(buf, x, y, &label, style);
+            text::put(buf, x + 28, y, "██", Style::new().fg(color));
+        }
+    }
+    text::put(
+        buf,
+        x,
+        area.bottom().saturating_sub(2),
+        "↑/↓ select   ←/→ change   Enter next   r reset   Esc close",
+        Style::new().fg(t.dim),
+    );
+}
+
 fn draw_browser(buf: &mut Buffer, area: Rect, app: &App) {
+    let t = &app.theme;
     let Some(browser) = &app.browser else {
         text::put(
             buf,
             area.x + 2,
             area.y + 2,
             "no browser state",
-            Style::new().fg(XCOL),
+            Style::new().fg(t.xcol),
         );
         return;
     };
@@ -354,18 +402,18 @@ fn draw_browser(buf: &mut Buffer, area: Rect, app: &App) {
         area.x + 2,
         area.y + 1,
         &browser.dir.display().to_string(),
-        Style::new().fg(Color::Cyan),
+        Style::new().fg(t.path),
     );
     let sep_w = area.width.saturating_sub(2) as usize;
     buf.set_string(
         area.x + 1,
         area.y + 2,
         "─".repeat(sep_w),
-        Style::new().fg(PANEL_BORDER),
+        Style::new().fg(t.panel_border),
     );
 
     if let Some(error) = &browser.error {
-        text::put(buf, area.x + 2, area.y + 3, error, Style::new().fg(XCOL));
+        text::put(buf, area.x + 2, area.y + 3, error, Style::new().fg(t.xcol));
         return;
     }
 
@@ -379,13 +427,13 @@ fn draw_browser(buf: &mut Buffer, area: Rect, app: &App) {
         let entry = &browser.entries[k];
         let selected = k == browser.sel;
         let style = if selected {
-            Style::new().fg(Color::Black).bg(ACCENT)
+            Style::new().fg(Color::Black).bg(t.accent)
         } else {
             match entry.kind {
-                EntryKind::Parent => Style::new().fg(DIM),
-                EntryKind::Dir => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                EntryKind::File if crate::app::is_waveform(&entry.name) => Style::new().fg(HIGH),
-                EntryKind::File => Style::new().fg(Color::Rgb(170, 170, 180)),
+                EntryKind::Parent => Style::new().fg(t.dim),
+                EntryKind::Dir => Style::new().fg(t.scope).add_modifier(Modifier::BOLD),
+                EntryKind::File if crate::app::is_waveform(&entry.name) => Style::new().fg(t.high),
+                EntryKind::File => Style::new().fg(t.name),
             }
         };
         let label = match entry.kind {
@@ -412,19 +460,20 @@ fn draw_browser(buf: &mut Buffer, area: Rect, app: &App) {
             } else {
                 "│"
             };
-            text::set_cell(buf, x, area.y + 3 + row as u16, symbol, DIM, BG);
+            text::set_cell(buf, x, area.y + 3 + row as u16, symbol, t.dim, t.bg);
         }
     }
 }
 
 fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) {
+    let t = &app.theme;
     let Some(builder) = app.bus_builder() else {
         text::put(
             buf,
             area.x + 2,
             area.y + 2,
             "no bus builder state",
-            Style::new().fg(XCOL),
+            Style::new().fg(t.xcol),
         );
         return;
     };
@@ -462,9 +511,9 @@ fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) {
             item.width()
         );
         let style = if k == builder.sel {
-            Style::new().fg(Color::Black).bg(ACCENT)
+            Style::new().fg(Color::Black).bg(t.accent)
         } else {
-            Style::new().fg(Color::White)
+            Style::new().fg(t.text)
         };
         text::put(
             buf,
@@ -481,6 +530,7 @@ fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) {
         rows,
         scroll,
         count,
+        t,
     );
     let hint_top = " ↑↓ select   ⇧↑↓ reorder   h/l LSB   H/L MSB   x full range";
     let hint_bottom = format!(" s/S sort   r rev   Enter create   Esc cancel   {total} bits ");
@@ -489,14 +539,14 @@ fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) {
         area.x + 2,
         area.bottom().saturating_sub(3),
         &text::trunc(hint_top, inner),
-        Style::new().fg(DIM),
+        Style::new().fg(t.dim),
     );
     text::put(
         buf,
         area.x + 2,
         area.bottom().saturating_sub(2),
         &text::trunc(&hint_bottom, inner),
-        Style::new().fg(DIM),
+        Style::new().fg(t.dim),
     );
 }
 
@@ -508,8 +558,9 @@ fn draw_input(
     app: &App,
     labels: (&str, &str),
 ) -> Option<Position> {
+    let t = &app.theme;
     let (label, hint) = labels;
-    text::put(buf, x, area.y + 2, label, Style::new().fg(Color::White));
+    text::put(buf, x, area.y + 2, label, Style::new().fg(t.text));
     let input_x = x + label.chars().count() as u16;
     let avail = area.right().saturating_sub(input_x) as usize;
     let value = app.input.as_string();
@@ -519,11 +570,11 @@ fn draw_input(
         input_x,
         area.y + 2,
         &shown,
-        Style::new().fg(Color::White).bg(INPUT_BG),
+        Style::new().fg(t.text).bg(t.input_bg),
     );
     let caret = app.input.cursor().min(shown.chars().count()) as u16;
     if let Some(cell) = buf.cell_mut((input_x + caret, area.y + 2)) {
-        cell.set_bg(Color::White);
+        cell.set_bg(t.text);
         cell.set_fg(Color::Black);
     }
     text::put(
@@ -531,14 +582,15 @@ fn draw_input(
         x,
         area.y + 4,
         &text::trunc(hint, width),
-        Style::new().fg(DIM),
+        Style::new().fg(t.dim),
     );
     Some(Position::new(input_x + caret, area.y + 2))
 }
 
 fn draw_find(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) -> Option<Position> {
+    let t = &app.theme;
     // Query row, hint row, then the scrolling match list.
-    text::put(buf, x, area.y + 1, "Query: ", Style::new().fg(Color::White));
+    text::put(buf, x, area.y + 1, "Query: ", Style::new().fg(t.text));
     let input_x = x + 7;
     let avail = area.right().saturating_sub(input_x) as usize;
     let shown = text::trunc(&app.input.as_string(), width.min(avail));
@@ -547,11 +599,11 @@ fn draw_find(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) -> O
         input_x,
         area.y + 1,
         &shown,
-        Style::new().fg(Color::White).bg(INPUT_BG),
+        Style::new().fg(t.text).bg(t.input_bg),
     );
     let caret = app.input.cursor().min(shown.chars().count()) as u16;
     if let Some(cell) = buf.cell_mut((input_x + caret, area.y + 1)) {
-        cell.set_bg(Color::White);
+        cell.set_bg(t.text);
         cell.set_fg(Color::Black);
     }
     text::put(
@@ -559,7 +611,7 @@ fn draw_find(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) -> O
         x,
         area.y + 2,
         "Enter: add signal    ↑/↓: navigate    Esc: cancel",
-        Style::new().fg(DIM),
+        Style::new().fg(t.dim),
     );
 
     let matches = app.find_matches();
@@ -576,9 +628,9 @@ fn draw_find(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) -> O
         for (k, &sig) in matches.iter().enumerate().skip(scroll).take(rows) {
             let name = wf.signals[sig].full_name();
             let style = if k == selected {
-                Style::new().fg(Color::Black).bg(ACCENT)
+                Style::new().fg(Color::Black).bg(t.accent)
             } else {
-                Style::new().fg(Color::White)
+                Style::new().fg(t.text)
             };
             text::put(
                 buf,
@@ -596,6 +648,7 @@ fn draw_find(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) -> O
         rows,
         scroll,
         matches.len(),
+        t,
     );
     Some(Position::new(input_x + caret, area.y + 1))
 }

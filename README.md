@@ -35,6 +35,9 @@ terminal.
 - **Full mouse support** — clickable menus/toolbar, draggable pane borders and
   scrollbars, drag to reorder signals, selection-to-zoom, wheel zoom,
   right-click context menus.
+- **Themes and settings** — `F2` opens a settings dialog with `Dark`, `Light`
+  and `Mixed` (dark waveform on light chrome) schemes plus per-item waveform
+  colours (levels, unknown/high-Z, bus, cursor, analog, ticks, background).
 - **SSH friendly** — the native file dialog is disabled automatically over
   SSH (or when there is no display). A built-in terminal file browser takes
   its place, and a GUI-free build is available.
@@ -191,7 +194,21 @@ override with `--gui` / `--no-gui`, or open the browser directly with `O`.
 | `h` | in the Signal List: show full / short hierarchical names |
 | `↑` `↓`, `PgUp` `PgDn` | navigate lists |
 | `Tab` | cycle focus (Instance → Signal List → Waveform) |
+| `F2` | settings: theme (dark / light / mixed) and waveform colours |
 | `F1`, `?` | key bindings |
+
+## Settings
+
+`F2` (or **View ▸ Settings...**) opens the settings dialog:
+
+- **Theme** — `Dark`, `Light` or `Mixed`. Mixed keeps a dark waveform pane
+  with light chrome everywhere else.
+- **Waveform colours** — background, high/low level, unknown (x), high-Z (z),
+  bus value and text, cursor, analog and time ticks. `←`/`→` cycle a built-in
+  palette, `Enter` advances, `r` restores the theme default.
+
+Switching themes resets per-colour customisation; the choice lasts for the
+session.
 
 ## Mouse
 

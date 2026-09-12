@@ -1,4 +1,4 @@
-﻿pub mod context;
+pub mod context;
 pub mod dialog;
 pub mod layout;
 pub mod list;
@@ -11,7 +11,6 @@ pub mod tree;
 pub mod wave;
 
 use crate::app::App;
-use crate::theme::*;
 use crate::ui::layout::{compute_layout, Layout};
 use ratatui::buffer::Buffer;
 use ratatui::style::Style;
@@ -21,25 +20,26 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     app.sync_layout(area);
     let l = compute_layout(area, app.splits);
+    let t = &app.theme;
 
     {
         let buf = frame.buffer_mut();
-        buf.set_style(area, Style::new().bg(BG));
+        buf.set_style(area, Style::new().bg(t.bg));
         menubar::draw_bar(buf, &l, app);
         // Frames first: nWave (bottom), source and instance (top, shared row).
         let tree_focused = app.focus == crate::app::Focus::Tree;
         let nwave_focused = matches!(app.focus, crate::app::Focus::List | crate::app::Focus::Wave);
-        wave::draw_nwave_frame(buf, &l, false);
-        source::draw_frame(buf, &l);
-        tree::draw_frame(buf, &l, tree_focused);
+        wave::draw_nwave_frame(buf, &l, t, false);
+        source::draw_frame(buf, &l, t);
+        tree::draw_frame(buf, &l, t, tree_focused);
         if nwave_focused {
             // The shared row between the top row and nWave follows the focus.
-            wave::draw_nwave_frame(buf, &l, true);
+            wave::draw_nwave_frame(buf, &l, t, true);
         }
         toolbar::draw(buf, &l, app);
         draw_divider(buf, &l, app);
         match &app.wf {
-            None => status::draw_empty(buf, &l),
+            None => status::draw_empty(buf, &l, t),
             Some(wf) => {
                 tree::draw(buf, &l, app, wf);
                 list::draw(buf, &l, app, wf);
@@ -66,16 +66,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
 /// Vertical divider between the Signal List and the waveforms.
 fn draw_divider(buf: &mut Buffer, l: &Layout, app: &App) {
+    let t = &app.theme;
     let fg = if app.focus == crate::app::Focus::Tree {
-        PANEL_BORDER
+        t.panel_border
     } else {
-        ACCENT
+        t.accent
     };
     for row in l.list.y..l.list.bottom() {
         if let Some(cell) = buf.cell_mut((l.list_grip_x(), row)) {
             cell.set_symbol("│");
             cell.set_fg(fg);
-            cell.set_bg(BG);
+            cell.set_bg(t.bg);
         }
     }
 }
@@ -276,11 +277,11 @@ mod tests {
         // Row 0 is the group header; clk is selected and data is multi-selected.
         assert_eq!(
             buffer.cell((l.list.x + 2, l.list.y + 3)).unwrap().bg,
-            crate::theme::ROW_SEL_BG
+            crate::theme::Theme::DARK.row_sel_bg
         );
         assert_eq!(
             buffer.cell((l.list.x + 2, l.list.y + 4)).unwrap().bg,
-            crate::theme::MULTI_SEL_BG
+            crate::theme::Theme::DARK.multi_sel_bg
         );
     }
 
@@ -376,17 +377,17 @@ mod tests {
         app.focus = crate::app::Focus::List;
         assert_eq!(
             pane_color(&mut app, l.list.x + 1, l.list.y),
-            crate::theme::ACCENT
+            crate::theme::Theme::DARK.accent
         );
         app.focus = crate::app::Focus::Wave;
         assert_eq!(
             pane_color(&mut app, l.nwave.x + 1, l.nwave.y),
-            crate::theme::ACCENT
+            crate::theme::Theme::DARK.accent
         );
         app.focus = crate::app::Focus::Tree;
         assert_eq!(
             pane_color(&mut app, l.tree.x, l.tree.y),
-            crate::theme::ACCENT
+            crate::theme::Theme::DARK.accent
         );
     }
 
@@ -412,6 +413,30 @@ mod tests {
     }
 
     #[test]
+    fn mixed_theme_keeps_the_waveform_dark() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.set_display(vec![0]);
+        app.set_theme_kind(crate::theme::ThemeKind::Mixed);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        // Dark waveform canvas, light Signal List header.
+        assert_eq!(
+            buffer.cell((l.wave.x + 1, l.wave.bottom() - 1)).unwrap().bg,
+            crate::theme::Theme::DARK.bg
+        );
+        assert_eq!(
+            buffer.cell((l.list.x + 1, l.list.y)).unwrap().bg,
+            crate::theme::Theme::LIGHT.list_header_bg
+        );
+    }
+
+    #[test]
     fn dialogs_render() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();
@@ -423,6 +448,7 @@ mod tests {
             crate::app::Dialog::SplitBus,
             crate::app::Dialog::CreateBus,
             crate::app::Dialog::GroupName,
+            crate::app::Dialog::Settings,
             crate::app::Dialog::Keys,
             crate::app::Dialog::About,
         ] {

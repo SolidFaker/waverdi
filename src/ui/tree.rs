@@ -1,5 +1,5 @@
 use crate::app::{App, Focus, TreeNode};
-use crate::theme::*;
+use crate::theme::Theme;
 use crate::ui::layout::{tree_inner, Layout};
 use crate::ui::text;
 use crate::waveform::Waveform;
@@ -8,16 +8,16 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Widget as _};
 
-pub fn draw_frame(buf: &mut Buffer, l: &Layout, focused: bool) {
+pub fn draw_frame(buf: &mut Buffer, l: &Layout, t: &Theme, focused: bool) {
     let border_style = if focused {
-        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::new().fg(t.accent).add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(PANEL_BORDER)
+        Style::new().fg(t.panel_border)
     };
     let title_style = if focused {
-        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::new().fg(t.accent).add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::new().fg(t.text).add_modifier(Modifier::BOLD)
     };
     Block::bordered()
         .title(" Instance ")
@@ -27,8 +27,9 @@ pub fn draw_frame(buf: &mut Buffer, l: &Layout, focused: bool) {
 }
 
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
+    let t = &app.theme;
     let focused = app.focus == Focus::Tree;
-    draw_frame(buf, l, focused);
+    draw_frame(buf, l, t, focused);
 
     let inner = tree_inner(l);
     if inner.width == 0 || inner.height == 0 {
@@ -53,9 +54,9 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                     "▸"
                 };
                 let style = if selected {
-                    Style::new().fg(Color::Black).bg(ACCENT)
+                    Style::new().fg(Color::Black).bg(t.accent)
                 } else {
-                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::new().fg(t.scope).add_modifier(Modifier::BOLD)
                 };
                 (format!("{}{arrow} {name}", "  ".repeat(depth)), style)
             }
@@ -63,13 +64,13 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                 let name = &wf.signals[sig].name;
                 let multi = app.tree_multi.contains(&sig);
                 let style = if selected {
-                    Style::new().fg(Color::Black).bg(ACCENT)
+                    Style::new().fg(Color::Black).bg(t.accent)
                 } else if multi {
-                    Style::new().fg(Color::White).bg(MULTI_SEL_BG)
+                    Style::new().fg(t.text).bg(t.multi_sel_bg)
                 } else if app.display.contains(&sig) {
-                    Style::new().fg(GREEN_DIM)
+                    Style::new().fg(t.green_dim)
                 } else {
-                    Style::new().fg(Color::White)
+                    Style::new().fg(t.text)
                 };
                 (format!("{}  {name}", "  ".repeat(depth)), style)
             }
@@ -77,10 +78,17 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         text::put(buf, inner.x, inner.y + row as u16, &label, style);
     }
 
-    draw_scrollbar(buf, &inner, nodes.len(), scroll, height);
+    draw_scrollbar(buf, &inner, nodes.len(), scroll, height, t);
 }
 
-fn draw_scrollbar(buf: &mut Buffer, inner: &Rect, total: usize, scroll: usize, height: usize) {
+fn draw_scrollbar(
+    buf: &mut Buffer,
+    inner: &Rect,
+    total: usize,
+    scroll: usize,
+    height: usize,
+    t: &Theme,
+) {
     if total <= height {
         return;
     }
@@ -97,8 +105,8 @@ fn draw_scrollbar(buf: &mut Buffer, inner: &Rect, total: usize, scroll: usize, h
             inner.right().saturating_sub(1),
             inner.y + row as u16,
             symbol,
-            DIM,
-            BG,
+            t.dim,
+            t.bg,
         );
     }
 }

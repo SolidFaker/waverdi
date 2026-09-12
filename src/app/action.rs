@@ -20,6 +20,7 @@ pub enum Action {
     Prev,
     Next,
     Radix,
+    Settings,
     Keys,
     About,
 }
@@ -53,6 +54,10 @@ impl Action {
             Action::Prev => app.jump_transition(false),
             Action::Next => app.jump_transition(true),
             Action::Radix => app.cycle_radix(),
+            Action::Settings => {
+                app.settings_sel = 0;
+                app.open_dialog(Dialog::Settings);
+            }
             Action::Keys => app.open_dialog(Dialog::Keys),
             Action::About => app.open_dialog(Dialog::About),
         }

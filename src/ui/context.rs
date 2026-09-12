@@ -1,5 +1,5 @@
 use crate::app::{App, CtxEntry, CtxTarget};
-use crate::theme::*;
+use crate::theme::Theme;
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use ratatui::buffer::Buffer;
@@ -103,24 +103,31 @@ pub fn item_at(app: &App, col: u16, row: u16) -> Option<CtxHit> {
     hit(root, col, row, app.ctx_root().len()).map(CtxHit::Root)
 }
 
-fn draw_popup(buf: &mut Buffer, area: Rect, entries: &[CtxEntry], sel: usize, title: &str) {
+fn draw_popup(
+    buf: &mut Buffer,
+    area: Rect,
+    entries: &[CtxEntry],
+    sel: usize,
+    title: &str,
+    t: &Theme,
+) {
     Clear.render(area, buf);
-    buf.set_style(area, Style::new().bg(POPUP_BG));
+    buf.set_style(area, Style::new().bg(t.popup_bg));
     Block::bordered()
         .title(format!(
             " {} ",
             text::trunc(title, area.width.saturating_sub(2) as usize)
         ))
-        .title_style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
-        .border_style(Style::new().fg(ACCENT))
+        .title_style(Style::new().fg(t.accent).add_modifier(Modifier::BOLD))
+        .border_style(Style::new().fg(t.accent))
         .render(area, buf);
     let inner = area.width.saturating_sub(2) as usize;
     for (k, entry) in entries.iter().enumerate() {
         let selected = k == sel;
         let style = if selected {
-            Style::new().fg(Color::Black).bg(ACCENT)
+            Style::new().fg(Color::Black).bg(t.accent)
         } else {
-            Style::new().fg(Color::White)
+            Style::new().fg(t.text)
         };
         text::put(buf, area.x + 1, area.y + 1 + k as u16, entry.label(), style);
         if matches!(entry, CtxEntry::Submenu(..)) {
@@ -131,6 +138,7 @@ fn draw_popup(buf: &mut Buffer, area: Rect, entries: &[CtxEntry], sel: usize, ti
 }
 
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
+    let t = &app.theme;
     let Some(menu) = &app.ctx_menu else { return };
     let root = root_rect(l, app);
     let title = match &menu.target {
@@ -153,12 +161,13 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
         app.ctx_root(),
         menu.submenu.unwrap_or(menu.sel),
         &title,
+        t,
     );
 
     if let Some(index) = menu.submenu {
         if let Some(area) = sub_rect(l, app, root, index) {
             let label = app.ctx_root().get(index).map(CtxEntry::label).unwrap_or("");
-            draw_popup(buf, area, app.ctx_level(), menu.sel, label);
+            draw_popup(buf, area, app.ctx_level(), menu.sel, label, t);
         }
     }
 }

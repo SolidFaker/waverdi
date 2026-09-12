@@ -61,6 +61,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.open_tui_browser();
             false
         }
+        KeyCode::F(2) => {
+            app.settings_sel = 0;
+            app.open_dialog(Dialog::Settings);
+            false
+        }
         KeyCode::F(1) | KeyCode::Char('?') => {
             app.open_dialog(Dialog::Keys);
             false
@@ -395,6 +400,33 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Esc => {
             app.dialog = None;
             app.renaming_group = None;
+        }
+        KeyCode::Up if app.dialog == Some(Dialog::Settings) => {
+            let len = app.settings_len();
+            app.settings_sel = app.settings_sel.checked_sub(1).unwrap_or(len - 1);
+        }
+        KeyCode::Down if app.dialog == Some(Dialog::Settings) => {
+            app.settings_sel = (app.settings_sel + 1) % app.settings_len();
+        }
+        KeyCode::Left | KeyCode::Right if app.dialog == Some(Dialog::Settings) => {
+            let delta = if key.code == KeyCode::Left { -1 } else { 1 };
+            if app.settings_sel == 0 {
+                app.cycle_theme(delta);
+            } else if let Some(setting) = app.settings_setting(app.settings_sel) {
+                app.cycle_wave_setting(setting, delta);
+            }
+        }
+        KeyCode::Char('r') if app.dialog == Some(Dialog::Settings) => {
+            if let Some(setting) = app.settings_setting(app.settings_sel) {
+                app.reset_wave_setting(setting);
+            }
+        }
+        KeyCode::Enter if app.dialog == Some(Dialog::Settings) => {
+            if app.settings_sel == 0 {
+                app.cycle_theme(1);
+            } else if let Some(setting) = app.settings_setting(app.settings_sel) {
+                app.cycle_wave_setting(setting, 1);
+            }
         }
         KeyCode::Enter => match app.dialog {
             Some(Dialog::Goto) => app.apply_goto(),
@@ -803,6 +835,23 @@ mod tests {
         app.sel_row = Some(1);
         handle_key(&mut app, key(KeyCode::Char('x')));
         assert_eq!(app.display, vec![1]);
+    }
+
+    #[test]
+    fn settings_dialog_changes_theme_and_wave_colours() {
+        use crate::theme::{Theme, ThemeKind};
+        let mut app = app_with(VCD);
+        handle_key(&mut app, key(KeyCode::F(2)));
+        assert_eq!(app.dialog, Some(Dialog::Settings));
+        handle_key(&mut app, key(KeyCode::Right)); // theme row: Dark -> Light
+        assert_eq!(app.theme_kind, ThemeKind::Light);
+        handle_key(&mut app, key(KeyCode::Down)); // waveform background row
+        handle_key(&mut app, key(KeyCode::Right));
+        assert_ne!(app.theme.wave_bg, Theme::LIGHT.wave_bg);
+        handle_key(&mut app, key(KeyCode::Char('r')));
+        assert_eq!(app.theme.wave_bg, Theme::LIGHT.wave_bg);
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.dialog, None);
     }
 
     #[test]

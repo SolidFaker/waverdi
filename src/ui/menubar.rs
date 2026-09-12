@@ -1,5 +1,4 @@
-use crate::app::{Action, App};
-use crate::theme::*;
+﻿use crate::app::{Action, App};
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use ratatui::buffer::Buffer;
@@ -24,6 +23,7 @@ pub const MENUS: [(&str, &[(&str, Action)]); 5] = [
             ("Fit to Screen", Action::Fit),
             ("Center Cursor", Action::Center),
             ("Go to Time...", Action::Goto),
+            ("Settings...", Action::Settings),
         ],
     ),
     (
@@ -94,40 +94,42 @@ pub fn dropdown_rect(l: &Layout, idx: usize) -> Rect {
 }
 
 pub fn draw_bar(buf: &mut Buffer, l: &Layout, app: &App) {
-    buf.set_style(l.menu, Style::new().bg(MENUBAR_BG));
+    let t = &app.theme;
+    buf.set_style(l.menu, Style::new().bg(t.menubar_bg));
     buf.set_string(
         l.menu.x,
         l.menu.y,
         BRAND,
         Style::new()
             .fg(Color::Black)
-            .bg(ACCENT)
+            .bg(t.accent)
             .add_modifier(Modifier::BOLD),
     );
     for (i, (name, _)) in MENUS.iter().enumerate() {
         let x = item_offsets(l.menu)[i];
         let style = if app.menu.open == Some(i) {
-            Style::new().fg(Color::White).bg(MENU_ACTIVE)
+            Style::new().fg(t.text).bg(t.menu_active)
         } else {
-            Style::new().fg(Color::White)
+            Style::new().fg(t.text)
         };
         buf.set_string(x, l.menu.y, format!(" {name} "), style);
     }
 }
 
 pub fn draw_dropdown(buf: &mut Buffer, l: &Layout, app: &App, idx: usize) {
+    let t = &app.theme;
     let area = dropdown_rect(l, idx);
     Clear.render(area, buf);
-    buf.set_style(area, Style::new().bg(POPUP_BG));
+    buf.set_style(area, Style::new().bg(t.popup_bg));
     Block::bordered()
-        .border_style(Style::new().fg(ACCENT))
+        .border_style(Style::new().fg(t.accent))
         .render(area, buf);
     for (k, (name, _)) in MENUS[idx].1.iter().enumerate() {
         let selected = k == app.menu.sel;
         let style = if selected {
-            Style::new().fg(Color::Black).bg(ACCENT)
+            Style::new().fg(Color::Black).bg(t.accent)
         } else {
-            Style::new().fg(Color::White)
+            Style::new().fg(t.text)
         };
         text::put(buf, area.x + 1, area.y + 1 + k as u16, name, style);
     }

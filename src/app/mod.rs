@@ -19,6 +19,7 @@ pub use keys::handle_key;
 pub use mouse::handle_mouse;
 pub use nav::{Group, ListRow};
 
+use crate::theme::{Theme, ThemeKind, WaveSetting, PALETTE};
 use crate::ui::layout::{compute_layout, Layout, Splits};
 use crate::waveform::{Radix, Ticks, TimeBase, Waveform};
 use ratatui::layout::Rect;
@@ -151,6 +152,11 @@ pub struct App {
     /// Use the native GUI file dialog instead of the built-in browser.
     pub use_gui: bool,
     pub browser: Option<FileBrowser>,
+    /// Active colour scheme.
+    pub theme: Theme,
+    pub theme_kind: ThemeKind,
+    /// Selected row of the settings dialog (0 = theme, rest = waveform colours).
+    pub settings_sel: usize,
     pending_fit: bool,
 }
 
@@ -201,6 +207,9 @@ impl App {
             bus_builder: None,
             use_gui: crate::picker::detect_gui(),
             browser: None,
+            theme: Theme::DARK,
+            theme_kind: ThemeKind::Dark,
+            settings_sel: 0,
             pending_fit: false,
         };
         app.msg("waverdi 0.1 — press 'o' to open a waveform dump, F1/? for key bindings");
@@ -409,6 +418,48 @@ impl App {
         self.msg(format!("time base: {label}"));
     }
 
+    /// Switch the colour scheme, dropping any per-colour customisation.
+    pub fn set_theme_kind(&mut self, kind: ThemeKind) {
+        self.theme_kind = kind;
+        self.theme = kind.theme();
+        self.msg(format!("theme: {}", kind.name()));
+    }
+
+    /// Cycle the colour scheme from the settings dialog.
+    pub fn cycle_theme(&mut self, delta: i64) {
+        let count = ThemeKind::ALL.len() as i64;
+        let index = ThemeKind::ALL
+            .iter()
+            .position(|kind| *kind == self.theme_kind)
+            .unwrap_or(0) as i64;
+        let next = (index + delta).rem_euclid(count) as usize;
+        self.set_theme_kind(ThemeKind::ALL[next]);
+    }
+
+    /// Cycle one waveform colour through the built-in palette.
+    pub fn cycle_wave_setting(&mut self, setting: WaveSetting, delta: i64) {
+        let current = setting.get(&self.theme);
+        let start = PALETTE.iter().position(|c| *c == current).unwrap_or(0) as i64;
+        let next = (start + delta).rem_euclid(PALETTE.len() as i64) as usize;
+        setting.set(&mut self.theme, PALETTE[next]);
+    }
+
+    /// Restore the waveform colour to the value of the active theme.
+    pub fn reset_wave_setting(&mut self, setting: WaveSetting) {
+        let base = self.theme_kind.theme();
+        setting.set(&mut self.theme, setting.get(&base));
+    }
+
+    /// Settings dialog rows: theme first, then the customisable waveform colours.
+    pub fn settings_len(&self) -> usize {
+        1 + WaveSetting::ALL.len()
+    }
+
+    pub fn settings_setting(&self, row: usize) -> Option<WaveSetting> {
+        row.checked_sub(1)
+            .and_then(|i| WaveSetting::ALL.get(i).copied())
+    }
+
     /// Test helper: install a flat display list owned by the first group.
     #[cfg(test)]
     pub fn set_display(&mut self, sigs: Vec<usize>) {
@@ -461,6 +512,31 @@ mod tests {
         // After sync_layout the pending fit ran, so the full range is visible.
         let wf = app.wf.as_ref().unwrap();
         assert!((app.scale - wf.total_ticks() as f64 / app.cols() as f64).abs() < 1e-9);
+    }
+
+    #[test]
+    fn theme_switching_and_wave_colour_customisation() {
+        use crate::theme::{Theme, ThemeKind, WaveSetting};
+        let mut app =
+            app_with("$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n#0\n0!\n");
+        assert_eq!(app.theme_kind, ThemeKind::Dark);
+        app.cycle_theme(1);
+        assert_eq!(app.theme_kind, ThemeKind::Light);
+        assert_eq!(app.theme.bg, Theme::LIGHT.bg);
+        // A custom waveform colour is applied and can be reset.
+        app.cycle_wave_setting(WaveSetting::High, 1);
+        assert_ne!(app.theme.high, Theme::LIGHT.high);
+        app.reset_wave_setting(WaveSetting::High);
+        assert_eq!(app.theme.high, Theme::LIGHT.high);
+        // Mixed keeps light chrome with a dark waveform.
+        app.cycle_theme(1); // Light -> Mixed
+        assert_eq!(app.theme_kind, ThemeKind::Mixed);
+        assert_eq!(app.theme.bg, Theme::LIGHT.bg);
+        assert_eq!(app.theme.wave_bg, Theme::DARK.bg);
+        assert_eq!(app.theme.high, Theme::DARK.high);
+        // The cycle wraps back to dark.
+        app.cycle_theme(1);
+        assert_eq!(app.theme_kind, ThemeKind::Dark);
     }
 
     #[test]

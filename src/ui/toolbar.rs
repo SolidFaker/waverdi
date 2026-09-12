@@ -1,5 +1,4 @@
-use crate::app::{Action, App};
-use crate::theme::*;
+﻿use crate::app::{Action, App};
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use crate::waveform::TimeBase;
@@ -133,23 +132,24 @@ pub fn time_menu_rect(tb: Rect, app: &App) -> Rect {
 
 /// Draw the time-base dropdown (on top of the panes).
 pub fn draw_time_menu(buf: &mut Buffer, l: &Layout, app: &App) {
+    let t = &app.theme;
     let Some(selected) = app.time_menu else {
         return;
     };
     let area = time_menu_rect(l.toolbar, app);
     Clear.render(area, buf);
-    buf.set_style(area, Style::new().bg(POPUP_BG));
+    buf.set_style(area, Style::new().bg(t.popup_bg));
     Block::bordered()
         .title(" Time base ")
-        .title_style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
-        .border_style(Style::new().fg(ACCENT))
+        .title_style(Style::new().fg(t.accent).add_modifier(Modifier::BOLD))
+        .border_style(Style::new().fg(t.accent))
         .render(area, buf);
     for (i, base) in TimeBase::CYCLE.iter().enumerate() {
         let entry = base_label(*base, app);
         let style = if i == selected {
-            Style::new().fg(Color::Black).bg(ACCENT)
+            Style::new().fg(Color::Black).bg(t.accent)
         } else {
-            Style::new().fg(Color::White)
+            Style::new().fg(t.text)
         };
         text::put(buf, area.x + 1, area.y + 1 + i as u16, &entry, style);
     }
@@ -168,16 +168,17 @@ pub fn run_tool(app: &mut App, tool: Tool) -> bool {
 }
 
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
-    buf.set_style(l.toolbar, Style::new().bg(TOOLBAR_BG));
+    let t = &app.theme;
+    buf.set_style(l.toolbar, Style::new().bg(t.toolbar_bg));
     let enabled = app.wf.is_some();
     for (tool, rect) in toolbar_rects(l.toolbar, app) {
         let label = tool_label(tool, app);
         let style = if !enabled && tool != Tool::Open {
-            Style::new().fg(DIM)
+            Style::new().fg(t.dim)
         } else {
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD)
         };
         text::put(buf, rect.x + 1, rect.y, &label, style);
-        text::put(buf, rect.right(), rect.y, "│", Style::new().fg(DIM));
+        text::put(buf, rect.right(), rect.y, "│", Style::new().fg(t.dim));
     }
 }
