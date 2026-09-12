@@ -530,6 +530,57 @@ mod tests {
     }
 
     #[test]
+    fn source_selection_highlights_signal_names() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $scope module dut $end\n\
+            $var wire 4 ! count [3:0] $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\nb0000 !\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 40));
+        let dir = std::env::temp_dir().join(format!("waverdi_src_hl_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("counter.sv");
+        std::fs::write(
+            &path,
+            "module counter(output logic [3:0] count);\n\
+             logic [3:0] next;\n\
+             assign count = next;\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![path], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
+        app.expanded.insert(1);
+        app.tree_sel = 2;
+        app.sync_source();
+        app.set_source_cursor(2, 0);
+        app.begin_source_selection();
+        app.extend_source_selection_to(2);
+        app.focus = crate::app::Focus::Source;
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        let rect = super::source::code_rect(&l);
+        let view = app.source_view.as_ref().unwrap();
+        let col = view.lines[2].find("count").unwrap();
+        let gutter = super::source::gutter_width(view);
+        let cell = buffer
+            .cell((rect.x + gutter + col as u16, rect.y + 2))
+            .unwrap();
+        assert_eq!(cell.bg, crate::theme::Theme::DARK.src_signal);
+    }
+
+    #[test]
     fn dialogs_render() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();

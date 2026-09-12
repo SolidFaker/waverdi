@@ -318,13 +318,19 @@ fn mouse_down(
 
     if pt_in(source::code_rect(&l), col, row) {
         let rect = source::code_rect(&l);
-        if let Some(index) = app
+        let line = app
             .source_view
             .as_ref()
-            .map(|view| view.scroll + (row - rect.y) as usize)
-        {
+            .map(|view| view.scroll + (row - rect.y) as usize);
+        if let Some(index) = line {
+            let gutter = app
+                .source_view
+                .as_ref()
+                .map(source::gutter_width)
+                .unwrap_or(0);
+            let text_x = rect.x.saturating_add(gutter);
             app.focus = Focus::Source;
-            app.set_source_cursor(index, col.saturating_sub(rect.x) as usize);
+            app.set_source_cursor(index, col.saturating_sub(text_x) as usize);
             match btn {
                 MouseButton::Right => app.open_context_menu(CtxTarget::Source, col, row),
                 MouseButton::Left if is_double => app.select_source_word(),
@@ -812,6 +818,49 @@ mod tests {
         crate::app::handle_mouse(&mut app, drag(x - 4, y));
         app.dragging = None;
         assert!(app.splits.value_pct > Splits::default().value_pct);
+    }
+
+    #[test]
+    fn source_click_maps_to_the_code_column() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $scope module dut $end\n\
+            $var wire 4 ! count [3:0] $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\nb0000 !\n";
+        let mut app = app_with(vcd);
+        let dir = std::env::temp_dir().join(format!("waverdi_src_click_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("counter.sv");
+        std::fs::write(
+            &path,
+            "module counter(output logic [3:0] count);\n\
+             assign count = 4'b0;\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![path], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
+        app.expanded.insert(1);
+        app.tree_sel = 2;
+        app.sync_source();
+
+        let l = app.layout();
+        let rect = crate::ui::source::code_rect(&l);
+        let view = app.source_view.as_ref().unwrap();
+        let line = 0usize;
+        let col = view.lines[line].rfind("count").unwrap();
+        let gutter = crate::ui::source::gutter_width(view);
+        let x = rect.x + gutter + col as u16;
+        let y = rect.y + line as u16;
+        crate::app::handle_mouse(&mut app, click(x, y));
+        let view = app.source_view.as_ref().unwrap();
+        assert_eq!(view.line, line);
+        assert_eq!(view.col, col);
+        assert_eq!(view.word_at_cursor().as_deref(), Some("count"));
     }
 
     #[test]

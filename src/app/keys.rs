@@ -938,7 +938,8 @@ mod tests {
         .unwrap();
         app.sources = Some(SourceSet::from_files(vec![file], "test"));
         app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
-        // The `dut` scope (node 2) is defined by `counter` in this dump.
+        // FSDB stores vector names with their range; matching uses the base.
+        app.wf.as_mut().unwrap().signals[0].name = "count[3:0]".to_string();
         app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
         app.expanded.insert(1);
         app.tree_sel = 2;

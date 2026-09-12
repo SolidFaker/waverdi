@@ -588,21 +588,46 @@ impl App {
     }
 
     /// Find the dumped signal matching `name` in the selected instance.
+    ///
+    /// FSDB stores vector names with their range (`count[7:0]`), so the plain
+    /// identifier from the source is matched against the base name too.
     fn find_signal_in_scope(&self, name: &str) -> Option<usize> {
+        fn base(signal: &str) -> &str {
+            signal.split('[').next().unwrap_or(signal)
+        }
         let scope = self.selected_scope_steps();
         let wf = self.wf.as_ref()?;
-        if let Some(index) = wf
+        let in_scope =
+            |sig: &crate::waveform::Signal| !scope.is_empty() && sig.scope.starts_with(&scope);
+        // Exact name first, then the range-stripped base name.
+        for wanted in [name, base(name)] {
+            if let Some(index) = wf
+                .signals
+                .iter()
+                .position(|sig| sig.name == wanted && sig.scope == scope)
+            {
+                return Some(index);
+            }
+            let all: Vec<usize> = wf
+                .signals
+                .iter()
+                .enumerate()
+                .filter(|(_, sig)| in_scope(sig) && base(&sig.name) == wanted)
+                .map(|(index, _)| index)
+                .collect();
+            if all.len() == 1 {
+                return Some(all[0]);
+            }
+        }
+        // Last resort: a unique base-name match anywhere in the dump.
+        let all: Vec<usize> = wf
             .signals
             .iter()
-            .position(|sig| sig.name == name && sig.scope == scope)
-        {
-            return Some(index);
-        }
-        let mut matches = wf.signals.iter().enumerate().filter(|(_, sig)| {
-            sig.name == name && !scope.is_empty() && sig.scope.starts_with(&scope)
-        });
-        let first = matches.next()?;
-        matches.next().is_none().then_some(first.0)
+            .enumerate()
+            .filter(|(_, sig)| base(&sig.name) == name)
+            .map(|(index, _)| index)
+            .collect();
+        (all.len() == 1).then(|| all[0])
     }
 
     /// Open a dialog, resetting its body scroll.

@@ -28,6 +28,11 @@ pub fn code_rect(l: &Layout) -> Rect {
     }
 }
 
+/// Width of the line-number gutter (digits plus one space).
+pub fn gutter_width(view: &crate::rtl::SourceView) -> u16 {
+    view.lines.len().max(1).to_string().len() as u16 + 1
+}
+
 /// Bordered frame of the RTL source pane; the title names the module.
 pub fn draw_frame(buf: &mut Buffer, l: &Layout, app: &App) {
     let t = &app.theme;
@@ -177,6 +182,9 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
                     .unwrap_or(false)
                 {
                     (t.bg, t.accent)
+                } else if selected && span.kind == HlKind::Signal {
+                    // Signal names inside a line selection stand out.
+                    (t.bg, t.src_signal)
                 } else {
                     (fg, bg)
                 };
