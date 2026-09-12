@@ -1,4 +1,4 @@
-mod action;
+﻿mod action;
 mod browser;
 mod context;
 mod dialog;
@@ -12,12 +12,12 @@ mod view;
 pub use action::Action;
 pub(crate) use browser::is_waveform;
 pub use browser::{EntryKind, FileBrowser};
-pub use context::{ContextMenu, CtxItem, CtxTarget};
+pub use context::{BusBuilder, ContextMenu, CtxEntry, CtxTarget};
 pub use dialog::Dialog;
 pub use input::{parse_time_spec, InputState};
 pub use keys::handle_key;
 pub use mouse::handle_mouse;
-pub use nav::ListRow;
+pub use nav::{Group, ListRow};
 
 use crate::ui::layout::{compute_layout, Layout, Splits};
 use crate::waveform::{Radix, Ticks, Waveform};
@@ -36,7 +36,7 @@ pub enum Focus {
 impl Focus {
     pub fn name(self) -> &'static str {
         match self {
-            Focus::Tree => "nTrace",
+            Focus::Tree => "Instance",
             Focus::List => "Signal List",
             Focus::Wave => "Waveform",
         }
@@ -57,7 +57,7 @@ pub struct MenuState {
     pub sel: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DragMode {
     Cursor,
     Range,
@@ -65,6 +65,7 @@ pub(crate) enum DragMode {
     VScroll,
     HScroll,
     TreeScroll,
+    DialogScroll,
     SplitTree,
     SplitList,
 }
@@ -78,7 +79,7 @@ pub(crate) struct Drag {
     pub row: usize,
 }
 
-/// Flattened view of the hierarchy tree, produced on demand for the nTrace pane.
+/// Flattened view of the hierarchy tree, produced on demand for the Instance pane.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TreeNode {
     Scope { id: usize, depth: usize },
@@ -89,12 +90,32 @@ pub struct App {
     pub path: String,
     pub wf: Option<Waveform>,
     pub display: Vec<usize>,
+    /// User-defined Signal List groups partitioning `display` into blocks.
+    pub groups: Vec<Group>,
     pub sel_row: Option<usize>,
+    /// Show full hierarchical signal names in the Signal List (`h`).
+    pub show_full_names: bool,
+    /// Signals picked with Shift/Ctrl+click (multi-selection).
+    pub selection: Vec<usize>,
+    /// Signal the current range selection started at (Ctrl+click anchor).
+    pub sel_anchor: Option<usize>,
+    /// Pending `g` prefix of the vim-style edge navigation.
+    pub(crate) pending_g: bool,
+    /// Pending `d` prefix: `dd` deletes the selection into the register.
+    pub(crate) pending_d: bool,
+    /// Visual mode (`V`): `j`/`k` extend the multi-selection.
+    pub visual: bool,
+    /// Cut/paste register filled by `dd`.
+    pub register: Vec<usize>,
     pub row_scroll: usize,
     pub focus: Focus,
     pub expanded: HashSet<usize>,
     pub tree_sel: usize,
     pub tree_scroll: usize,
+    /// Signals picked with the mouse in the Instance pane (multi-selection).
+    pub tree_multi: Vec<usize>,
+    /// Signal the Instance range selection started at.
+    pub tree_anchor: Option<usize>,
     pub t0: f64,
     pub scale: f64,
     pub cursor: Ticks,
@@ -104,6 +125,8 @@ pub struct App {
     pub messages: Vec<String>,
     pub menu: MenuState,
     pub dialog: Option<Dialog>,
+    /// Scroll offset of the dialog body (help / lists).
+    pub dialog_scroll: usize,
     pub input: InputState,
     pub find_sel: usize,
     pub radix: HashMap<usize, Radix>,
@@ -111,11 +134,15 @@ pub struct App {
     pub splits: Splits,
     /// Per-signal analog rendering range; presence means "show as analog".
     pub analog: HashMap<usize, (f64, f64)>,
-    /// Scope paths of Signal List groups that are collapsed.
-    pub collapsed: HashSet<String>,
     /// Last "Find Value" query, searched with `n` / `N`.
     pub value_query: Option<String>,
     pub ctx_menu: Option<ContextMenu>,
+    /// Signal waiting for a split width from `Dialog::SplitBus`.
+    pub pending_split: Option<usize>,
+    /// Group being renamed by `Dialog::GroupName` (stable id).
+    pub renaming_group: Option<u32>,
+    /// Ordering state of `Dialog::CreateBus`.
+    pub bus_builder: Option<BusBuilder>,
     /// Use the native GUI file dialog instead of the built-in browser.
     pub use_gui: bool,
     pub browser: Option<FileBrowser>,
@@ -128,12 +155,22 @@ impl App {
             path: String::new(),
             wf: None,
             display: Vec::new(),
+            groups: vec![Group::new(0)],
             sel_row: None,
+            show_full_names: false,
+            selection: Vec::new(),
+            sel_anchor: None,
+            pending_g: false,
+            pending_d: false,
+            visual: false,
+            register: Vec::new(),
             row_scroll: 0,
             focus: Focus::Tree,
             expanded: HashSet::new(),
             tree_sel: 0,
             tree_scroll: 0,
+            tree_multi: Vec::new(),
+            tree_anchor: None,
             t0: 0.0,
             scale: 1.0,
             cursor: 0,
@@ -143,15 +180,18 @@ impl App {
             messages: Vec::new(),
             menu: MenuState::default(),
             dialog: None,
+            dialog_scroll: 0,
             input: InputState::default(),
             find_sel: 0,
             radix: HashMap::new(),
             last_click: None,
             splits: Splits::default(),
             analog: HashMap::new(),
-            collapsed: HashSet::new(),
             value_query: None,
             ctx_menu: None,
+            pending_split: None,
+            renaming_group: None,
+            bus_builder: None,
             use_gui: crate::picker::detect_gui(),
             browser: None,
             pending_fit: false,
@@ -252,7 +292,7 @@ impl App {
                 .unwrap_or_default()
         };
         self.browser = Some(FileBrowser::new(&start));
-        self.dialog = Some(Dialog::Open);
+        self.open_dialog(Dialog::Open);
     }
 
     /// Install a parsed waveform and reset the view state.
@@ -265,22 +305,41 @@ impl App {
         self.path = path.into();
         self.expanded.clear();
         self.expanded.insert(wf.tree.root);
+        self.tree_multi.clear();
+        self.tree_anchor = None;
         self.display.clear();
+        self.groups = vec![Group::new(0)];
         self.sel_row = None;
+        self.show_full_names = false;
+        self.selection.clear();
+        self.sel_anchor = None;
+        self.pending_g = false;
+        self.pending_d = false;
+        self.visual = false;
+        self.register.clear();
         self.row_scroll = 0;
         self.tree_sel = 0;
         self.tree_scroll = 0;
         self.range = None;
         self.radix.clear();
         self.analog.clear();
-        self.collapsed.clear();
         self.ctx_menu = None;
+        self.pending_split = None;
+        self.renaming_group = None;
+        self.bus_builder = None;
         self.find_sel = 0;
         self.cursor = wf.start;
         self.wf = Some(wf);
         self.dialog = None;
+        self.dialog_scroll = 0;
         self.focus = Focus::Tree;
         self.pending_fit = true;
+    }
+
+    /// Open a dialog, resetting its body scroll.
+    pub fn open_dialog(&mut self, dialog: Dialog) {
+        self.dialog = Some(dialog);
+        self.dialog_scroll = 0;
     }
 
     pub fn radix_for(&self, idx: usize) -> Radix {
@@ -300,13 +359,39 @@ impl App {
     }
 
     pub fn cycle_radix(&mut self) {
-        let Some(idx) = self.selected_signal() else {
+        let targets = self.selected_signals();
+        if targets.is_empty() {
             return;
-        };
-        let next = self.radix_for(idx).next();
-        self.radix.insert(idx, next);
-        let name = self.wf.as_ref().unwrap().signals[idx].name.clone();
-        self.msg(format!("radix of {name}: {}", next.name()));
+        }
+        let mut last = Radix::Bin;
+        for &idx in &targets {
+            let next = self.radix_for(idx).next();
+            self.radix.insert(idx, next);
+            last = next;
+        }
+        if targets.len() == 1 {
+            let name = self.wf.as_ref().unwrap().signals[targets[0]].name.clone();
+            self.msg(format!("radix of {name}: {}", last.name()));
+        } else {
+            self.msg(format!(
+                "radix of {} signals: {}",
+                targets.len(),
+                last.name()
+            ));
+        }
+    }
+
+    /// Test helper: install a flat display list owned by the first group.
+    #[cfg(test)]
+    pub fn set_display(&mut self, sigs: Vec<usize>) {
+        self.display = sigs;
+        if self.groups.is_empty() {
+            self.groups.push(Group::new(0));
+        }
+        for group in self.groups.iter_mut().skip(1) {
+            group.count = 0;
+        }
+        self.groups[0].count = self.display.len();
     }
 }
 
@@ -367,8 +452,8 @@ mod tests {
         );
         assert_eq!(app.radix_for(0), Radix::Bin);
         assert_eq!(app.radix_for(1), Radix::Hex);
-        app.display.push(1);
-        app.sel_row = Some(0);
+        app.set_display(vec![1]);
+        app.sel_row = Some(1);
         let start = app.radix_for(1);
         let mut seen = HashSet::new();
         for _ in 0..Radix::CYCLE.len() {

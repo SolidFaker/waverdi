@@ -36,8 +36,15 @@ pub struct Layout {
     pub area: Rect,
     pub menu: Rect,
     pub toolbar: Rect,
+    /// Instance (hierarchy) pane, top-left.
     pub tree: Rect,
+    /// RTL source pane, top-right.
+    pub source: Rect,
+    /// nWave frame: the signal list and waveform panes live inside it.
+    pub nwave: Rect,
+    /// Signal List pane inside nWave (no frame of its own).
     pub list: Rect,
+    /// Waveform pane inside nWave (no frame of its own).
     pub wave: Rect,
     pub ruler: Rect,
     pub rows: Rect,
@@ -56,14 +63,14 @@ impl Layout {
         self.tree.height.saturating_sub(2) as usize
     }
 
-    /// Column of the tree/list border, which can be dragged to resize.
+    /// Column of the instance/source border, which can be dragged to resize.
     pub fn tree_grip_x(&self) -> u16 {
         self.tree.right().saturating_sub(1)
     }
 
-    /// Column of the list/wave separator, which can be dragged to resize.
+    /// Column between the Signal List and the waveforms, draggable.
     pub fn list_grip_x(&self) -> u16 {
-        self.list.right()
+        self.wave.x.saturating_sub(1)
     }
 }
 
@@ -72,38 +79,93 @@ const TOOLBAR_H: u16 = 1;
 const MESSAGE_H: u16 = 3;
 const STATUS_H: u16 = 1;
 const RULER_H: u16 = 2;
+/// Percentage of the main area taken by the instance/source row.
+const TOP_PCT: u32 = 60;
 
 pub fn compute_layout(area: Rect, splits: Splits) -> Layout {
     let rows = TuiLayout::vertical([
         Constraint::Length(MENUBAR_H),
-        Constraint::Length(TOOLBAR_H),
         Constraint::Fill(1),
         Constraint::Length(MESSAGE_H),
         Constraint::Length(STATUS_H),
     ])
     .split(area);
-    let (menu, toolbar, main, msg, status) = (rows[0], rows[1], rows[2], rows[3], rows[4]);
+    let (menu, main, msg, status) = (rows[0], rows[1], rows[2], rows[3]);
 
-    let cols = TuiLayout::horizontal([
-        Constraint::Percentage(splits.tree_pct),
-        Constraint::Percentage(splits.list_pct),
-        Constraint::Fill(1),
-    ])
-    .split(main);
-    let (tree, list, wave) = (cols[0], cols[1], cols[2]);
-
-    let rows_h = main.height.saturating_sub(RULER_H + 1);
-    let rows = Rect {
-        x: wave.x,
-        y: wave.y + RULER_H,
-        width: wave.width.saturating_sub(1),
-        height: rows_h,
+    // Top 60%: Instance | Source. Bottom 40%: nWave (list + waveforms).
+    let top_h = ((main.height as u32 * TOP_PCT / 100) as u16)
+        .clamp(3, main.height.saturating_sub(4).max(3))
+        .min(main.height);
+    let top = Rect {
+        x: main.x,
+        y: main.y,
+        width: main.width,
+        height: top_h,
     };
+    let bottom = Rect {
+        x: main.x,
+        y: main.y.saturating_add(top_h),
+        width: main.width,
+        height: main.height.saturating_sub(top_h),
+    };
+
+    let top_cols =
+        TuiLayout::horizontal([Constraint::Percentage(splits.tree_pct), Constraint::Fill(1)])
+            .split(top);
+    let tree = top_cols[0];
+    let source = Rect {
+        x: top_cols[1].x.saturating_sub(1),
+        y: top.y,
+        width: top_cols[1].width + 1,
+        height: top.height,
+    };
+
+    let nwave = bottom;
+    let inner = Rect {
+        x: nwave.x + 1,
+        y: nwave.y + 1,
+        width: nwave.width.saturating_sub(2),
+        height: nwave.height.saturating_sub(2),
+    };
+    let toolbar = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: TOOLBAR_H.min(inner.height),
+    };
+    let panes = Rect {
+        x: inner.x,
+        y: inner.y.saturating_add(TOOLBAR_H),
+        width: inner.width,
+        height: inner.height.saturating_sub(TOOLBAR_H),
+    };
+
+    let list_w = (panes.width as u32 * splits.list_pct as u32 / 100) as u16;
+    let list = Rect {
+        x: panes.x,
+        y: panes.y,
+        width: list_w.min(panes.width),
+        height: panes.height,
+    };
+    let wave = Rect {
+        x: panes.x.saturating_add(list_w).saturating_add(1),
+        y: panes.y,
+        width: panes.width.saturating_sub(list_w).saturating_sub(1),
+        height: panes.height,
+    };
+
     let ruler = Rect {
         x: wave.x,
         y: wave.y,
         width: wave.width,
-        height: RULER_H,
+        height: RULER_H.min(wave.height),
+    };
+    let rows_h = wave.height.saturating_sub(RULER_H + 1);
+    let rows = Rect {
+        x: wave.x,
+        y: wave.y.saturating_add(RULER_H),
+        width: wave.width.saturating_sub(1),
+        height: rows_h,
     };
     let hscroll = Rect {
         x: wave.x,
@@ -118,6 +180,8 @@ pub fn compute_layout(area: Rect, splits: Splits) -> Layout {
         menu,
         toolbar,
         tree,
+        source,
+        nwave,
         list,
         wave,
         ruler,
@@ -151,16 +215,23 @@ mod tests {
     #[test]
     fn layout_is_consistent() {
         let l = compute_layout(Rect::new(0, 0, 120, 40), Splits::default());
+        assert_eq!(l.menu.y, 0);
         assert_eq!(l.menu.height, 1);
-        assert_eq!(l.toolbar.y, 1);
+        assert_eq!(l.toolbar.y, l.nwave.y + 1);
+        assert_eq!(l.toolbar.x, l.nwave.x + 1);
+        // Instance and source share their border column.
+        assert_eq!(l.tree_grip_x(), l.source.x);
+        assert_eq!(l.source.right(), l.area.right());
+        assert!(l.nwave.y > l.tree.y);
+        assert!(l.nwave.bottom() <= l.msg.y);
         assert_eq!(l.rows.y, l.wave.y + 2);
         assert_eq!(l.rows.bottom(), l.hscroll.y);
         assert_eq!(l.rows.width as usize, l.cols);
         assert_eq!(l.vscroll_x, l.wave.right() - 1);
         assert_eq!(l.hscroll.right(), l.vscroll_x);
         assert_eq!(l.msg.y + l.msg.height, l.status.y);
-        assert_eq!(l.tree_grip_x() + 1, l.list.x);
-        assert_eq!(l.list_grip_x(), l.wave.x);
+        // The Signal List and the waveforms are separated by one column.
+        assert_eq!(l.list_grip_x() + 1, l.wave.x);
     }
 
     #[test]

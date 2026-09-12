@@ -5,6 +5,7 @@ use crate::ui::text;
 use crate::waveform::{self, Signal, Value, Waveform};
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, Widget as _};
 
 const VLINE: &str = "│";
 /// High / low level traces (thin lines at the top / bottom of the cell).
@@ -23,15 +24,33 @@ const SCROLL_THUMB: &str = "█";
 const SCROLL_TRACK: &str = "─";
 const HALF: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 
+/// Frame of the merged nWave window (Signal List + waveforms).
+pub fn draw_nwave_frame(buf: &mut Buffer, l: &Layout, focused: bool) {
+    let border_style = if focused {
+        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(PANEL_BORDER)
+    };
+    let title_style = if focused {
+        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
+    };
+    Block::bordered()
+        .title(" nWave ")
+        .title_style(title_style)
+        .border_style(border_style)
+        .render(l.nwave, buf);
+}
+
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     let canvas = ratatui::layout::Rect {
         x: l.wave.x,
         y: l.wave.y,
         width: l.wave.width,
-        height: l.wave.height.saturating_sub(1),
+        height: l.wave.height,
     };
     buf.set_style(canvas, Style::new().bg(BG));
-    buf.set_style(l.hscroll, Style::new().bg(TOOLBAR_BG));
 
     draw_ruler(buf, l, app, wf);
 
@@ -41,36 +60,41 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         let k = scroll + row;
         let Some(list_row) = rows.get(k) else { break };
         let selected = Some(k) == app.sel_row;
+        let multi = matches!(list_row, crate::app::ListRow::Signal { sig, .. } if app.selection.contains(sig));
+        let row_bg = if selected {
+            ROW_SEL_BG
+        } else if multi {
+            MULTI_SEL_BG
+        } else if row.is_multiple_of(2) {
+            ROW_ALT
+        } else {
+            BG
+        };
         let y = l.rows.y + row as u16;
         match list_row {
             crate::app::ListRow::Group {
-                name,
-                depth,
-                collapsed,
-                ..
-            } => draw_group_row(buf, l, *depth, name, *collapsed, selected, y),
+                name, collapsed, ..
+            } => draw_group_row(buf, l, name, *collapsed, selected, y),
             crate::app::ListRow::Signal { sig, .. } => {
-                draw_signal_row(buf, l, app, *sig, &wf.signals[*sig], selected, y);
+                draw_signal_row(buf, l, app, *sig, &wf.signals[*sig], row_bg, y);
             }
         }
     }
 
     if app.display.is_empty() {
-        let msg = "nTrace: select a signal, Enter / 'a' to add — or press 's' to search";
+        let msg = "Instance: select a signal, Enter / 'a' to add — or press 's' to search";
         let y = l.rows.y + (l.rows_h as u16 / 2);
         text::put(buf, l.rows.x, y, msg, Style::new().fg(DIM));
     }
 
     draw_range(buf, l, app);
     draw_cursor(buf, l, app);
-    draw_vscroll(buf, l, app);
-    draw_hscroll(buf, l, app);
+    draw_scrollbars(buf, l, app);
 }
 
 fn draw_group_row(
     buf: &mut Buffer,
     l: &Layout,
-    depth: usize,
     name: &str,
     collapsed: bool,
     selected: bool,
@@ -87,7 +111,7 @@ fn draw_group_row(
         Style::new().bg(bg),
     );
     let arrow = if collapsed { "▸" } else { "▾" };
-    let label = format!("{}{arrow} {name}/", "  ".repeat(depth));
+    let label = format!("{arrow} {name}");
     let style = if selected {
         Style::new().fg(Color::Black).bg(bg)
     } else {
@@ -96,6 +120,7 @@ fn draw_group_row(
     text::put(buf, l.rows.x + 1, y, &label, style);
 }
 
+/// Pane label; highlighted while the waveform pane owns the focus.
 fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     if l.cols == 0 || app.scale <= 0.0 {
         return;
@@ -108,6 +133,11 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     let t_end = app.t0 + l.cols as f64 * app.scale;
     let mut t = (app.t0 / step).ceil() * step;
     let mut last_label_end: i64 = i64::MIN;
+    let tick_color = if app.focus == crate::app::Focus::Wave {
+        ACCENT
+    } else {
+        TICK
+    };
     let mut guard = 0;
     while t <= t_end && guard < 10_000 {
         guard += 1;
@@ -115,7 +145,7 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         if col >= 0 && (col as usize) < l.cols {
             let x = l.wave.x as i64 + col;
             if x >= 0 && (x as usize) < l.wave.right() as usize {
-                text::set_cell(buf, x as u16, l.ruler.y + 1, RULER_TICK, TICK, BG);
+                text::set_cell(buf, x as u16, l.ruler.y + 1, RULER_TICK, tick_color, BG);
                 let label = waveform::format_time(t, &ts);
                 let lw = label.chars().count() as i64;
                 let lx = x - lw / 2;
@@ -156,16 +186,9 @@ fn draw_signal_row(
     app: &App,
     idx: usize,
     sig: &Signal,
-    selected: bool,
+    row_bg: Color,
     y: u16,
 ) {
-    let row_bg = if selected {
-        ROW_SEL_BG
-    } else if (y - l.rows.y).is_multiple_of(2) {
-        ROW_ALT
-    } else {
-        BG
-    };
     if let Some(&(min, max)) = app.analog.get(&idx) {
         draw_analog_row(buf, l, app, sig, row_bg, y, (min, max));
         return;
@@ -184,7 +207,10 @@ fn draw_bit_row(buf: &mut Buffer, l: &Layout, app: &App, sig: &Signal, row_bg: C
     let (t0, scale) = (app.t0, app.scale);
     let changes = &sig.changes;
     let n = changes.len();
-    let mut i = changes.partition_point(|c| (c.t as f64) < t0);
+    // A change belongs to the column its tick rounds to, so an edge symbol
+    // sits exactly under the cursor line at the same time.
+    let cut = t0 - 0.5 * scale;
+    let mut i = changes.partition_point(|c| (c.t as f64) < cut);
     let mut value: Option<&[u8]> = if i > 0 {
         changes[i - 1].v.as_bits()
     } else {
@@ -192,7 +218,7 @@ fn draw_bit_row(buf: &mut Buffer, l: &Layout, app: &App, sig: &Signal, row_bg: C
     };
 
     for col in 0..l.cols {
-        let col_end = t0 + (col + 1) as f64 * scale;
+        let col_end = t0 + (col as f64 + 0.5) * scale;
         let mut transitions = 0u32;
         while i < n && (changes[i].t as f64) < col_end {
             value = changes[i].v.as_bits();
@@ -231,10 +257,12 @@ fn draw_bus_row(
     let (t0, scale) = (app.t0, app.scale);
     let changes = &sig.changes;
     let n = changes.len();
-    let mut i = changes.partition_point(|c| (c.t as f64) < t0);
+    // Change markers use the same rounding as the cursor column.
+    let cut = t0 - 0.5 * scale;
+    let mut i = changes.partition_point(|c| (c.t as f64) < cut);
 
     for col in 0..l.cols {
-        let col_end = t0 + (col + 1) as f64 * scale;
+        let col_end = t0 + (col as f64 + 0.5) * scale;
         let mut transition = false;
         while i < n && (changes[i].t as f64) < col_end {
             i += 1;
@@ -297,7 +325,8 @@ fn draw_analog_row(
     let (t0, scale) = (app.t0, app.scale);
     let changes = &sig.changes;
     let n = changes.len();
-    let mut i = changes.partition_point(|c| (c.t as f64) < t0);
+    let cut = t0 - 0.5 * scale;
+    let mut i = changes.partition_point(|c| (c.t as f64) < cut);
     let mut value = if i > 0 {
         numeric_value(&changes[i - 1].v).unwrap_or(min)
     } else {
@@ -308,7 +337,7 @@ fn draw_analog_row(
     }
 
     for col in 0..l.cols {
-        let col_end = t0 + (col + 1) as f64 * scale;
+        let col_end = t0 + (col as f64 + 0.5) * scale;
         while i < n && (changes[i].t as f64) < col_end {
             value = numeric_value(&changes[i].v).unwrap_or(value);
             i += 1;
@@ -424,12 +453,12 @@ fn draw_vscroll(buf: &mut Buffer, l: &Layout, app: &App) {
     let thumb = ((visible as f64 / total as f64) * visible as f64).max(1.0) as usize;
     let top = ((app.row_scroll as f64 / total as f64) * visible as f64) as usize;
     for row in 0..visible {
-        let symbol = if row >= top && row < top + thumb {
-            SCROLL_THUMB
+        let (symbol, fg) = if row >= top && row < top + thumb {
+            (SCROLL_THUMB, ACCENT)
         } else {
-            VLINE
+            (VLINE, DIM)
         };
-        text::set_cell(buf, l.vscroll_x, l.rows.y + row as u16, symbol, DIM, BG);
+        text::set_cell(buf, l.vscroll_x, l.rows.y + row as u16, symbol, fg, BG);
     }
 }
 
@@ -466,19 +495,32 @@ fn draw_hscroll(buf: &mut Buffer, l: &Layout, app: &App) {
     }
     let (thumb_x, thumb_w) =
         hscroll_thumb(l.cols, app.scale, app.t0, wf.start as f64, wf.end as f64);
+    if thumb_w >= l.cols {
+        // The whole range is visible: leave the bar plain.
+        return;
+    }
     for col in 0..l.cols {
         let on_thumb = col >= thumb_x && col < thumb_x + thumb_w;
-        let symbol = if on_thumb { SCROLL_THUMB } else { SCROLL_TRACK };
-        let fg = if on_thumb { ACCENT } else { DIM };
+        let (symbol, fg) = if on_thumb {
+            (SCROLL_THUMB, ACCENT)
+        } else {
+            (SCROLL_TRACK, DIM)
+        };
         text::set_cell(
             buf,
-            l.rows.x + col as u16,
+            l.wave.x + col as u16,
             l.hscroll.y,
             symbol,
             fg,
             TOOLBAR_BG,
         );
     }
+}
+
+/// Redraw the scrollbars (used after overlays such as the focused frame).
+pub(crate) fn draw_scrollbars(buf: &mut Buffer, l: &Layout, app: &App) {
+    draw_vscroll(buf, l, app);
+    draw_hscroll(buf, l, app);
 }
 
 #[cfg(test)]

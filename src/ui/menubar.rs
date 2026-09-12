@@ -5,7 +5,7 @@ use crate::ui::text;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Widget as _};
+use ratatui::widgets::{Block, Clear, Widget as _};
 
 pub const MENUS: [(&str, &[(&str, Action)]); 5] = [
     (
@@ -117,6 +117,7 @@ pub fn draw_bar(buf: &mut Buffer, l: &Layout, app: &App) {
 
 pub fn draw_dropdown(buf: &mut Buffer, l: &Layout, app: &App, idx: usize) {
     let area = dropdown_rect(l, idx);
+    Clear.render(area, buf);
     buf.set_style(area, Style::new().bg(POPUP_BG));
     Block::bordered()
         .border_style(Style::new().fg(ACCENT))

@@ -1,4 +1,4 @@
-use super::{App, Dialog};
+﻿use super::{App, Dialog};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -36,11 +36,11 @@ impl Action {
             Action::Fit => app.fit(),
             Action::Center => app.center_cursor(),
             Action::Goto => {
-                app.dialog = Some(Dialog::Goto);
+                app.open_dialog(Dialog::Goto);
                 app.input.clear();
             }
             Action::Find => {
-                app.dialog = Some(Dialog::Find);
+                app.open_dialog(Dialog::Find);
                 app.input.clear();
                 app.find_sel = 0;
             }
@@ -53,8 +53,8 @@ impl Action {
             Action::Prev => app.jump_transition(false),
             Action::Next => app.jump_transition(true),
             Action::Radix => app.cycle_radix(),
-            Action::Keys => app.dialog = Some(Dialog::Keys),
-            Action::About => app.dialog = Some(Dialog::About),
+            Action::Keys => app.open_dialog(Dialog::Keys),
+            Action::About => app.open_dialog(Dialog::About),
         }
         false
     }

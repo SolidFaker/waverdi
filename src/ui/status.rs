@@ -75,6 +75,32 @@ pub fn draw_status(buf: &mut Buffer, l: &Layout, app: &App) {
         write(" | ", sep);
         write("signals ", Style::new().fg(DIM));
         write(&app.display.len().to_string(), Style::new().fg(HIGH));
+        if !app.selection.is_empty() {
+            write(" | ", sep);
+            write("sel ", Style::new().fg(DIM));
+            write(
+                &app.selection.len().to_string(),
+                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            );
+        }
+        if app.visual {
+            write(" | ", sep);
+            write(
+                "VISUAL",
+                Style::new()
+                    .fg(Color::Black)
+                    .bg(ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
+        if !app.register.is_empty() {
+            write(" | ", sep);
+            write("reg ", Style::new().fg(DIM));
+            write(
+                &app.register.len().to_string(),
+                Style::new().fg(Color::Yellow),
+            );
+        }
         write(" | ", sep);
         write("focus ", Style::new().fg(DIM));
         write(

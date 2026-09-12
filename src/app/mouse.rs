@@ -1,4 +1,4 @@
-use super::{App, CtxTarget, Dialog, Drag, DragMode, Focus, ListRow, TreeNode};
+﻿use super::{App, CtxTarget, Dialog, Drag, DragMode, Focus, ListRow, TreeNode};
 use crate::ui::layout::{pt_in, tree_inner, Layout, Splits};
 use crate::ui::menubar;
 use crate::ui::toolbar;
@@ -11,14 +11,40 @@ const WHEEL_STEP: usize = 3;
 /// Handle one mouse event. Returns `true` when the application should quit.
 pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
     let (col, row) = (m.column, m.row);
-    let shift = m.modifiers.contains(KeyModifiers::SHIFT);
+    // Some terminals (e.g. Windows Terminal) consume Shift+click for text
+    // selection, so Alt+click is accepted as an alias for multi-select.
+    let shift =
+        m.modifiers.contains(KeyModifiers::SHIFT) || m.modifiers.contains(KeyModifiers::ALT);
+    let ctrl = m.modifiers.contains(KeyModifiers::CONTROL);
 
-    if app.dialog == Some(Dialog::Open) {
-        match m.kind {
-            MouseEventKind::ScrollUp => browser_wheel(app, -(WHEEL_STEP as i64)),
-            MouseEventKind::ScrollDown => browser_wheel(app, WHEEL_STEP as i64),
-            MouseEventKind::Down(MouseButton::Left) => browser_click(app, col, row),
-            _ => {}
+    if let Some(dialog) = app.dialog {
+        // While a dialog owns the focus, mouse input goes to it only.
+        let l = app.layout();
+        if m.kind == MouseEventKind::Down(MouseButton::Left)
+            && pt_in(
+                crate::ui::dialog::close_button(l.area, app, dialog),
+                col,
+                row,
+            )
+        {
+            app.dialog = None;
+            app.renaming_group = None;
+            app.dragging = None;
+            return false;
+        }
+        if matches!(m.kind, MouseEventKind::Up(_)) {
+            app.dragging = None;
+            return false;
+        }
+        if dialog == Dialog::Open {
+            match m.kind {
+                MouseEventKind::ScrollUp => browser_wheel(app, -(WHEEL_STEP as i64)),
+                MouseEventKind::ScrollDown => browser_wheel(app, WHEEL_STEP as i64),
+                MouseEventKind::Down(MouseButton::Left) => browser_click(app, col, row),
+                _ => {}
+            }
+        } else {
+            dialog_mouse(app, dialog, m);
         }
         return false;
     }
@@ -26,10 +52,20 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
     if app.ctx_menu.is_some() {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                use crate::app::CtxEntry;
+                use crate::ui::context::CtxHit;
                 match crate::ui::context::item_at(app, col, row) {
-                    Some(index) => {
-                        let item = app.ctx_items()[index].1;
-                        app.run_ctx_item(item);
+                    Some(CtxHit::Root(i)) => match app.ctx_root().get(i).copied() {
+                        Some(CtxEntry::Submenu(..)) => app.open_ctx_submenu(i),
+                        Some(CtxEntry::Item(_, item)) => {
+                            app.run_ctx_item(item);
+                        }
+                        None => app.ctx_menu = None,
+                    },
+                    Some(CtxHit::Sub(i)) => {
+                        if let Some(CtxEntry::Item(_, item)) = app.ctx_level().get(i).copied() {
+                            app.run_ctx_item(item);
+                        }
                     }
                     None => app.ctx_menu = None,
                 }
@@ -44,7 +80,7 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
     }
 
     match m.kind {
-        MouseEventKind::Down(btn) => mouse_down(app, col, row, btn),
+        MouseEventKind::Down(btn) => mouse_down(app, col, row, btn, shift, ctrl),
         MouseEventKind::Drag(_) => {
             mouse_drag(app, col, row);
             false
@@ -69,6 +105,74 @@ fn browser_wheel(app: &mut App, delta: i64) {
     let rows = crate::ui::dialog::browser_rows(app.layout().area);
     if let Some(browser) = app.browser.as_mut() {
         browser.move_sel(delta, rows);
+    }
+}
+
+/// Mouse events forwarded to a focused dialog: scrollbar drag and the wheel.
+fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
+    if let Some(area) = crate::ui::dialog::scroll_area(app.layout().area, app, dialog) {
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) if pt_in(area.bar, m.column, m.row) => {
+                app.dragging = Some(new_drag(DragMode::DialogScroll, m.column, 0.0));
+                dialog_scroll_to(app, dialog, m.row);
+                return;
+            }
+            MouseEventKind::Drag(MouseButton::Left)
+                if app
+                    .dragging
+                    .map(|drag| drag.mode == DragMode::DialogScroll)
+                    .unwrap_or(false) =>
+            {
+                dialog_scroll_to(app, dialog, m.row);
+                return;
+            }
+            _ => {}
+        }
+    }
+    let delta: i64 = match m.kind {
+        MouseEventKind::ScrollUp => -1,
+        MouseEventKind::ScrollDown => 1,
+        _ => return,
+    };
+    match dialog {
+        Dialog::Keys => {
+            let step = (WHEEL_STEP as i64) * delta;
+            app.dialog_scroll = if step < 0 {
+                app.dialog_scroll
+                    .saturating_sub(step.unsigned_abs() as usize)
+            } else {
+                app.dialog_scroll.saturating_add(step as usize)
+            };
+        }
+        Dialog::Find => {
+            let count = app.find_matches().len();
+            if delta < 0 {
+                app.find_sel = app.find_sel.saturating_sub(1);
+            } else {
+                app.find_sel = (app.find_sel + 1).min(count.saturating_sub(1));
+            }
+        }
+        Dialog::CreateBus => app.bus_builder_move(delta),
+        _ => {}
+    }
+}
+
+/// Map a row on a dialog's scrollbar to a scroll offset.
+fn dialog_scroll_to(app: &mut App, dialog: Dialog, row: u16) {
+    let Some(area) = crate::ui::dialog::scroll_area(app.layout().area, app, dialog) else {
+        return;
+    };
+    let max = area.total.saturating_sub(area.rows);
+    let denom = area.rows.saturating_sub(1).max(1) as f64;
+    let rel = (row.saturating_sub(area.bar.y) as f64 / denom).clamp(0.0, 1.0);
+    let scroll = (rel * max as f64).round() as usize;
+    app.dialog_scroll = scroll;
+    // List dialogs keep their selection inside the visible window.
+    let bottom = (scroll + area.rows.saturating_sub(1)).min(area.total.saturating_sub(1));
+    match dialog {
+        Dialog::Find => app.find_sel = bottom,
+        Dialog::CreateBus => app.bus_builder_select(bottom),
+        _ => {}
     }
 }
 
@@ -99,7 +203,14 @@ fn browser_click(app: &mut App, col: u16, row: u16) {
     }
 }
 
-fn mouse_down(app: &mut App, col: u16, row: u16, btn: MouseButton) -> bool {
+fn mouse_down(
+    app: &mut App,
+    col: u16,
+    row: u16,
+    btn: MouseButton,
+    shift: bool,
+    ctrl: bool,
+) -> bool {
     if let Some(dialog) = app.dialog {
         if dialog == Dialog::Open {
             browser_click(app, col, row);
@@ -158,10 +269,28 @@ fn mouse_down(app: &mut App, col: u16, row: u16, btn: MouseButton) -> bool {
         if let Some(node) = nodes.get(k).copied() {
             app.tree_sel = k;
             app.focus = Focus::Tree;
-            if is_double {
-                match node {
-                    TreeNode::Scope { id, .. } => app.toggle_scope(id),
-                    TreeNode::Signal { sig, .. } => app.add_signal(sig),
+            match node {
+                TreeNode::Scope { id, .. } => {
+                    if is_double {
+                        app.toggle_scope(id);
+                    }
+                }
+                TreeNode::Signal { sig, .. } => {
+                    if shift {
+                        app.toggle_tree_signal(sig);
+                    } else if ctrl {
+                        app.tree_select_range(sig);
+                    } else if !is_double && !app.tree_multi.contains(&sig) {
+                        app.tree_multi.clear();
+                        app.tree_anchor = Some(sig);
+                    }
+                    if is_double {
+                        if app.tree_multi.contains(&sig) {
+                            app.add_tree_selection();
+                        } else {
+                            app.add_signal(sig);
+                        }
+                    }
                 }
             }
         }
@@ -177,16 +306,30 @@ fn mouse_down(app: &mut App, col: u16, row: u16, btn: MouseButton) -> bool {
                 .nth(app.row_scroll + row_in_list)
                 .filter(|_| row_in_list < app.rows_h());
             if let Some(list_row) = list_row {
-                app.sel_row = Some(app.row_scroll + row_in_list);
+                let index = app.row_scroll + row_in_list;
                 app.focus = Focus::List;
+                if btn == MouseButton::Right {
+                    let picked = matches!(&list_row, ListRow::Signal { sig, .. } if app.selection.contains(sig));
+                    if picked {
+                        app.sel_row = Some(index);
+                    } else {
+                        app.select_row(index);
+                    }
+                } else if shift {
+                    app.toggle_row_selection(index);
+                } else if ctrl {
+                    app.select_range_to(index);
+                } else {
+                    app.select_row(index);
+                }
                 match (btn, list_row) {
                     (MouseButton::Right, ListRow::Signal { sig, .. }) => {
                         app.open_context_menu(CtxTarget::Signal(sig), col, row)
                     }
-                    (MouseButton::Right, ListRow::Group { path, .. }) => {
-                        app.open_context_menu(CtxTarget::Group(path), col, row)
+                    (MouseButton::Right, ListRow::Group { id, .. }) => {
+                        app.open_context_menu(CtxTarget::Group(id), col, row)
                     }
-                    (MouseButton::Left, ListRow::Signal { sig, .. }) => {
+                    (MouseButton::Left, ListRow::Signal { sig, .. }) if !shift && !ctrl => {
                         let from = app.display.iter().position(|&s| s == sig).unwrap_or(0);
                         app.dragging = Some(Drag {
                             mode: DragMode::Reorder,
@@ -195,8 +338,8 @@ fn mouse_down(app: &mut App, col: u16, row: u16, btn: MouseButton) -> bool {
                             row: from,
                         });
                     }
-                    (MouseButton::Left, ListRow::Group { path, .. }) if is_double => {
-                        app.toggle_group(&path)
+                    (MouseButton::Left, ListRow::Group { index, .. }) if is_double => {
+                        app.toggle_group(index)
                     }
                     _ => {}
                 }
@@ -219,24 +362,40 @@ fn mouse_down(app: &mut App, col: u16, row: u16, btn: MouseButton) -> bool {
     }
 
     if pt_in(l.rows, col, row) {
-        app.cursor = app.tick_at_x(col);
         let row_in_wave = (row - l.rows.y) as usize;
         let list_row = app
             .list_rows()
             .into_iter()
             .nth(app.row_scroll + row_in_wave)
             .filter(|_| row_in_wave < app.rows_h());
+        if list_row.is_some() && btn == MouseButton::Left && (shift || ctrl) {
+            let index = app.row_scroll + row_in_wave;
+            app.focus = Focus::Wave;
+            if shift {
+                app.toggle_row_selection(index);
+            } else {
+                app.select_range_to(index);
+            }
+            return false;
+        }
+        app.cursor = app.tick_at_x(col);
         if let Some(list_row) = list_row {
             let index = app.row_scroll + row_in_wave;
             if btn == MouseButton::Right {
-                app.sel_row = Some(index);
+                let picked =
+                    matches!(&list_row, ListRow::Signal { sig, .. } if app.selection.contains(sig));
+                if picked {
+                    app.sel_row = Some(index);
+                } else {
+                    app.select_row(index);
+                }
                 app.focus = Focus::Wave;
                 match list_row {
                     ListRow::Signal { sig, .. } => {
                         app.open_context_menu(CtxTarget::Signal(sig), col, row)
                     }
-                    ListRow::Group { path, .. } => {
-                        app.open_context_menu(CtxTarget::Group(path), col, row)
+                    ListRow::Group { id, .. } => {
+                        app.open_context_menu(CtxTarget::Group(id), col, row)
                     }
                 }
                 return false;
@@ -244,8 +403,8 @@ fn mouse_down(app: &mut App, col: u16, row: u16, btn: MouseButton) -> bool {
             if matches!(list_row, ListRow::Group { .. }) {
                 app.sel_row = Some(index);
                 if is_double {
-                    if let ListRow::Group { path, .. } = list_row {
-                        app.toggle_group(&path);
+                    if let ListRow::Group { index, .. } = list_row {
+                        app.toggle_group(index);
                     }
                 }
                 return false;
@@ -294,13 +453,10 @@ fn split_pct(app: &App, mode: DragMode) -> f64 {
 
 /// Return the pane border under the pointer, if any.
 fn grip_at(l: &Layout, col: u16, row: u16) -> Option<DragMode> {
-    if row < l.tree.y || row >= l.tree.bottom() {
-        return None;
-    }
-    if col == l.tree_grip_x() {
+    if col == l.tree_grip_x() && row >= l.tree.y && row < l.tree.bottom() {
         return Some(DragMode::SplitTree);
     }
-    if col == l.list_grip_x() {
+    if col == l.list_grip_x() && row >= l.list.y && row < l.list.bottom() {
         return Some(DragMode::SplitList);
     }
     None
@@ -376,17 +532,18 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
             let Some(target) = app.display.iter().position(|&s| s == target_sig) else {
                 return;
             };
+            let dragged = app.display[drag.row];
             if target != drag.row {
-                let sig = app.display.remove(drag.row);
-                app.display.insert(target, sig);
+                app.move_signal(drag.row, target);
                 if let Some(active) = app.dragging.as_mut() {
                     active.row = target;
                 }
-                app.scroll_to_row_of(sig);
+                app.scroll_to_row_of(dragged);
             }
         }
         DragMode::VScroll => scroll_rows(app, &l, row),
         DragMode::TreeScroll => scroll_tree(app, &l, row),
+        DragMode::DialogScroll => {}
         DragMode::HScroll => pan_to_col(app, &l, col),
         DragMode::SplitTree => {
             let delta = col as f64 - drag.start_x as f64;
@@ -512,6 +669,15 @@ mod tests {
         }
     }
 
+    fn click_with(col: u16, row: u16, modifiers: KeyModifiers) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers,
+        }
+    }
+
     fn drag(col: u16, row: u16) -> MouseEvent {
         MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
@@ -529,17 +695,18 @@ mod tests {
             TreeNode::Signal { sig: 0, .. }
         ));
         // design is row 0 of the tree, clk is row 1 (screen y = 3 + 1).
-        crate::app::handle_mouse(&mut app, click(2, 4));
+        crate::app::handle_mouse(&mut app, click(2, 3));
         assert_eq!(app.focus, Focus::Tree);
-        crate::app::handle_mouse(&mut app, click(2, 4));
+        crate::app::handle_mouse(&mut app, click(2, 3));
         assert_eq!(app.display, vec![0]);
     }
 
     #[test]
     fn click_ruler_sets_cursor() {
         let mut app = app_with(VCD);
-        let x = app.layout().wave.x + 10;
-        crate::app::handle_mouse(&mut app, click(x, 2));
+        let l = app.layout();
+        let x = l.rows.x + 10;
+        crate::app::handle_mouse(&mut app, click(x, l.ruler.y));
         assert_eq!(app.focus, Focus::Wave);
         assert!(app.cursor > 0);
         assert!(app.dragging.is_some());
@@ -561,27 +728,27 @@ mod tests {
     #[test]
     fn drag_list_row_reorders_signals() {
         let mut app = app_with(VCD);
-        app.display = vec![0, 1];
+        app.set_display(vec![0, 1]);
         app.sel_row = Some(0);
         let l = app.layout();
-        let top = l.list.y + 2;
+        let top = l.list.y + 3;
         crate::app::handle_mouse(&mut app, click(30, top));
         crate::app::handle_mouse(&mut app, drag(30, top + 1));
         app.dragging = None;
         assert_eq!(app.display, vec![1, 0]);
-        assert_eq!(app.sel_row, Some(1));
+        assert_eq!(app.sel_row, Some(2));
     }
 
     #[test]
     fn click_inside_selection_zooms_to_range() {
         let mut app = app_with(VCD);
-        app.display = vec![0];
+        app.set_display(vec![0]);
         app.range = Some((2, 8));
         app.t0 = 0.0;
         app.scale = 1.0;
         let l = app.layout();
         let x = l.rows.x + 5; // tick 5.5, inside [2, 8]
-        crate::app::handle_mouse(&mut app, click(x, l.rows.y));
+        crate::app::handle_mouse(&mut app, click(x, l.rows.y + 1));
         assert!(app.range.is_none());
         let expected = 6.0 / l.cols as f64;
         assert!((app.scale - expected).abs() < 1e-9);
@@ -591,7 +758,7 @@ mod tests {
     #[test]
     fn context_menu_survives_button_release() {
         let mut app = app_with(VCD);
-        app.display = vec![0, 1];
+        app.set_display(vec![0, 1]);
         let l = app.layout();
         let y = l.list.y + 2;
         let down = MouseEvent {
@@ -615,7 +782,7 @@ mod tests {
     #[test]
     fn wheel_over_waveform_zooms() {
         let mut app = app_with(VCD);
-        app.display = vec![0];
+        app.set_display(vec![0]);
         let before = app.scale;
         let l = app.layout();
         let up = MouseEvent {
@@ -639,7 +806,7 @@ mod tests {
     #[test]
     fn drag_vertical_scrollbar_scrolls_rows() {
         let mut app = app_with(VCD);
-        app.display = vec![0; 40];
+        app.set_display(vec![0; 40]);
         app.row_scroll = 0;
         let l = app.layout();
         crate::app::handle_mouse(&mut app, click(l.vscroll_x, l.rows.y + l.rows_h as u16 - 1));
@@ -657,5 +824,126 @@ mod tests {
         crate::app::handle_mouse(&mut app, click(dropdown.x + 2, dropdown.y + 2));
         assert_eq!(app.menu.open, None);
         assert_eq!(app.dialog, Some(crate::app::Dialog::About));
+    }
+
+    #[test]
+    fn shift_click_builds_multi_selection() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        let top = app.layout().list.y + 3;
+        crate::app::handle_mouse(&mut app, click(30, top));
+        assert!(app.selection.is_empty());
+        assert_eq!(app.sel_anchor, Some(0));
+        crate::app::handle_mouse(&mut app, click_with(30, top + 1, KeyModifiers::SHIFT));
+        assert_eq!(app.selection, vec![1]);
+        assert_eq!(app.sel_row, Some(2));
+        crate::app::handle_mouse(&mut app, click_with(30, top, KeyModifiers::SHIFT));
+        assert_eq!(app.selection, vec![1, 0]);
+        // Toggling an already picked signal removes it again.
+        crate::app::handle_mouse(&mut app, click_with(30, top, KeyModifiers::SHIFT));
+        assert_eq!(app.selection, vec![1]);
+    }
+
+    #[test]
+    fn dialog_mouse_events_do_not_reach_the_panes() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0]);
+        let l = app.layout();
+        let scale = app.scale;
+        app.open_dialog(crate::app::Dialog::Keys);
+        // A click on the waveform is ignored while the dialog owns the focus.
+        crate::app::handle_mouse(&mut app, click(l.rows.x + 5, l.rows.y + 1));
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.scale, scale);
+        assert_eq!(app.dialog, Some(crate::app::Dialog::Keys));
+        // The wheel scrolls the dialog body instead.
+        let scroll = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: l.rows.x + 5,
+            row: l.rows.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        crate::app::handle_mouse(&mut app, scroll);
+        assert!(app.dialog_scroll > 0);
+    }
+
+    #[test]
+    fn tree_multi_select_and_double_click_adds_all() {
+        let mut app = app_with(VCD);
+        let l = app.layout();
+        // tree rows: design (0), clk (1), rst (2)
+        let clk_y = l.tree.y + 2;
+        let rst_y = l.tree.y + 3;
+        crate::app::handle_mouse(&mut app, click_with(3, clk_y, KeyModifiers::SHIFT));
+        crate::app::handle_mouse(&mut app, click_with(3, rst_y, KeyModifiers::SHIFT));
+        assert_eq!(app.tree_multi, vec![0, 1]);
+        crate::app::handle_mouse(&mut app, click(3, clk_y));
+        crate::app::handle_mouse(&mut app, click(3, clk_y));
+        assert_eq!(app.display, vec![0, 1]);
+        assert!(app.tree_multi.is_empty());
+    }
+
+    #[test]
+    fn dialog_close_button_closes_the_dialog() {
+        let mut app = app_with(VCD);
+        app.open_dialog(crate::app::Dialog::Keys);
+        let l = app.layout();
+        let close = crate::ui::dialog::close_button(l.area, &app, crate::app::Dialog::Keys);
+        crate::app::handle_mouse(&mut app, click(close.x + 1, close.y));
+        assert_eq!(app.dialog, None);
+    }
+
+    #[test]
+    fn dialog_scrollbar_click_scrolls_the_body() {
+        let mut app = app_with(VCD);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 60, 14));
+        app.open_dialog(crate::app::Dialog::Keys);
+        let l = app.layout();
+        let area = crate::ui::dialog::scroll_area(l.area, &app, crate::app::Dialog::Keys).unwrap();
+        crate::app::handle_mouse(
+            &mut app,
+            click(area.bar.x, area.bar.y + area.bar.height - 1),
+        );
+        assert!(app.dialog_scroll > 0);
+        assert!(app.dragging.is_some());
+    }
+
+    #[test]
+    fn double_click_group_toggles_collapse() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0]);
+        let row = app.layout().list.y + 2; // G0 header
+        crate::app::handle_mouse(&mut app, click(30, row));
+        crate::app::handle_mouse(&mut app, click(30, row));
+        assert!(app.groups[0].collapsed);
+        app.last_click = None; // long enough pause for a new double click
+        crate::app::handle_mouse(&mut app, click(30, row));
+        crate::app::handle_mouse(&mut app, click(30, row));
+        assert!(!app.groups[0].collapsed);
+    }
+
+    #[test]
+    fn alt_click_toggles_multi_selection() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        let top = app.layout().list.y + 3;
+        crate::app::handle_mouse(&mut app, click(30, top));
+        crate::app::handle_mouse(&mut app, click_with(30, top + 1, KeyModifiers::ALT));
+        assert_eq!(app.selection, vec![1]);
+    }
+
+    #[test]
+    fn ctrl_click_selects_range_from_anchor() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        let top = app.layout().list.y + 3;
+        crate::app::handle_mouse(&mut app, click(30, top));
+        crate::app::handle_mouse(&mut app, click_with(30, top + 1, KeyModifiers::CONTROL));
+        assert_eq!(app.selection, vec![0, 1]);
+        assert_eq!(app.sel_row, Some(2));
+        // A plain click starts a new single selection.
+        crate::app::handle_mouse(&mut app, click(30, top + 1));
+        assert!(app.selection.is_empty());
+        assert_eq!(app.sel_row, Some(2));
     }
 }

@@ -1,15 +1,16 @@
-use super::{App, Focus, TreeNode};
+﻿use super::{App, Focus, TreeNode};
 use crate::waveform::{Ticks, Waveform};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-/// A row of the Signal List / waveform pane. Signals are shown inside
-/// collapsible groups derived from their design hierarchy.
+/// A row of the Signal List / waveform pane: a user group header or a signal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ListRow {
     Group {
-        path: String,
+        /// Index into `App::groups`.
+        index: usize,
+        /// Stable group id used for naming and context-menu targets.
+        id: u32,
         name: String,
-        depth: usize,
         count: usize,
         collapsed: bool,
     },
@@ -19,62 +20,122 @@ pub enum ListRow {
     },
 }
 
-impl App {
-    /// Flatten the displayed signals into hierarchy groups plus signal rows.
-    pub fn list_rows(&self) -> Vec<ListRow> {
-        let Some(wf) = &self.wf else {
-            return Vec::new();
-        };
+/// A user-defined Signal List group. Groups partition `App::display` into
+/// contiguous blocks of `count` signals each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+    pub id: u32,
+    pub name: String,
+    pub count: usize,
+    pub collapsed: bool,
+}
 
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for &sig in &self.display {
-            let scope = &wf.signals[sig].scope;
-            for depth in 0..scope.len() {
-                *counts.entry(scope[..=depth].join(".")).or_insert(0) += 1;
-            }
+impl Group {
+    pub fn new(id: u32) -> Self {
+        Self {
+            id,
+            name: format!("G{id}"),
+            count: 0,
+            collapsed: false,
         }
+    }
+}
 
+impl App {
+    /// Flatten the groups and their signals into rows.
+    pub fn list_rows(&self) -> Vec<ListRow> {
         let mut rows = Vec::new();
-        let mut open: Vec<String> = Vec::new();
-        for &sig in &self.display {
-            let scope = &wf.signals[sig].scope;
-            let mut common = 0;
-            while common < open.len()
-                && common < scope.len()
-                && open[common] == scope[..=common].join(".")
-            {
-                common += 1;
-            }
-            open.truncate(common);
-
-            if open.iter().any(|path| self.collapsed.contains(path)) {
-                continue;
-            }
-
-            for depth in common..scope.len() {
-                let path = scope[..=depth].join(".");
-                let collapsed = self.collapsed.contains(&path);
-                rows.push(ListRow::Group {
-                    path: path.clone(),
-                    name: scope[depth].clone(),
-                    depth,
-                    count: counts.get(&path).copied().unwrap_or(0),
-                    collapsed,
-                });
-                open.push(path);
-                if collapsed {
-                    break;
+        let mut start = 0usize;
+        for (index, group) in self.groups.iter().enumerate() {
+            rows.push(ListRow::Group {
+                index,
+                id: group.id,
+                name: group.name.clone(),
+                count: group.count,
+                collapsed: group.collapsed,
+            });
+            if !group.collapsed {
+                let end = (start + group.count).min(self.display.len());
+                for &sig in &self.display[start..end] {
+                    rows.push(ListRow::Signal { sig, depth: 0 });
                 }
             }
-
-            if open.len() == scope.len() && !open.iter().any(|p| self.collapsed.contains(p)) {
-                rows.push(ListRow::Signal {
-                    sig,
-                    depth: scope.len(),
-                });
-            }
+            start += group.count;
         }
         rows
+    }
+
+    /// Index of the group owning the display slot `pos`.
+    pub fn group_of_pos(&self, pos: usize) -> usize {
+        let mut start = 0;
+        for (i, group) in self.groups.iter().enumerate() {
+            start += group.count;
+            if pos < start {
+                return i;
+            }
+        }
+        self.groups.len().saturating_sub(1)
+    }
+
+    /// Index of the group owning a displayed signal.
+    pub fn group_of_signal(&self, sig: usize) -> Option<usize> {
+        let pos = self.display.iter().position(|&s| s == sig)?;
+        Some(self.group_of_pos(pos))
+    }
+
+    pub fn group_index(&self, id: u32) -> Option<usize> {
+        self.groups.iter().position(|group| group.id == id)
+    }
+
+    /// Display slots owned by a group.
+    pub fn group_range(&self, index: usize) -> std::ops::Range<usize> {
+        let start: usize = self.groups[..index].iter().map(|g| g.count).sum();
+        start..start + self.groups[index].count
+    }
+
+    /// Next free group number: highest existing id + 1.
+    pub fn next_group_id(&self) -> u32 {
+        self.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1
+    }
+
+    /// Group that receives new signals: the one under the cursor.
+    pub fn active_group(&self) -> usize {
+        let Some(row) = self.sel_row else { return 0 };
+        match self.list_rows().get(row) {
+            Some(ListRow::Group { index, .. }) => *index,
+            Some(ListRow::Signal { sig, .. }) => self.group_of_signal(*sig).unwrap_or(0),
+            None => 0,
+        }
+    }
+
+    /// Insert a signal at `at` and hand it to `group`.
+    pub(crate) fn display_insert(&mut self, group: usize, at: usize, sig: usize) {
+        let at = at.min(self.display.len());
+        self.display.insert(at, sig);
+        self.groups[group].count += 1;
+    }
+
+    /// Append a fresh empty group when a signal lands in the newest group.
+    pub(crate) fn grow_groups(&mut self, group: usize) {
+        if group + 1 == self.groups.len() {
+            self.groups.push(Group::new(self.next_group_id()));
+        }
+    }
+
+    /// Move a displayed signal from one slot to another; the signal joins the
+    /// group that owns the drop position.
+    pub fn move_signal(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.display.len() || to >= self.display.len() {
+            return;
+        }
+        let src = self.group_of_pos(from);
+        let dst = self.group_of_pos(to);
+        let sig = self.display.remove(from);
+        self.display.insert(to, sig);
+        if src != dst {
+            self.groups[src].count = self.groups[src].count.saturating_sub(1);
+            self.groups[dst].count += 1;
+        }
     }
 
     pub fn rows_len(&self) -> usize {
@@ -93,11 +154,138 @@ impl App {
         }
     }
 
+    /// Signals an action should apply to: the multi-selection when there is
+    /// one, otherwise the signal on the selected row.
+    pub fn selected_signals(&self) -> Vec<usize> {
+        if !self.selection.is_empty() {
+            return self.selection.clone();
+        }
+        self.selected_signal().into_iter().collect()
+    }
+
+    /// Signals a context-menu action applies to: the whole multi-selection
+    /// when the clicked signal is part of it, otherwise just that signal.
+    pub fn action_targets(&self, sig: usize) -> Vec<usize> {
+        if self.selection.contains(&sig) {
+            self.selection.clone()
+        } else {
+            vec![sig]
+        }
+    }
+
+    /// Signal index shown on a row, if the row is a signal.
+    pub fn row_signal(&self, row: usize) -> Option<usize> {
+        match self.list_rows().into_iter().nth(row)? {
+            ListRow::Signal { sig, .. } => Some(sig),
+            ListRow::Group { .. } => None,
+        }
+    }
+
+    /// Plain click / navigation: select one row and drop any multi-selection.
+    pub fn select_row(&mut self, row: usize) {
+        self.sel_row = Some(row);
+        self.selection.clear();
+        self.sel_anchor = self.row_signal(row);
+    }
+
+    /// Shift+click: add or remove one signal from the multi-selection.
+    pub fn toggle_row_selection(&mut self, row: usize) {
+        self.sel_row = Some(row);
+        let Some(sig) = self.row_signal(row) else {
+            return;
+        };
+        if let Some(position) = self.selection.iter().position(|&s| s == sig) {
+            self.selection.remove(position);
+        } else {
+            self.selection.push(sig);
+            if self.sel_anchor.is_none() {
+                self.sel_anchor = Some(sig);
+            }
+        }
+    }
+
+    /// Ctrl+click: select every signal row between the anchor and `row`.
+    pub fn select_range_to(&mut self, row: usize) {
+        let Some(anchor) = self.sel_anchor.or_else(|| self.selected_signal()) else {
+            self.sel_row = Some(row);
+            return;
+        };
+        let rows = self.list_rows();
+        let anchor_row = rows
+            .iter()
+            .position(|r| matches!(r, ListRow::Signal { sig, .. } if *sig == anchor));
+        let Some(anchor_row) = anchor_row else {
+            self.sel_row = Some(row);
+            return;
+        };
+        let (lo, hi) = (anchor_row.min(row), anchor_row.max(row));
+        self.selection = rows[lo..=hi]
+            .iter()
+            .filter_map(|r| match r {
+                ListRow::Signal { sig, .. } => Some(*sig),
+                ListRow::Group { .. } => None,
+            })
+            .collect();
+        self.sel_anchor = Some(anchor);
+        self.sel_row = Some(row);
+    }
+
+    /// Shift+Up/Down: extend the multi-selection by one row from its anchor.
+    pub fn extend_selection(&mut self, delta: i64) {
+        if self.sel_anchor.is_none() {
+            self.sel_anchor = self.selected_signal();
+        }
+        self.move_sel(delta);
+        if let Some(row) = self.sel_row {
+            self.select_range_to(row);
+        }
+    }
+
+    /// Move the selected signal up / down (`J`/`K`). Movement crosses group
+    /// boundaries: the signal joins the group that owns its new position.
+    pub fn move_selected_signal(&mut self, delta: i64) {
+        let Some(sig) = self.selected_signal() else {
+            self.msg("move signal: select a signal row first");
+            return;
+        };
+        let Some(pos) = self.display.iter().position(|&s| s == sig) else {
+            return;
+        };
+        let group = self.group_of_pos(pos);
+        if delta > 0 {
+            if pos + 1 < self.display.len() {
+                self.move_signal(pos, pos + 1);
+            } else if group + 1 < self.groups.len() {
+                // No slot below: hand the signal over to the next group.
+                self.groups[group].count = self.groups[group].count.saturating_sub(1);
+                self.groups[group + 1].count += 1;
+            } else {
+                return;
+            }
+        } else if delta < 0 {
+            if pos > 0 {
+                self.move_signal(pos, pos - 1);
+            } else if group > 0 {
+                // No slot above: hand the signal over to the previous group.
+                self.groups[group].count = self.groups[group].count.saturating_sub(1);
+                self.groups[group - 1].count += 1;
+            } else {
+                return;
+            }
+        } else {
+            return;
+        }
+        self.scroll_to_row_of(sig);
+    }
+
     pub fn add_signal(&mut self, idx: usize) {
         if self.display.contains(&idx) {
             return;
         }
-        self.display.push(idx);
+        let group = self.active_group();
+        let at = self.group_range(group).end.min(self.display.len());
+        self.display_insert(group, at, idx);
+        self.grow_groups(group);
         self.sel_row = self
             .list_rows()
             .iter()
@@ -107,68 +295,144 @@ impl App {
         self.focus = Focus::List;
     }
 
+    /// `dd`: cut the selected signals into the register.
+    pub fn delete_selected_signals(&mut self) {
+        let targets = self.selected_signals();
+        if targets.is_empty() {
+            self.msg("dd: select a signal row first");
+            return;
+        }
+        self.register = targets.clone();
+        for sig in targets {
+            self.remove_signal(sig);
+        }
+        self.selection.clear();
+        self.sel_anchor = None;
+        self.visual = false;
+        self.msg(format!(
+            "cut {} signal(s) into the register (p pastes them below)",
+            self.register.len()
+        ));
+    }
+
+    /// `p`: paste the register below the current signal / into the current group.
+    pub fn paste_register(&mut self) {
+        if self.register.is_empty() {
+            self.msg("register is empty");
+            return;
+        }
+        let (group, at) = match self.selected_row() {
+            Some(ListRow::Signal { sig, .. }) => {
+                let pos = self
+                    .display
+                    .iter()
+                    .position(|&s| s == sig)
+                    .unwrap_or(self.display.len());
+                (self.group_of_signal(sig).unwrap_or(0), pos + 1)
+            }
+            Some(ListRow::Group { index, .. }) => (index, self.group_range(index).end),
+            None => (self.active_group(), self.display.len()),
+        };
+        let pasted = self.register.clone();
+        let start = at.min(self.display.len());
+        for (offset, &sig) in pasted.iter().enumerate() {
+            self.display_insert(group, start + offset, sig);
+        }
+        self.grow_groups(group);
+        self.scroll_to_row_of(pasted[0]);
+        self.msg(format!("pasted {} signal(s)", pasted.len()));
+    }
+
     pub fn remove_selected(&mut self) {
+        if !self.selection.is_empty() {
+            let count = self.selection.len();
+            for sig in std::mem::take(&mut self.selection) {
+                self.remove_signal(sig);
+            }
+            self.sel_anchor = None;
+            self.msg(format!("removed {count} signals"));
+            return;
+        }
         match self.selected_row() {
             Some(ListRow::Signal { sig, .. }) => self.remove_signal(sig),
-            Some(ListRow::Group { path, .. }) => self.remove_group(&path),
+            Some(ListRow::Group { index, .. }) => self.remove_group(index),
             None => {}
         }
     }
 
     pub fn remove_signal(&mut self, sig: usize) {
         if let Some(position) = self.display.iter().position(|&s| s == sig) {
+            let group = self.group_of_pos(position);
             self.display.remove(position);
+            self.groups[group].count = self.groups[group].count.saturating_sub(1);
         }
         self.clamp_sel();
     }
 
-    /// Remove every displayed signal inside the given scope path.
-    pub fn remove_group(&mut self, path: &str) {
-        let parts: Vec<&str> = path.split('.').collect();
-        let scopes: Vec<Vec<String>> = self
-            .wf
-            .as_ref()
-            .map(|wf| wf.signals.iter().map(|s| s.scope.clone()).collect())
-            .unwrap_or_default();
-        self.display.retain(|&sig| {
-            let scope = &scopes[sig];
-            !(scope.len() >= parts.len() && scope.iter().zip(&parts).all(|(a, b)| a.as_str() == *b))
-        });
+    /// Remove a group together with the signals it owns. Removing the last
+    /// group leaves a fresh empty `G0` behind.
+    pub fn remove_group(&mut self, index: usize) {
+        if index >= self.groups.len() {
+            return;
+        }
+        let range = self.group_range(index);
+        self.display.drain(range);
+        self.groups.remove(index);
+        if self.groups.is_empty() {
+            self.groups.push(Group::new(0));
+        }
         self.clamp_sel();
+    }
+
+    /// Rename a group; its id (and therefore its number) does not change.
+    pub fn rename_group(&mut self, id: u32, name: String) {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            self.msg("group name must not be empty");
+            return;
+        }
+        if let Some(index) = self.group_index(id) {
+            self.groups[index].name = name.clone();
+            self.msg(format!("group G{id} renamed to {name}"));
+        }
+    }
+
+    /// Create an empty group after `index`, numbered from the highest id + 1.
+    pub fn insert_group_after(&mut self, index: usize) {
+        let id = self.next_group_id();
+        let at = (index + 1).min(self.groups.len());
+        self.groups.insert(at, Group::new(id));
+        self.focus_group(at);
+        self.msg(format!("created group G{id}"));
     }
 
     pub fn clear_all(&mut self) {
         self.display.clear();
+        self.groups = vec![Group::new(0)];
         self.sel_row = None;
+        self.selection.clear();
+        self.sel_anchor = None;
         self.row_scroll = 0;
     }
 
-    pub fn toggle_group(&mut self, path: &str) {
-        if !self.collapsed.remove(path) {
-            self.collapsed.insert(path.to_string());
+    pub fn toggle_group(&mut self, index: usize) {
+        if let Some(group) = self.groups.get_mut(index) {
+            group.collapsed = !group.collapsed;
         }
-        self.focus_group(path);
+        self.focus_group(index);
     }
 
-    pub fn set_group_collapsed(&mut self, path: &str, collapsed: bool) {
-        if collapsed {
-            self.collapsed.insert(path.to_string());
-        } else {
-            self.collapsed.remove(path);
+    pub fn set_group_collapsed(&mut self, index: usize, collapsed: bool) {
+        if let Some(group) = self.groups.get_mut(index) {
+            group.collapsed = collapsed;
         }
-        self.focus_group(path);
+        self.focus_group(index);
     }
 
     pub fn collapse_all(&mut self) {
-        let Some(wf) = &self.wf else { return };
-        let mut paths = HashSet::new();
-        for &sig in &self.display {
-            let scope = &wf.signals[sig].scope;
-            for depth in 0..scope.len() {
-                paths.insert(scope[..=depth].join("."));
-            }
+        for group in &mut self.groups {
+            group.collapsed = true;
         }
-        self.collapsed = paths;
         self.sel_row = self
             .list_rows()
             .iter()
@@ -177,15 +441,17 @@ impl App {
     }
 
     pub fn expand_all(&mut self) {
-        self.collapsed.clear();
+        for group in &mut self.groups {
+            group.collapsed = false;
+        }
         self.clamp_sel();
     }
 
-    fn focus_group(&mut self, path: &str) {
+    fn focus_group(&mut self, index: usize) {
         let rows = self.list_rows();
         if let Some(position) = rows
             .iter()
-            .position(|row| matches!(row, ListRow::Group { path: p, .. } if p == path))
+            .position(|row| matches!(row, ListRow::Group { index: i, .. } if *i == index))
         {
             self.sel_row = Some(position);
         } else {
@@ -195,6 +461,14 @@ impl App {
     }
 
     fn clamp_sel(&mut self) {
+        self.selection.retain(|sig| self.display.contains(sig));
+        if !self
+            .sel_anchor
+            .map(|sig| self.display.contains(&sig))
+            .unwrap_or(false)
+        {
+            self.sel_anchor = None;
+        }
         let len = self.rows_len();
         self.sel_row = if len == 0 {
             None
@@ -227,9 +501,18 @@ impl App {
         self.scroll_to_sel();
     }
 
+    /// Jump to the first row of the Signal List (vim `gg`).
+    pub(crate) fn select_first_row(&mut self) {
+        if self.rows_len() == 0 {
+            return;
+        }
+        self.sel_row = Some(0);
+        self.scroll_to_sel();
+    }
+
     pub fn list_enter(&mut self) {
-        if let Some(ListRow::Group { path, .. }) = self.selected_row() {
-            self.toggle_group(&path);
+        if let Some(ListRow::Group { index, .. }) = self.selected_row() {
+            self.toggle_group(index);
         }
     }
 
@@ -299,6 +582,34 @@ impl App {
         self.tree_scroll_to_sel();
     }
 
+    /// Hierarchical path from the root to `id`, e.g. `tb.u_dut`.
+    pub fn tree_path(&self, id: usize) -> Option<String> {
+        fn rec(wf: &Waveform, node: usize, target: usize, path: &mut Vec<String>) -> bool {
+            path.push(wf.tree.nodes[node].name.clone());
+            if node == target {
+                return true;
+            }
+            for &child in &wf.tree.nodes[node].children {
+                if rec(wf, child, target, path) {
+                    return true;
+                }
+            }
+            path.pop();
+            false
+        }
+        let wf = self.wf.as_ref()?;
+        let mut path = Vec::new();
+        rec(wf, wf.tree.root, id, &mut path).then(|| path.join("."))
+    }
+
+    /// Path of the instance selected in the Instance pane, if any.
+    pub fn selected_scope_path(&self) -> Option<String> {
+        match self.tree_visible().get(self.tree_sel) {
+            Some(TreeNode::Scope { id, .. }) => self.tree_path(*id),
+            _ => None,
+        }
+    }
+
     /// Enter on the tree: toggle scopes, add signals to the waveform.
     pub fn tree_enter(&mut self) {
         let nodes = self.tree_visible();
@@ -306,6 +617,79 @@ impl App {
             Some(TreeNode::Scope { id, .. }) => self.toggle_scope(*id),
             Some(TreeNode::Signal { sig, .. }) => self.add_signal(*sig),
             None => {}
+        }
+    }
+
+    /// Shift/Alt+click in the Instance pane: toggle one signal in the tree selection.
+    pub fn toggle_tree_signal(&mut self, sig: usize) {
+        if let Some(position) = self.tree_multi.iter().position(|&s| s == sig) {
+            self.tree_multi.remove(position);
+        } else {
+            self.tree_multi.push(sig);
+            if self.tree_anchor.is_none() {
+                self.tree_anchor = Some(sig);
+            }
+        }
+    }
+
+    /// Ctrl+click in the Instance pane: select every visible tree signal in the range.
+    pub fn tree_select_range(&mut self, sig: usize) {
+        let nodes = self.tree_visible();
+        let anchor = self.tree_anchor.or_else(|| match nodes.get(self.tree_sel) {
+            Some(TreeNode::Signal { sig, .. }) => Some(*sig),
+            _ => None,
+        });
+        let position = |s: usize| {
+            nodes
+                .iter()
+                .position(|node| matches!(node, TreeNode::Signal { sig, .. } if *sig == s))
+        };
+        let Some(anchor) = anchor else {
+            self.tree_multi = vec![sig];
+            self.tree_anchor = Some(sig);
+            return;
+        };
+        let (Some(a), Some(b)) = (position(anchor), position(sig)) else {
+            self.tree_multi = vec![sig];
+            self.tree_anchor = Some(anchor);
+            return;
+        };
+        let (lo, hi) = (a.min(b), a.max(b));
+        self.tree_multi = nodes[lo..=hi]
+            .iter()
+            .filter_map(|node| match node {
+                TreeNode::Signal { sig, .. } => Some(*sig),
+                TreeNode::Scope { .. } => None,
+            })
+            .collect();
+        self.tree_anchor = Some(anchor);
+    }
+
+    /// Signals picked in the Instance pane, in tree order.
+    pub fn tree_selected_signals(&self) -> Vec<usize> {
+        self.tree_visible()
+            .iter()
+            .filter_map(|node| match node {
+                TreeNode::Signal { sig, .. } if self.tree_multi.contains(sig) => Some(*sig),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Double click with a tree multi-selection: add every picked signal.
+    pub fn add_tree_selection(&mut self) {
+        let targets = self.tree_selected_signals();
+        let mut added = 0;
+        for sig in targets {
+            if !self.display.contains(&sig) {
+                self.add_signal(sig);
+                added += 1;
+            }
+        }
+        self.tree_multi.clear();
+        self.tree_anchor = None;
+        if added > 0 {
+            self.msg(format!("added {added} signal(s) from the Instance pane"));
         }
     }
 
@@ -349,6 +733,7 @@ fn parse_time(spec: &str) -> Result<f64, ()> {
 
 #[cfg(test)]
 mod tests {
+    use super::Group;
     use crate::app::tests::app_with;
 
     const VCD: &str = "$timescale 1ns $end\n\
@@ -404,56 +789,64 @@ mod tests {
     }
 
     #[test]
-    fn list_rows_merges_signals_into_one_group() {
-        let vcd = "$timescale 1ns $end\n\
-            $scope module top $end\n\
-            $var wire 1 ! a $end\n\
-            $var wire 1 \" b $end\n\
-            $scope module sub $end\n\
-            $var wire 1 # c $end\n\
-            $var wire 1 % d $end\n\
-            $upscope $end\n\
-            $upscope $end\n\
-            $enddefinitions $end\n#0\n0!\n0\"\n0#\n0%\n";
-        let mut app = app_with(vcd);
-        app.display = vec![0, 1, 2, 3];
+    fn user_groups_partition_the_display() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
         let rows = app.list_rows();
-        let groups: Vec<&str> = rows
-            .iter()
-            .filter_map(|row| match row {
-                super::ListRow::Group { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(groups, vec!["top", "sub"]);
-        assert_eq!(rows.len(), 6); // 2 groups + 4 signals
+        assert_eq!(rows.len(), 3); // G0 + two signals
+        assert!(matches!(
+            &rows[0],
+            super::ListRow::Group { name, count: 2, collapsed: false, .. } if name == "G0"
+        ));
+        assert!(matches!(
+            &rows[1],
+            super::ListRow::Signal { sig: 0, depth: 0 }
+        ));
+        assert!(matches!(
+            &rows[2],
+            super::ListRow::Signal { sig: 1, depth: 0 }
+        ));
     }
 
     #[test]
-    fn list_rows_group_by_scope() {
+    fn adding_signals_fills_the_active_group_and_appends_one() {
         let mut app = app_with(VCD);
-        app.display = vec![0, 1];
-        let rows = app.list_rows();
-        assert_eq!(rows.len(), 4); // top, clk, top.sub, data
-        assert!(
-            matches!(&rows[0], super::ListRow::Group { name, depth: 0, count: 2, collapsed: false, .. } if name == "top")
+        app.add_signal(0);
+        assert_eq!(app.groups.len(), 2);
+        assert_eq!(app.groups[0].count, 1);
+        assert_eq!(app.groups[1].count, 0);
+        assert_eq!(app.groups[1].id, 1);
+        app.add_signal(1);
+        // The cursor sits on the G0 signal, so G0 grows and G1 stays newest.
+        assert_eq!(app.groups[0].count, 2);
+        assert_eq!(app.groups.len(), 2);
+    }
+
+    #[test]
+    fn new_group_numbers_use_the_highest_existing_id() {
+        let mut app = app_with(VCD);
+        app.add_signal(0); // G0 + auto-appended G1
+        for _ in 0..3 {
+            let id = app.next_group_id();
+            app.groups.push(Group::new(id)); // G2, G3, G4
+        }
+        assert_eq!(
+            app.groups.iter().map(|g| g.id).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
         );
-        assert!(matches!(
-            &rows[1],
-            super::ListRow::Signal { sig: 0, depth: 1 }
-        ));
-        assert!(matches!(&rows[2], super::ListRow::Group { name, depth: 1, .. } if name == "sub"));
-        assert!(matches!(
-            &rows[3],
-            super::ListRow::Signal { sig: 1, depth: 2 }
-        ));
+        app.remove_group(2); // remove G2
+        assert_eq!(app.next_group_id(), 5);
+        let id = app.next_group_id();
+        app.groups.push(Group::new(id)); // G5
+        app.remove_group(app.group_index(id).unwrap());
+        assert_eq!(app.next_group_id(), 5); // G5 is reused, not G6
     }
 
     #[test]
     fn collapsing_groups_hides_signals() {
         let mut app = app_with(VCD);
-        app.display = vec![0, 1];
-        app.toggle_group("top");
+        app.set_display(vec![0, 1]);
+        app.toggle_group(0);
         let rows = app.list_rows();
         assert_eq!(rows.len(), 1);
         assert!(matches!(
@@ -464,18 +857,123 @@ mod tests {
             }
         ));
         app.expand_all();
-        assert_eq!(app.list_rows().len(), 4);
+        assert_eq!(app.list_rows().len(), 3);
         app.collapse_all();
-        assert_eq!(app.list_rows().len(), 1); // only "top"
+        assert_eq!(app.list_rows().len(), 1);
     }
 
     #[test]
     fn remove_group_drops_its_signals() {
         let mut app = app_with(VCD);
-        app.display = vec![0, 1];
-        app.remove_group("top.sub");
+        app.set_display(vec![0, 1]);
+        app.groups = vec![Group::new(0), Group::new(1)];
+        app.groups[0].count = 1;
+        app.groups[1].count = 1;
+        app.remove_group(1);
         assert_eq!(app.display, vec![0]);
-        app.remove_group("top");
+        assert_eq!(app.groups.len(), 1);
+        app.remove_group(0); // the last group is replaced by a fresh G0
+        assert_eq!(app.groups.len(), 1);
+        assert_eq!(app.groups[0].name, "G0");
+        assert_eq!(app.groups[0].count, 0);
         assert!(app.display.is_empty());
+    }
+
+    #[test]
+    fn moving_a_signal_across_groups_moves_ownership() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        app.groups = vec![Group::new(0), Group::new(1)];
+        app.groups[0].count = 1;
+        app.groups[1].count = 1;
+        app.move_signal(0, 1);
+        assert_eq!(app.display, vec![1, 0]);
+        assert_eq!(app.groups[0].count, 0);
+        assert_eq!(app.groups[1].count, 2);
+    }
+
+    #[test]
+    fn shift_and_ctrl_selection_helpers() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        // rows: G0 (group), clk, data
+        app.select_row(1);
+        assert_eq!(app.sel_anchor, Some(0));
+        assert!(app.selection.is_empty());
+        app.toggle_row_selection(2);
+        assert_eq!(app.selection, vec![1]);
+        app.toggle_row_selection(1);
+        assert_eq!(app.selection, vec![1, 0]);
+        app.toggle_row_selection(2); // toggles off
+        assert_eq!(app.selection, vec![0]);
+        assert_eq!(app.selected_signals(), vec![0]);
+        app.select_row(2); // plain selection clears the multi-selection
+        assert!(app.selection.is_empty());
+        app.toggle_row_selection(2);
+        app.select_range_to(1);
+        assert_eq!(app.selection, vec![0, 1]);
+        assert_eq!(app.sel_row, Some(1));
+    }
+
+    #[test]
+    fn remove_multi_selection_removes_all() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        app.selection = vec![0, 1];
+        app.sel_row = Some(1);
+        app.remove_selected();
+        assert!(app.display.is_empty());
+        assert!(app.selection.is_empty());
+        assert_eq!(app.sel_anchor, None);
+    }
+
+    #[test]
+    fn moving_a_signal_into_an_empty_group_moves_ownership() {
+        let mut app = app_with(VCD);
+        app.add_signal(0); // G0 = [clk], trailing G1 is empty
+        assert_eq!(app.groups.len(), 2);
+        app.sel_row = Some(1); // clk row
+        app.move_selected_signal(1); // J: down into G1
+        assert_eq!(app.display, vec![0]);
+        assert_eq!(app.groups[0].count, 0);
+        assert_eq!(app.groups[1].count, 1);
+        app.move_selected_signal(-1); // K: back into G0
+        assert_eq!(app.groups[0].count, 1);
+        assert_eq!(app.groups[1].count, 0);
+    }
+
+    #[test]
+    fn new_group_from_the_menu_uses_the_next_number() {
+        let mut app = app_with(VCD);
+        app.insert_group_after(0);
+        assert_eq!(app.groups.len(), 2);
+        assert_eq!(app.groups[1].name, "G1");
+        app.insert_group_after(1);
+        assert_eq!(app.groups[2].name, "G2");
+        app.remove_group(1); // G1 goes away, G2 stays the highest
+        app.insert_group_after(0);
+        assert_eq!(app.groups[1].name, "G3");
+    }
+
+    #[test]
+    fn cut_and_paste_register_round_trips() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        app.groups[0].count = 2;
+        app.selection = vec![0, 1];
+        app.delete_selected_signals();
+        assert!(app.display.is_empty());
+        assert_eq!(app.register, vec![0, 1]);
+        app.paste_register();
+        assert_eq!(app.display, vec![0, 1]);
+        assert_eq!(app.register, vec![0, 1]); // pasting keeps the register
+    }
+
+    #[test]
+    fn action_targets_use_selection_when_clicked_signal_is_picked() {
+        let mut app = app_with(VCD);
+        app.selection = vec![0, 1];
+        assert_eq!(app.action_targets(1), vec![0, 1]);
+        assert_eq!(app.action_targets(7), vec![7]);
     }
 }

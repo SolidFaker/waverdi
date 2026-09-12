@@ -1,4 +1,4 @@
-use super::{App, Dialog};
+﻿use super::{App, Dialog};
 use crate::waveform::{fmt_bits, fmt_real, format_time, Radix, SigKind, Value};
 
 impl App {
@@ -9,7 +9,7 @@ impl App {
         } else {
             self.input.clear();
         }
-        self.dialog = Some(Dialog::FindValue);
+        self.open_dialog(Dialog::FindValue);
     }
 
     pub fn apply_find_value(&mut self) {
@@ -122,8 +122,8 @@ mod tests {
     #[test]
     fn search_jumps_to_matching_value() {
         let mut app = app_with(VCD);
-        app.display = vec![0];
-        app.sel_row = Some(0);
+        app.set_display(vec![0]);
+        app.sel_row = Some(1);
         app.radix.insert(0, Radix::Hex);
         app.value_query = Some("haa".to_string());
         app.search_value(true);
@@ -139,8 +139,8 @@ mod tests {
     #[test]
     fn search_without_prefix_matches() {
         let mut app = app_with(VCD);
-        app.display = vec![0];
-        app.sel_row = Some(0);
+        app.set_display(vec![0]);
+        app.sel_row = Some(1);
         app.radix.insert(0, Radix::Hex);
         app.value_query = Some("ff".to_string());
         app.search_value(true);

@@ -1,4 +1,4 @@
-use crate::app::{App, Focus, ListRow};
+﻿use crate::app::{App, Focus, ListRow};
 use crate::theme::*;
 use crate::ui::layout::Layout;
 use crate::ui::text;
@@ -8,6 +8,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
+    let focused = app.focus == Focus::List;
     let header = Rect {
         x: l.list.x,
         y: l.list.y,
@@ -15,12 +16,12 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         height: 2,
     };
     buf.set_style(header, Style::new().bg(LIST_HEADER_BG));
-    buf.set_string(
-        l.list.x,
-        l.list.y,
-        " Signal List",
-        Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
-    );
+    let title_style = if focused {
+        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
+    };
+    buf.set_string(l.list.x, l.list.y, " Signal List", title_style);
     let value_w = value_col_width(l);
     text::put(
         buf,
@@ -33,7 +34,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         l.list.x,
         l.list.y + 1,
         "─".repeat(l.list.width as usize),
-        Style::new().fg(PANEL_BORDER),
+        Style::new().fg(if focused { ACCENT } else { PANEL_BORDER }),
     );
 
     let rows = app.list_rows();
@@ -43,8 +44,11 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         let Some(list_row) = rows.get(k) else { break };
         let y = l.list.y + 2 + visible as u16;
         let selected = Some(k) == app.sel_row;
+        let multi = matches!(list_row, ListRow::Signal { sig, .. } if app.selection.contains(sig));
         let bg = if selected {
             ROW_SEL_BG
+        } else if multi {
+            MULTI_SEL_BG
         } else if visible % 2 == 0 {
             ROW_ALT
         } else {
@@ -63,13 +67,12 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         match list_row {
             ListRow::Group {
                 name,
-                depth,
                 count,
                 collapsed,
                 ..
             } => {
                 let arrow = if *collapsed { "▸" } else { "▾" };
-                let label = format!("{}{arrow} {name}/ ({count})", "  ".repeat(*depth));
+                let label = format!("{arrow} {name} ({count})");
                 let style = if selected {
                     Style::new().fg(Color::Black).bg(ACCENT)
                 } else {
@@ -89,8 +92,13 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                 } else {
                     Style::new().fg(Color::Rgb(190, 190, 200)).bg(bg)
                 };
+                let shown = if app.show_full_names {
+                    signal.full_name()
+                } else {
+                    signal.name.clone()
+                };
                 let indent = "  ".repeat(*depth);
-                let name = text::trunc(&format!("{indent}{}", signal.name), name_width(l, value_w));
+                let name = text::trunc(&format!("{indent}{shown}"), name_width(l, value_w));
                 buf.set_string(l.list.x, y, &name, name_style);
 
                 let radix = app.radix_for(*sig);

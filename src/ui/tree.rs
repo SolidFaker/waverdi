@@ -8,18 +8,27 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Widget as _};
 
-pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
-    let focused = app.focus == Focus::Tree;
+pub fn draw_frame(buf: &mut Buffer, l: &Layout, focused: bool) {
     let border_style = if focused {
         Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(PANEL_BORDER)
     };
+    let title_style = if focused {
+        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
+    };
     Block::bordered()
-        .title(" nTrace ")
-        .title_style(Style::new().fg(Color::White).add_modifier(Modifier::BOLD))
+        .title(" Instance ")
+        .title_style(title_style)
         .border_style(border_style)
         .render(l.tree, buf);
+}
+
+pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
+    let focused = app.focus == Focus::Tree;
+    draw_frame(buf, l, focused);
 
     let inner = tree_inner(l);
     if inner.width == 0 || inner.height == 0 {
@@ -52,8 +61,11 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
             }
             TreeNode::Signal { sig, depth } => {
                 let name = &wf.signals[sig].name;
+                let multi = app.tree_multi.contains(&sig);
                 let style = if selected {
                     Style::new().fg(Color::Black).bg(ACCENT)
+                } else if multi {
+                    Style::new().fg(Color::White).bg(MULTI_SEL_BG)
                 } else if app.display.contains(&sig) {
                     Style::new().fg(GREEN_DIM)
                 } else {
