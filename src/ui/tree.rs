@@ -47,32 +47,26 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         let selected = k == app.tree_sel;
         let (label, style) = match node {
             TreeNode::Scope { id, depth } => {
-                let name = &wf.tree.nodes[id].name;
+                let node = &wf.tree.nodes[id];
                 let arrow = if app.expanded.contains(&id) {
                     "▾"
                 } else {
                     "▸"
+                };
+                let module = if node.module.is_empty() || node.module == node.name {
+                    String::new()
+                } else {
+                    format!("  ({})", node.module)
                 };
                 let style = if selected {
                     Style::new().fg(Color::Black).bg(t.accent)
                 } else {
                     Style::new().fg(t.scope).add_modifier(Modifier::BOLD)
                 };
-                (format!("{}{arrow} {name}", "  ".repeat(depth)), style)
-            }
-            TreeNode::Signal { sig, depth } => {
-                let name = &wf.signals[sig].name;
-                let multi = app.tree_multi.contains(&sig);
-                let style = if selected {
-                    Style::new().fg(Color::Black).bg(t.accent)
-                } else if multi {
-                    Style::new().fg(t.text).bg(t.multi_sel_bg)
-                } else if app.display.contains(&sig) {
-                    Style::new().fg(t.green_dim)
-                } else {
-                    Style::new().fg(t.text)
-                };
-                (format!("{}  {name}", "  ".repeat(depth)), style)
+                (
+                    format!("{}{arrow} {}{module}", "  ".repeat(depth), node.name),
+                    style,
+                )
             }
         };
         text::put(buf, inner.x, inner.y + row as u16, &label, style);

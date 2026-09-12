@@ -174,10 +174,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('V') => {
             if app.visual {
                 app.visual = false;
-            } else if let Some(sig) = app.selected_signal() {
-                app.visual = true;
-                app.selection = vec![sig];
-                app.sel_anchor = Some(sig);
+            } else if app.focus != Focus::Source {
+                if let Some(sig) = app.selected_signal() {
+                    app.visual = true;
+                    app.selection = vec![sig];
+                    app.sel_anchor = Some(sig);
+                }
             }
             false
         }
@@ -187,7 +189,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Char('j') => {
-            if app.visual {
+            if app.focus == Focus::Source {
+                app.move_source_cursor(1, 0);
+            } else if app.visual {
                 app.extend_selection(1);
             } else {
                 match app.focus {
@@ -198,7 +202,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Char('k') => {
-            if app.visual {
+            if app.focus == Focus::Source {
+                app.move_source_cursor(-1, 0);
+            } else if app.visual {
                 app.extend_selection(-1);
             } else {
                 match app.focus {
@@ -231,9 +237,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             });
             false
         }
+        KeyCode::Char('h') if app.focus == Focus::Source => {
+            app.move_source_cursor(0, -1);
+            false
+        }
         KeyCode::Char('h') if app.focus == Focus::Wave => {
             let step = (app.scale.round() as i64).max(1);
             app.move_cursor(-step);
+            false
+        }
+        KeyCode::Char('l') if app.focus == Focus::Source => {
+            app.move_source_cursor(0, 1);
             false
         }
         KeyCode::Char('l') if app.focus == Focus::Wave => {
@@ -254,12 +268,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Char('a') => {
-            app.tree_enter();
+            match app.focus {
+                Focus::Tree => app.tree_enter(),
+                Focus::Source => app.add_source_word(),
+                _ => {}
+            }
             false
         }
         KeyCode::Enter => {
             match app.focus {
                 Focus::Tree => app.tree_enter(),
+                Focus::Source => app.add_source_word(),
                 Focus::List => app.list_enter(),
                 Focus::Wave => {}
             }
@@ -272,6 +291,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
             match app.focus {
                 Focus::Tree => app.move_tree(-1),
+                Focus::Source => app.move_source_cursor(-1, 0),
                 _ => app.extend_selection(-1),
             }
             false
@@ -279,6 +299,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
             match app.focus {
                 Focus::Tree => app.move_tree(1),
+                Focus::Source => app.move_source_cursor(1, 0),
                 _ => app.extend_selection(1),
             }
             false
@@ -286,6 +307,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Up => {
             match app.focus {
                 Focus::Tree => app.move_tree(-1),
+                Focus::Source => app.move_source_cursor(-1, 0),
                 _ => app.move_sel(-1),
             }
             false
@@ -293,6 +315,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Down => {
             match app.focus {
                 Focus::Tree => app.move_tree(1),
+                Focus::Source => app.move_source_cursor(1, 0),
                 _ => app.move_sel(1),
             }
             false
@@ -306,6 +329,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Left => {
+            if app.focus == Focus::Source {
+                app.move_source_cursor(0, -1);
+                return false;
+            }
             if let Some(ListRow::Group {
                 index, collapsed, ..
             }) = app.selected_row()
@@ -325,6 +352,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Right => {
+            if app.focus == Focus::Source {
+                app.move_source_cursor(0, 1);
+                return false;
+            }
             if let Some(ListRow::Group {
                 index, collapsed, ..
             }) = app.selected_row()
@@ -344,6 +375,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Home => {
+            if app.focus == Focus::Source {
+                app.move_source_cursor(0, -1_000_000);
+                return false;
+            }
             if let Some(wf) = &app.wf {
                 app.cursor = wf.start;
             }
@@ -351,6 +386,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::End => {
+            if app.focus == Focus::Source {
+                app.move_source_cursor(0, 1_000_000);
+                return false;
+            }
             if let Some(wf) = &app.wf {
                 app.cursor = wf.end;
             }
@@ -362,6 +401,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 }
 
 fn page(app: &mut App, down: bool) {
+    if app.focus == Focus::Source {
+        app.source_page(down);
+        return;
+    }
     let (tree_h, rows_h) = {
         let l = app.layout();
         (l.tree_height().max(1), l.rows_h.max(1))
@@ -865,6 +908,62 @@ mod tests {
         assert_eq!(app.theme.wave_bg, Theme::LIGHT.wave_bg);
         handle_key(&mut app, key(KeyCode::Esc));
         assert_eq!(app.dialog, None);
+    }
+
+    #[test]
+    fn source_pane_keys_move_and_add() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $scope module dut $end\n\
+            $var wire 4 ! count [3:0] $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\nb0000 !\n";
+        let mut app = app_with(vcd);
+        let dir = std::env::temp_dir().join(format!("waverdi_src_keys_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("counter.sv");
+        std::fs::write(
+            &file,
+            "module counter(output logic [3:0] count);\n\
+             assign count = 4'b0;\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        // The `dut` scope (node 2) is defined by `counter` in this dump.
+        app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
+        app.expanded.insert(1);
+        app.tree_sel = 2;
+        app.sync_source();
+        assert!(app.source_view.is_some());
+
+        app.focus = Focus::Source;
+        let start = app.source_view.as_ref().unwrap().line;
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert!(app.source_view.as_ref().unwrap().line > start);
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.source_view.as_ref().unwrap().line, start);
+        handle_key(&mut app, key(KeyCode::Char('l')));
+        assert_eq!(app.source_view.as_ref().unwrap().col, 1);
+
+        // Put the cursor on `count` in the assign line and add it.
+        let (line, col) = {
+            let view = app.source_view.as_ref().unwrap();
+            let line = view
+                .lines
+                .iter()
+                .position(|line| line.contains("assign count"))
+                .unwrap();
+            let col = view.lines[line].find("count").unwrap();
+            (line, col)
+        };
+        app.set_source_cursor(line, col);
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.display, vec![0]);
+        assert_eq!(app.focus, Focus::Source);
     }
 
     #[test]

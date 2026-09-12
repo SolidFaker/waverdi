@@ -19,9 +19,10 @@ terminal.
   small C++ bridge (`csrc/ffr_bridge.cpp`). Without the SDK, waverdi explains
   how to enable it or to convert the dump with `fsdb2vcd`.
 - **Verdi-like layout** — menu bar on top; the upper 60% holds the `Instance`
-  hierarchy browser (left) and an RTL source pane placeholder (right); the
-  lower 40% is the merged `nWave` window with its shortcut bar, the `Signal
-  List` and the waveform view (ruler, cursor and range markers).
+  hierarchy browser (left) and the highlighted RTL `Source` view of the
+  selected instance (right); the lower 40% is the merged `nWave` window with
+  its shortcut bar, the `Signal List` and the waveform view (ruler, cursor and
+  range markers).
 - **Waveform rendering** — thin high/low rails, `/` rising and `\` falling
   edges (dense activity collapses to `│`), inline bus values, analog rendering
   for `real` and logic signals.
@@ -160,10 +161,13 @@ directory for `.v`/`.sv` files.
 
 The resolved files are scanned with a lightweight SystemVerilog scanner:
 modules, ports and declarations, `assign` statements, `always`/`initial`
-blocks and module instantiations keep their file and line. Selecting an
-instance shows its module, the declared signals, and — for the selected
-signal — its declaration, driver and load lines (the first step of the RTL
-trace).
+blocks and module instantiations keep their file and line. The **Instance**
+pane lists instances only (with their defining module); selecting one opens
+its module in the **Source** pane, highlighted (keywords, comments, strings,
+numbers, directives, declared signals) with line numbers and a keyboard
+cursor. Put the cursor on a signal and press `Enter` / `a` (or double click
+it) to add it to the Signal List; the last row shows the selected signal's
+declaration, driver and load lines.
 
 The `waveform/` folder contains demos: `counter.vcd` (4-bit counter with
 enable/carry), `complex.vcd` (a small CPU/RAM/sensor design with 16 signals,
@@ -209,13 +213,15 @@ override with `--gui` / `--no-gui`, or open the browser directly with `O`.
 | `-` / `=` | zoom out / in |
 | `,` / `.` | previous / next transition |
 | `Home` / `End` | jump to start / end |
-| `a`, `Enter` | add from the Instance pane (in Signal List: expand/collapse a group) |
+| `a`, `Enter` | Instance: fold/unfold the scope; Source: add the signal under the cursor; Signal List: expand/collapse a group |
+| `j` / `k` / `h` / `l` | Source: move the code cursor |
+| `↑` / `↓` / `←` / `→` | Source: move the code cursor |
 | `←` / `→` | on a group row: collapse / expand |
 | `x` | in the waveform pane: cut the selection (alias for `dd`) |
 | `r` | cycle radix, or rename the selected group |
 | `h` | in the Signal List: show full / short hierarchical names |
 | `↑` `↓`, `PgUp` `PgDn` | navigate lists |
-| `Tab` | cycle focus (Instance → Signal List → Waveform) |
+| `Tab` | cycle focus (Instance → Source → Signal List → Waveform) |
 | `F2` | settings: theme (dark / light / mixed) and waveform colours |
 | `F1`, `?` | key bindings |
 
@@ -251,9 +257,9 @@ session.
 | right click signal / group | context menu (submenus for radix, waveform, bus) |
 | `Shift`/`Alt`+click a signal | add / remove it from the multi-selection |
 | `Ctrl`+click a signal | select every signal between the anchor and the click |
-| `Shift`/`Alt`+click in Instance | multi-select signals; a double click adds them all |
+| click / double click in Source | move the code cursor / add the signal under it |
 | double click a group | collapse / expand it (rename with `r` or the context menu) |
-| double click | expand a scope in Instance, or add a signal |
+| double click | fold/unfold an instance in the Instance pane |
 | dialog `✕` / scrollbar | close the dialog / drag the scrollbar |
 | Time button in the shortcut bar | cycle the ruler time base (timescale → fs … s) |
 

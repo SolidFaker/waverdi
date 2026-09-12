@@ -69,8 +69,14 @@ pub struct Theme {
     pub analog: Color,
     pub tick: Color,
     pub dim: Color,
-    pub green_dim: Color,
     pub input_bg: Color,
+    /// RTL source syntax highlighting.
+    pub src_keyword: Color,
+    pub src_comment: Color,
+    pub src_string: Color,
+    pub src_number: Color,
+    pub src_directive: Color,
+    pub src_signal: Color,
 }
 
 impl Theme {
@@ -110,8 +116,13 @@ impl Theme {
         analog: Color::Rgb(80, 200, 255),
         tick: Color::Rgb(140, 140, 160),
         dim: Color::Rgb(90, 90, 100),
-        green_dim: Color::Rgb(120, 180, 140),
         input_bg: Color::Rgb(30, 30, 40),
+        src_keyword: Color::Rgb(86, 156, 214),
+        src_comment: Color::Rgb(106, 153, 85),
+        src_string: Color::Rgb(206, 145, 120),
+        src_number: Color::Rgb(181, 206, 168),
+        src_directive: Color::Rgb(197, 134, 192),
+        src_signal: Color::Rgb(230, 180, 80),
     };
 
     pub const LIGHT: Theme = Theme {
@@ -150,8 +161,13 @@ impl Theme {
         analog: Color::Rgb(0, 120, 190),
         tick: Color::Rgb(115, 115, 125),
         dim: Color::Rgb(135, 135, 145),
-        green_dim: Color::Rgb(60, 140, 90),
         input_bg: Color::White,
+        src_keyword: Color::Rgb(0, 92, 197),
+        src_comment: Color::Rgb(0, 128, 0),
+        src_string: Color::Rgb(163, 21, 21),
+        src_number: Color::Rgb(9, 134, 88),
+        src_directive: Color::Rgb(175, 60, 175),
+        src_signal: Color::Rgb(170, 90, 0),
     };
 
     /// Mixed: light chrome (menus, lists, dialogs), dark waveform panes.

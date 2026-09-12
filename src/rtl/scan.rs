@@ -1,4 +1,4 @@
-//! Lightweight SystemVerilog scanner for the RTL source view and tracing.
+﻿//! Lightweight SystemVerilog scanner for the RTL source view and tracing.
 //!
 //! This is intentionally not a full parser: it recognises modules, signal
 //! declarations, continuous assignments, `always`/`initial` blocks and module
@@ -21,10 +21,13 @@ pub struct Location {
 #[derive(Clone, Debug)]
 pub struct SignalDecl {
     pub name: String,
-    /// `wire`, `reg`, `logic`, ... (the first declaration keyword).
+    /// `wire`, `reg`, `logic`, ... (kept for the signal tooltip/bus slicing).
+    #[allow(dead_code)]
     pub kind: String,
+    #[allow(dead_code)]
     pub direction: Option<String>,
-    /// Raw range text as written, e.g. `7:0`.
+    /// Raw range text as written, e.g. `7:0` (kept for bus slicing).
+    #[allow(dead_code)]
     pub range: Option<String>,
     pub line: usize,
 }
@@ -51,8 +54,12 @@ pub struct AlwaysBlock {
 
 #[derive(Clone, Debug)]
 pub struct Instance {
+    /// Instantiated module type (kept for "jump to instantiation").
+    #[allow(dead_code)]
     pub module: String,
+    #[allow(dead_code)]
     pub name: String,
+    #[allow(dead_code)]
     pub line: usize,
 }
 
@@ -857,7 +864,7 @@ fn parse_instance(parser: &mut Parser, module: &ModuleDef) -> Option<Instance> {
 /// (identifier, line) pairs collected while scanning a process.
 type Idents = Vec<(String, usize)>;
 
-fn is_keyword(name: &str) -> bool {
+pub fn is_keyword(name: &str) -> bool {
     matches!(
         name,
         "begin"
@@ -966,6 +973,11 @@ fn is_keyword(name: &str) -> bool {
             | "wor"
             | "trireg"
     )
+}
+
+#[cfg(test)]
+pub(crate) fn parse_text_for_test(text: &str, path: &Path) -> Option<ModuleDef> {
+    parse_module_text(text, path).into_iter().next()
 }
 
 #[cfg(test)]

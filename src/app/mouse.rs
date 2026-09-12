@@ -1,6 +1,7 @@
-use super::{App, CtxTarget, Dialog, Drag, DragMode, Focus, ListRow, TreeNode};
+﻿use super::{App, CtxTarget, Dialog, Drag, DragMode, Focus, ListRow, TreeNode};
 use crate::ui::layout::{pt_in, tree_inner, Layout, Splits};
 use crate::ui::menubar;
+use crate::ui::source;
 use crate::ui::toolbar;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::time::{Duration, Instant};
@@ -304,29 +305,25 @@ fn mouse_down(
         if let Some(node) = nodes.get(k).copied() {
             app.tree_sel = k;
             app.focus = Focus::Tree;
-            match node {
-                TreeNode::Scope { id, .. } => {
-                    if is_double {
-                        app.toggle_scope(id);
-                    }
-                }
-                TreeNode::Signal { sig, .. } => {
-                    if shift {
-                        app.toggle_tree_signal(sig);
-                    } else if ctrl {
-                        app.tree_select_range(sig);
-                    } else if !is_double && !app.tree_multi.contains(&sig) {
-                        app.tree_multi.clear();
-                        app.tree_anchor = Some(sig);
-                    }
-                    if is_double {
-                        if app.tree_multi.contains(&sig) {
-                            app.add_tree_selection();
-                        } else {
-                            app.add_signal(sig);
-                        }
-                    }
-                }
+            if is_double {
+                let TreeNode::Scope { id, .. } = node;
+                app.toggle_scope(id);
+            }
+        }
+        return false;
+    }
+
+    if pt_in(source::code_rect(&l), col, row) {
+        let rect = source::code_rect(&l);
+        let index = app
+            .source_view
+            .as_ref()
+            .map(|view| view.scroll + (row - rect.y) as usize);
+        if let Some(index) = index {
+            app.focus = Focus::Source;
+            app.set_source_cursor(index, col.saturating_sub(rect.x) as usize);
+            if is_double {
+                app.add_source_word();
             }
         }
         return false;
@@ -682,6 +679,15 @@ fn mouse_wheel(app: &mut App, col: u16, row: u16, up: bool, shift: bool) {
         return;
     }
 
+    if pt_in(l.source, col, row) {
+        app.scroll_source(if up {
+            -(WHEEL_STEP as i64)
+        } else {
+            WHEEL_STEP as i64
+        });
+        return;
+    }
+
     if pt_in(l.list, col, row) {
         let h = l.rows_h.max(1);
         app.row_scroll = if up {
@@ -708,7 +714,7 @@ fn mouse_wheel(app: &mut App, col: u16, row: u16, up: bool, shift: bool) {
 #[cfg(test)]
 mod tests {
     use crate::app::tests::app_with;
-    use crate::app::{Focus, Splits, TreeNode};
+    use crate::app::{Focus, Splits};
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
     const VCD: &str = "$timescale 1ns $end\n\
@@ -745,17 +751,15 @@ mod tests {
     }
 
     #[test]
-    fn double_click_tree_adds_signal() {
+    fn double_click_tree_toggles_the_scope() {
         let mut app = app_with(VCD);
-        assert!(matches!(
-            app.tree_visible()[1],
-            TreeNode::Signal { sig: 0, .. }
-        ));
-        // design is row 0 of the tree, clk is row 1 (screen y = 3 + 1).
-        crate::app::handle_mouse(&mut app, click(2, 3));
+        let l = app.layout();
+        crate::app::handle_mouse(&mut app, click(2, l.tree.y + 1));
         assert_eq!(app.focus, Focus::Tree);
-        crate::app::handle_mouse(&mut app, click(2, 3));
-        assert_eq!(app.display, vec![0]);
+        let expanded = app.expanded.contains(&0);
+        crate::app::handle_mouse(&mut app, click(2, l.tree.y + 1));
+        assert_eq!(app.expanded.contains(&0), !expanded);
+        assert!(app.display.is_empty());
     }
 
     #[test]
@@ -948,22 +952,6 @@ mod tests {
         };
         crate::app::handle_mouse(&mut app, scroll);
         assert!(app.dialog_scroll > 0);
-    }
-
-    #[test]
-    fn tree_multi_select_and_double_click_adds_all() {
-        let mut app = app_with(VCD);
-        let l = app.layout();
-        // tree rows: design (0), clk (1), rst (2)
-        let clk_y = l.tree.y + 2;
-        let rst_y = l.tree.y + 3;
-        crate::app::handle_mouse(&mut app, click_with(3, clk_y, KeyModifiers::SHIFT));
-        crate::app::handle_mouse(&mut app, click_with(3, rst_y, KeyModifiers::SHIFT));
-        assert_eq!(app.tree_multi, vec![0, 1]);
-        crate::app::handle_mouse(&mut app, click(3, clk_y));
-        crate::app::handle_mouse(&mut app, click(3, clk_y));
-        assert_eq!(app.display, vec![0, 1]);
-        assert!(app.tree_multi.is_empty());
     }
 
     #[test]

@@ -532,12 +532,6 @@ impl App {
             for child in &wf.tree.nodes[id].children {
                 rec(wf, *child, depth + 1, expanded, out);
             }
-            for sig in &wf.tree.nodes[id].signals {
-                out.push(TreeNode::Signal {
-                    sig: *sig,
-                    depth: depth + 1,
-                });
-            }
         }
 
         let mut out = Vec::new();
@@ -620,86 +614,11 @@ impl App {
         (!module.is_empty()).then_some(module)
     }
 
-    /// Enter on the tree: toggle scopes, add signals to the waveform.
+    /// Enter on the tree: collapse/expand the selected scope.
     pub fn tree_enter(&mut self) {
         let nodes = self.tree_visible();
-        match nodes.get(self.tree_sel) {
-            Some(TreeNode::Scope { id, .. }) => self.toggle_scope(*id),
-            Some(TreeNode::Signal { sig, .. }) => self.add_signal(*sig),
-            None => {}
-        }
-    }
-
-    /// Shift/Alt+click in the Instance pane: toggle one signal in the tree selection.
-    pub fn toggle_tree_signal(&mut self, sig: usize) {
-        if let Some(position) = self.tree_multi.iter().position(|&s| s == sig) {
-            self.tree_multi.remove(position);
-        } else {
-            self.tree_multi.push(sig);
-            if self.tree_anchor.is_none() {
-                self.tree_anchor = Some(sig);
-            }
-        }
-    }
-
-    /// Ctrl+click in the Instance pane: select every visible tree signal in the range.
-    pub fn tree_select_range(&mut self, sig: usize) {
-        let nodes = self.tree_visible();
-        let anchor = self.tree_anchor.or_else(|| match nodes.get(self.tree_sel) {
-            Some(TreeNode::Signal { sig, .. }) => Some(*sig),
-            _ => None,
-        });
-        let position = |s: usize| {
-            nodes
-                .iter()
-                .position(|node| matches!(node, TreeNode::Signal { sig, .. } if *sig == s))
-        };
-        let Some(anchor) = anchor else {
-            self.tree_multi = vec![sig];
-            self.tree_anchor = Some(sig);
-            return;
-        };
-        let (Some(a), Some(b)) = (position(anchor), position(sig)) else {
-            self.tree_multi = vec![sig];
-            self.tree_anchor = Some(anchor);
-            return;
-        };
-        let (lo, hi) = (a.min(b), a.max(b));
-        self.tree_multi = nodes[lo..=hi]
-            .iter()
-            .filter_map(|node| match node {
-                TreeNode::Signal { sig, .. } => Some(*sig),
-                TreeNode::Scope { .. } => None,
-            })
-            .collect();
-        self.tree_anchor = Some(anchor);
-    }
-
-    /// Signals picked in the Instance pane, in tree order.
-    pub fn tree_selected_signals(&self) -> Vec<usize> {
-        self.tree_visible()
-            .iter()
-            .filter_map(|node| match node {
-                TreeNode::Signal { sig, .. } if self.tree_multi.contains(sig) => Some(*sig),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Double click with a tree multi-selection: add every picked signal.
-    pub fn add_tree_selection(&mut self) {
-        let targets = self.tree_selected_signals();
-        let mut added = 0;
-        for sig in targets {
-            if !self.display.contains(&sig) {
-                self.add_signal(sig);
-                added += 1;
-            }
-        }
-        self.tree_multi.clear();
-        self.tree_anchor = None;
-        if added > 0 {
-            self.msg(format!("added {added} signal(s) from the Instance pane"));
+        if let Some(TreeNode::Scope { id, .. }) = nodes.get(self.tree_sel) {
+            self.toggle_scope(*id);
         }
     }
 
@@ -743,7 +662,7 @@ fn parse_time(spec: &str) -> Result<f64, ()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Group;
+    use super::{Group, TreeNode};
     use crate::app::tests::app_with;
 
     const VCD: &str = "$timescale 1ns $end\n\
@@ -757,19 +676,18 @@ mod tests {
         #0\n0!\nb0000 \"\n#10\n1!\n#20\nb1111 \"\n";
 
     #[test]
-    fn tree_navigation_and_signal_add() {
+    fn tree_navigation_shows_scopes_only() {
         let mut app = app_with(VCD);
         assert_eq!(app.tree_visible().len(), 2); // design, top
         app.toggle_scope(1); // expand top
-        assert_eq!(app.tree_visible().len(), 4); // design, top, sub, clk
-        app.tree_sel = 3; // clk
+        assert_eq!(app.tree_visible().len(), 3); // design, top, sub
+        assert!(app
+            .tree_visible()
+            .iter()
+            .all(|node| matches!(node, TreeNode::Scope { .. })));
+        app.tree_sel = 2; // sub
         app.tree_enter();
-        assert_eq!(app.display, vec![0]);
-        app.toggle_scope(2); // expand sub
-        assert_eq!(app.tree_visible().len(), 5); // design, top, sub, data, clk
-        app.tree_sel = 3; // data
-        app.tree_enter();
-        assert_eq!(app.display, vec![0, 1]);
+        assert_eq!(app.tree_visible().len(), 3); // expanding sub adds nothing
         app.toggle_scope(0);
         assert_eq!(app.tree_visible().len(), 1);
     }

@@ -12,8 +12,10 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 pub mod scan;
+pub mod view;
 
 pub use scan::RtlDb;
+pub use view::SourceView;
 
 /// RTL source files and compile options gathered from a filelist or a dump.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

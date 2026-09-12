@@ -19,6 +19,7 @@ use ratatui::Frame;
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     app.sync_layout(area);
+    app.sync_source();
     let l = compute_layout(area, app.splits);
     let t = &app.theme;
 
@@ -313,8 +314,8 @@ mod tests {
         app.set_group_collapsed(0, true);
         let screen = render_app(&mut app, 120, 30);
         assert!(screen.contains("G0 (1)"), "{screen}");
-        // Only the Instance pane still shows the signal name.
-        assert_eq!(screen.matches("clk").count(), 1, "{screen}");
+        // Signals are only drawn in the Signal List, which is collapsed.
+        assert!(!screen.contains("clk"), "{screen}");
     }
 
     #[test]

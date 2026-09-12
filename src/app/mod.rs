@@ -1,4 +1,4 @@
-﻿mod action;
+mod action;
 mod browser;
 mod context;
 mod dialog;
@@ -19,7 +19,7 @@ pub use keys::handle_key;
 pub use mouse::handle_mouse;
 pub use nav::{Group, ListRow};
 
-use crate::rtl::{RtlDb, SourceSet};
+use crate::rtl::{RtlDb, SourceSet, SourceView};
 use crate::theme::{Theme, ThemeKind, UiSetting, WaveSetting};
 use crate::ui::layout::{compute_layout, Layout, Splits};
 use crate::waveform::{Radix, Ticks, TimeBase, Waveform};
@@ -31,6 +31,7 @@ use std::time::Instant;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Tree,
+    Source,
     List,
     Wave,
 }
@@ -39,6 +40,7 @@ impl Focus {
     pub fn name(self) -> &'static str {
         match self {
             Focus::Tree => "Instance",
+            Focus::Source => "Source",
             Focus::List => "Signal List",
             Focus::Wave => "Waveform",
         }
@@ -46,7 +48,8 @@ impl Focus {
 
     pub fn next(self) -> Focus {
         match self {
-            Focus::Tree => Focus::List,
+            Focus::Tree => Focus::Source,
+            Focus::Source => Focus::List,
             Focus::List => Focus::Wave,
             Focus::Wave => Focus::Tree,
         }
@@ -87,7 +90,6 @@ pub(crate) struct Drag {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TreeNode {
     Scope { id: usize, depth: usize },
-    Signal { sig: usize, depth: usize },
 }
 
 pub struct App {
@@ -116,10 +118,6 @@ pub struct App {
     pub expanded: HashSet<usize>,
     pub tree_sel: usize,
     pub tree_scroll: usize,
-    /// Signals picked with the mouse in the Instance pane (multi-selection).
-    pub tree_multi: Vec<usize>,
-    /// Signal the Instance range selection started at.
-    pub tree_anchor: Option<usize>,
     pub t0: f64,
     pub scale: f64,
     pub cursor: Ticks,
@@ -163,6 +161,8 @@ pub struct App {
     pub sources: Option<SourceSet>,
     /// Parsed RTL modules of `sources` (declaration/driver/load lines).
     pub rtl: Option<RtlDb>,
+    /// Highlighted source of the instance selected in the Instance pane.
+    pub source_view: Option<SourceView>,
     /// True once a filelist was given explicitly (disables auto-discovery).
     pub sources_explicit: bool,
     pending_fit: bool,
@@ -188,8 +188,6 @@ impl App {
             expanded: HashSet::new(),
             tree_sel: 0,
             tree_scroll: 0,
-            tree_multi: Vec::new(),
-            tree_anchor: None,
             t0: 0.0,
             scale: 1.0,
             cursor: 0,
@@ -220,6 +218,7 @@ impl App {
             settings_sel: 0,
             sources: None,
             rtl: None,
+            source_view: None,
             sources_explicit: false,
             pending_fit: false,
         };
@@ -360,8 +359,6 @@ impl App {
         self.path = path.into();
         self.expanded.clear();
         self.expanded.insert(wf.tree.root);
-        self.tree_multi.clear();
-        self.tree_anchor = None;
         self.display.clear();
         self.groups = vec![Group::new(0)];
         self.sel_row = None;
@@ -422,6 +419,97 @@ impl App {
                 ));
             }
         }
+        self.source_view = None;
+        self.sync_source();
+    }
+
+    /// Reload the Source pane when the selected instance changed.
+    pub fn sync_source(&mut self) {
+        let module = self.selected_scope_module();
+        if module == self.source_view.as_ref().map(|view| view.module.clone()) {
+            return;
+        }
+        let loaded = module.and_then(|name| {
+            let def = self.rtl.as_ref()?.module(&name)?;
+            SourceView::load(def)
+        });
+        self.source_view = loaded;
+    }
+
+    fn source_rows(&self) -> usize {
+        self.layout().source.height.saturating_sub(3) as usize
+    }
+
+    pub fn move_source_cursor(&mut self, delta_line: i64, delta_col: i64) {
+        let rows = self.source_rows();
+        if let Some(view) = self.source_view.as_mut() {
+            view.move_cursor(delta_line, delta_col, rows);
+        }
+    }
+
+    pub fn set_source_cursor(&mut self, line: usize, col: usize) {
+        let rows = self.source_rows();
+        if let Some(view) = self.source_view.as_mut() {
+            view.set_cursor(line, col, rows);
+        }
+    }
+
+    pub fn scroll_source(&mut self, delta: i64) {
+        let rows = self.source_rows();
+        if let Some(view) = self.source_view.as_mut() {
+            view.scroll_by(delta, rows);
+        }
+    }
+
+    pub fn source_page(&mut self, down: bool) {
+        let rows = self.source_rows();
+        if let Some(view) = self.source_view.as_mut() {
+            view.page(down, rows);
+        }
+    }
+
+    /// Add the identifier under the Source cursor to the Signal List.
+    pub fn add_source_word(&mut self) {
+        let Some((word, module)) = self.source_view.as_ref().and_then(|view| {
+            view.word_at_cursor()
+                .map(|word| (word, view.module.clone()))
+        }) else {
+            self.msg("source: no signal name under the cursor (a: add)");
+            return;
+        };
+        match self.find_signal_in_scope(&word) {
+            Some(index) => {
+                self.add_signal(index);
+                self.focus = Focus::Source;
+                self.msg(format!("added {word} from {module} to the Signal List"));
+            }
+            None => self.msg(format!("source: {word} was not dumped in this scope")),
+        }
+    }
+
+    /// Instance scope of the selected tree node (without the design root).
+    fn selected_scope_steps(&self) -> Vec<String> {
+        self.selected_scope_path()
+            .map(|path| path.split('.').skip(1).map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    /// Find the dumped signal matching `name` in the selected instance.
+    fn find_signal_in_scope(&self, name: &str) -> Option<usize> {
+        let scope = self.selected_scope_steps();
+        let wf = self.wf.as_ref()?;
+        if let Some(index) = wf
+            .signals
+            .iter()
+            .position(|sig| sig.name == name && sig.scope == scope)
+        {
+            return Some(index);
+        }
+        let mut matches = wf.signals.iter().enumerate().filter(|(_, sig)| {
+            sig.name == name && !scope.is_empty() && sig.scope.starts_with(&scope)
+        });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first.0)
     }
 
     /// Open a dialog, resetting its body scroll.
