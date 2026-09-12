@@ -69,7 +69,7 @@ ever leaving the terminal.
 
 ## Build
 
-Rust (stable, 1.88+) is the only hard requirement. A C++ toolchain is needed
+Rust (stable, 1.90+) is the only hard requirement. A C++ toolchain is needed
 only for the optional FSDB support on Linux. Clone the repository and build
 with `cargo build --release`; the binary lands in `target/release/`.
 

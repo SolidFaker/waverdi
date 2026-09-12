@@ -57,7 +57,7 @@ waverdi 把日常 RTL 调试所需的层次、源码与波形集中在同一个 
 
 ## 构建
 
-唯一硬性要求是 Rust（stable，1.88+）。只有 Linux 上的可选 FSDB 支持需要 C++
+唯一硬性要求是 Rust（stable，1.90+）。只有 Linux 上的可选 FSDB 支持需要 C++
 工具链。克隆仓库后执行 `cargo build --release`，产物在 `target/release/`。
 
 ### Windows
