@@ -2,58 +2,82 @@
 
 A Verdi-style RTL waveform viewer for the terminal, written in Rust.
 
-waverdi is meant for SSH sessions and headless machines: open a VCD or FST
-dump and browse signals, values and waveform traces without ever leaving the
-terminal.
+**English** | [简体中文](README.zh-CN.md)
+
+waverdi brings the daily RTL debug loop — hierarchy, source and waveforms —
+into a single TUI. It is built for SSH sessions and headless machines: open a
+VCD, FST or FSDB dump and browse signals, RTL source and waveform traces without
+ever leaving the terminal.
 
 ![waverdi screenshot](shot/waveform.png)
 
+## Highlights
+
+- **Dumps** — VCD, FST ([wellen](https://github.com/ekiwi/wellen)) and FSDB
+  (Verdi FFR SDK, Linux).
+- **Verdi layout** — menu bar, `Instance | Source` on top, the merged `nWave`
+  window below; every pane border and scrollbar is draggable.
+- **RTL source debug** — open an instance, read its highlighted source, resolve
+  signals through a SystemVerilog AST (generate blocks, genvars, unpacked
+  arrays) and jump from a waveform edge to the logic that drives it.
+- **Arrays** — unpacked arrays are grouped, printed as brace values and expand
+  dimension by dimension.
+- **Comfortable navigation** — vim keys, multi-selection, user groups,
+  find/search, themes.
+
 ## Features
 
-- **VCD parser** — scopes, vectors, `real`, `string`, `x`/`z`, every value
-  base (`b`, `o`, `h`, `d`, `r`, `s`), `$dumpvars`, timescale handling.
+- **VCD parser** — scopes, vectors, `real`, `string`, `x`/`z`, every value base
+  (`b`, `o`, `h`, `d`, `r`, `s`), `$dumpvars` and timescale handling.
 - **FST support** — GTKWave's Fast Signal Trace format is read through the
   [wellen](https://github.com/ekiwi/wellen) library.
-- **FSDB support** — on Linux, when `VERDI_HOME` points at a Verdi install,
+- **FSDB support** — on Linux with `VERDI_HOME` pointing at a Verdi install,
   `.fsdb` files are read directly through Synopsys' FSDB Reader (FFR) via a
   small C++ bridge (`csrc/ffr_bridge.cpp`). Without the SDK, waverdi explains
   how to enable it or to convert the dump with `fsdb2vcd`.
-- **Verdi-like layout** — menu bar on top; the upper 60% holds the `Instance`
-  hierarchy browser (left) and the highlighted RTL `Source` view of the
-  selected instance (right); the lower 40% is the merged `nWave` window with
-  its shortcut bar, the `Signal List` and the waveform view (ruler, cursor and
-  range markers).
+- **RTL source view** — the selected instance's module is shown with syntax
+  highlighting, line numbers and a keyboard/mouse cursor (see
+  [RTL sources](#rtl-sources)). Files with several modules dim the code that
+  belongs to the inactive modules.
+- **AST-based signal resolution** — the source pane knows declarations,
+  `generate for` loops, `generate if` branches, genvars and instance chains, so
+  `count`, `dut.count`, `cluster_valid[i]` and `arr[i][j]` all resolve to the
+  right scope. Signals from another module in the same file switch the Instance
+  pane to the owning instance automatically.
 - **Waveform rendering** — thin high/low rails, `/` rising and `\` falling
-  edges (dense activity collapses to `│`), inline bus values, analog rendering
-  for `real` and logic signals.
+  edges (dense activity collapses to `│`), inline bus values and analog
+  rendering for `real` and logic signals.
+- **Unpacked arrays** — dumped element by element, grouped under a parent
+  signal; values print as `{0, 1, 2, 3}` (nested braces per dimension) and
+  double-clicking descends one dimension at a time. Arrays print in hex by
+  default and follow the radix set for them.
 - **Signal List groups** — user-defined groups (G0 by default) hold the
-  displayed signals; create / rename / remove them from the group context
-  menu. Group boundaries are marked in the waveform pane; the names only show
-  in the Signal List.
+  displayed signals; create / rename / remove them from the group context menu.
+  Group boundaries are marked in the waveform pane.
 - **Signal operations** — radix (Hex/Binary/Octal/Decimal/ASCII), digital ⇄
-  analog waveform, split a bus into bits, merge consecutive 1-bit signals into
-  a bus, search for a value (`v` then `n`/`N`), cursor time shown on the ruler.
+  analog waveform, split a bus into bits, create a bus from several signals,
+  search for a value (`v` then `n`/`N`), cursor time on the ruler.
 - **Full mouse support** — clickable menus/toolbar, draggable pane borders and
-  scrollbars, drag to reorder signals, selection-to-zoom, wheel zoom,
-  right-click context menus.
+  scrollbars, drag to reorder signals and groups, selection-to-zoom, wheel
+  zoom, right-click context menus.
 - **Themes and settings** — `F2` opens a settings dialog with `Dark`, `Light`
   and `Mixed` (dark waveform on light chrome) schemes plus per-item waveform
   colours (levels, unknown/high-Z, bus, cursor, analog, ticks, background).
-- **SSH friendly** — the native file dialog is disabled automatically over
-  SSH (or when there is no display). A built-in terminal file browser takes
-  its place, and a GUI-free build is available.
+- **SSH friendly** — the native file dialog is skipped over SSH (or when there
+  is no display); the built-in terminal browser takes its place, and a GUI-free
+  build is available.
 
 ## Build
 
-Rust (stable, 1.87+) is the only hard requirement; a C++ toolchain is needed
+Rust (stable, 1.87+) is the only hard requirement. A C++ toolchain is needed
 only for the optional FSDB support on Linux. Clone the repository and build
 with `cargo build --release`; the binary lands in `target/release/`.
 
 ### Windows
 
-1. Install Rust from <https://rustup.rs> (the default MSVC toolchain also
-   needs the *Desktop development with C++* workload from the Visual Studio
-   Build Tools).
+1. Install Rust from <https://rustup.rs> (the default MSVC toolchain also needs
+   the *Desktop development with C++* workload from the Visual Studio Build
+   Tools).
 2. Build:
 
 ```powershell
@@ -118,9 +142,9 @@ cargo build --release --no-default-features
 
 ### FSDB (Linux + Verdi)
 
-Direct FSDB reading uses the proprietary FSDB Reader SDK that ships with
-Verdi. Source the Synopsys environment before building so that `VERDI_HOME`
-is set, then compile as usual:
+Direct FSDB reading uses the proprietary FSDB Reader SDK that ships with Verdi.
+Source the Synopsys environment before building so that `VERDI_HOME` is set,
+then compile as usual:
 
 ```sh
 source ~/synopsys/env.sh       # sets VERDI_HOME, VCS_HOME, ...
@@ -129,9 +153,9 @@ cargo build --release
 
 The build script compiles `csrc/ffr_bridge.cpp` against
 `$VERDI_HOME/share/FsdbReader/ffrAPI.h` and links `libnffr`/`libnsys`. On
-machines without the SDK the build stays pure Rust and opening `.fsdb`
-prints a hint instead. A cross-check against Verdi's own `fsdb2vcd`
-converter is part of the test suite.
+machines without the SDK the build stays pure Rust and opening `.fsdb` prints a
+hint instead. A cross-check against Verdi's own `fsdb2vcd` converter is part of
+the test suite.
 
 ## Usage
 
@@ -145,40 +169,59 @@ waverdi --no-gui waveform/counter.vcd        # force the built-in TUI file brows
 waverdi --gui waveform/counter.vcd           # force the native file dialog
 ```
 
+The `waveform/` folder contains demos: `counter.vcd` (4-bit counter with
+enable/carry), `complex.vcd` (a small CPU/RAM/sensor design with 16 signals,
+tristate and analog values) and `demo.fst` (a nested tb/u_dut design in FST).
+
 ### RTL sources
 
 The upper-right **Source** pane is fed from an RTL filelist:
 
 - `-f <filelist>` on the command line, or repeated for several lists;
-- **File ▸ Load Filelist...** at runtime.
+- **File ▸ Load Filelist...** at runtime — it opens the same file dialog (or
+  built-in browser) as **Open Waveform**.
 
 The filelist uses the VCS format (`-f`/`-F` nesting, `-v`, `-y`, `+incdir+`,
 `+define+`, `//` comments). When no filelist is given and an FSDB is opened,
-waverdi tries to recover the compiled source list from the Verdi KDB
-(`simv.daidir/debug_dump/src_files_verilog`) next to the dump — or from the
-KDB path recorded inside the FSDB — and falls back to scanning the dump
-directory for `.v`/`.sv` files.
+waverdi recovers the compiled source list from the Verdi KDB
+(`simv.daidir/debug_dump/src_files_verilog`) next to the dump — or from the KDB
+path recorded inside the FSDB — and falls back to scanning the dump directory
+for `.v`/`.sv` files.
 
-The resolved files are scanned with a lightweight SystemVerilog scanner:
-modules, ports and declarations, `assign` statements, `always`/`initial`
-blocks and module instantiations keep their file and line. The **Instance**
-pane is a two-column table (`Hierarchy` | `Module`) listing instances only;
-selecting one opens its module in the **Source** pane, highlighted (keywords,
-comments, strings, numbers, directives, declared signals) with line numbers
-and a keyboard cursor. Signals are added from the source:
+The resolved files are parsed with a lightweight SystemVerilog scanner:
+modules, ports and declarations, `assign` statements, `always`/`initial` blocks,
+generate blocks and module instantiations keep their file and line. The
+**Instance** pane lists instances only; selecting one opens its module in the
+**Source** pane. The pane title names the instance and file
+(`Source - tb.u_proc.genblk1[0].u_cluster(.../cluster.sv)`), and the instance,
+module and file information that used to sit above the code is written to the
+message log instead.
+
+Signals are added from the source:
 
 - put the cursor on a name and press `Enter` / `a` (double click also picks a
   name);
-- drag the mouse or use `Shift`+`↑`/`↓` to select lines, then `Ctrl+W` or
+- drag the mouse or use `Shift`+arrows to select text, then `Ctrl+W` or
   right-click ▸ **Add to Waveform** adds every selected signal at once
-  (duplicates removed).
+  (deduplicated per operation; the same signal can be added several times);
+- `Ctrl+A` (or right-click ▸ **Select All Module Text**) selects the whole
+  module;
+- dragging a selection past the pane edges auto-scrolls so more text can be
+  selected.
 
-The last row of the source view shows the selected signal's declaration,
-driver and load lines.
+Signal references are resolved through the design AST, not by name matching:
 
-The `waveform/` folder contains demos: `counter.vcd` (4-bit counter with
-enable/carry), `complex.vcd` (a small CPU/RAM/sensor design with 16 signals,
-tristate and analog values) and `demo.fst` (a nested tb/u_dut design in FST).
+- a plain name belongs to the selected instance's module;
+- `dut.count` walks the instance hierarchy;
+- `cluster_valid[i]` / `data_chain[k]` evaluate the genvar of the selected
+  `generate` scope and pick that array element;
+- `arr[i][j]` resolves multi-dimensional arrays dimension by dimension;
+- selecting an identifier inside a *different* module of the same file (shown
+  dimmed) switches the Instance pane to that module's instance and adds the
+  signal there.
+
+The declaration / driver / load lines of the selected signal are appended to
+the message log.
 
 ### File dialog
 
@@ -206,14 +249,13 @@ override with `--gui` / `--no-gui`, or open the browser directly with `O`.
 | `h` / `l` | move the cursor one column left / right |
 | `0` / `$` | jump to the start / end of time |
 | `←` / `→` | move the cursor (hold `Shift` for x10) |
-| `j` / `k` | next / previous signal row |
-| `J` / `K` | move the selected signal down / up (across groups) |
-| `gg` | jump to the first row |
+| `j` / `k` | next / previous row |
+| `J` / `K` | move the selection: signal (or group) down / up; a multi-selection moves as one block |
 | `V` | visual mode: `j` / `k` extend the multi-selection |
 | `dd` | cut the selected signal(s) into the register |
 | `p` | paste the register below the current signal / into the current group |
 | `Space` | toggle the row in the multi-selection |
-| `Shift`+`↑` / `↓` | Source: select lines; lists: extend the signal selection |
+| `Shift`+`↑` / `↓` | Source: extend the text selection; lists: extend the signal selection |
 | `Esc` | clear the multi-selection / leave visual mode |
 | `w` / `b` | next / previous edge (on 1-bit signals: next / previous rising edge) |
 | `e` / `ge` | next / previous falling edge (1-bit signals; on buses: next / previous change) |
@@ -221,9 +263,10 @@ override with `--gui` / `--no-gui`, or open the browser directly with `O`.
 | `,` / `.` | previous / next transition |
 | `Home` / `End` | jump to start / end |
 | `a`, `Enter` | Instance: fold/unfold the scope; Source: add the signal under the cursor; Signal List: expand/collapse a group |
-| `j` / `k` / `h` / `l` | Source: move the code cursor |
-| `↑` / `↓` / `←` / `→` | Source: move the code cursor |
+| `j` / `k` / `h` / `l`, arrows | Source: move the code cursor |
+| `Shift`+`←` / `→` | Source: extend the selection by one character |
 | `Ctrl+W` | Source: add the selected signals to the waveform |
+| `Ctrl+A` | Source: select the whole module |
 | `←` / `→` | on a group row: collapse / expand |
 | `x` | in the waveform pane: cut the selection (alias for `dd`) |
 | `r` | cycle radix, or rename the selected group |
@@ -232,6 +275,87 @@ override with `--gui` / `--no-gui`, or open the browser directly with `O`.
 | `Tab` | cycle focus (Instance → Source → Signal List → Waveform) |
 | `F2` | settings: theme (dark / light / mixed) and waveform colours |
 | `F1`, `?` | key bindings |
+
+## Mouse
+
+| Action | Effect |
+| --- | --- |
+| click menu / toolbar | execute |
+| drag pane borders | resize the panes (Instance ∣ Source, top ∣ nWave, Signal List width, Value column, Hierarchy ∣ Module) |
+| drag the bottom-row scrollbars | scroll horizontally (Source, Instance columns, Signal List names and values) |
+| drag the side scrollbars | scroll vertically (Instance, Source, Signal List) |
+| drag a Signal List row | reorder signals (a multi-selection moves as one block) |
+| drag a group header | reorder groups |
+| click ruler / drag on the waveform | set the cursor / select a time range |
+| click inside a selection | zoom to the selected range |
+| wheel over waveform | zoom at the pointer (over lists: scroll) |
+| `Shift`+wheel | pan |
+| middle click | zoom out |
+| right click signal / group / source | context menu (submenus for radix, waveform, bus) |
+| `Shift`/`Alt`+click a signal | add / remove it from the multi-selection |
+| `Ctrl`+click a signal | select every signal between the anchor and the click |
+| double click a signal name | expand / collapse its bits or the next array dimension |
+| double click a waveform | jump to the driver logic (Source + Instance) |
+| double click a group | collapse / expand it (rename with `r` or the context menu) |
+| double click | fold/unfold an instance in the Instance pane |
+| click / double click / drag in Source | move the code cursor / pick a signal name / select text (auto-scrolls at the edges) |
+| dialog `✕` / scrollbar | close the dialog / drag the scrollbar |
+| Time button in the shortcut bar | cycle the ruler time base (timescale → fs … s) |
+
+> Windows Terminal reserves `Shift`+click for text selection and never
+> forwards it to the application; there the keyboard `V` / `Space` /
+> `Shift`+`↑`/`↓` bindings (or `Alt`+click) do the multi-selection.
+
+Actions such as `dd`, `r` (radix / rename), the context-menu radix and the
+waveform modes apply to the whole multi-selection when the clicked signal is
+part of it. The status bar shows the selection, the visual mode and the
+register size.
+
+## Signal List, groups and arrays
+
+Signals appear in the Signal List with their **leaf name**, right-aligned so
+long names keep their tail; the hierarchical prefix is drawn in a dim colour
+when full names are enabled (`h`) and the column can be scrolled horizontally
+(the Value column has its own horizontal scrollbar). The divider between the
+two columns runs to the bottom of the pane.
+
+The list is organised in **user groups** instead of the design hierarchy: a
+default `G0` exists, adding a signal puts it into the group under the cursor,
+and dropping or moving a signal into the newest group appends a fresh empty
+group after it. Group numbers always continue from the highest existing number
+(`G0 G1 G2 G3 G4`, delete `G3`, the next group is `G5`; delete `G5` and it is
+reused). Renaming a group with `r` or the context menu changes only its label,
+never its number. `J`/`K` (or dragging) move a signal across group boundaries
+— it joins the group it lands in — and the same keys move a whole group when a
+group row is selected. A mouse drag only creates the trailing empty group on
+drop, so dragging through the list does not leave a trail of empty groups.
+
+**Unpacked arrays** dumped element by element (`mem[0][7:0]`, …) are grouped
+under a parent signal. The parent prints the array as brace text —
+`{0, 1, 2, 3}`, and `{{0, 1, 2}, {2, 3, 4}, {1, 2, 3}}` for
+multi-dimensional arrays — in hex by default. Double-clicking a signal expands
+its bits, or one array dimension at a time; collapsing removes the subtree
+below it. The radix set for an array is applied to the elements too.
+
+## Context menu
+
+The context menu shows only its items (no title) and highlights the full row.
+It contains:
+
+- **Set Radix** ▸ Hex / Binary / Octal / Decimal / ASCII
+- **Set Waveform** ▸ Digital / Analog
+- **Bus Operations** ▸ Split Bus (opens a width prompt, `data` →
+  `data[0]`…`data[n]`), Create Bus (opens an ordering window for the
+  currently selected signals; any width, first row = MSB)
+- **Remove Signal**
+- On a group: New Group / Rename / Expand / Collapse / Expand All /
+  Collapse All / Remove Group
+- On the Source pane: **Add to Waveform** / **Select All Module Text**
+
+Inside the Create Bus window: `↑`/`↓` select, `Shift`+`↑`/`↓` reorder,
+`h`/`l` trim the LSB, `H`/`L` trim the MSB, `x` reset to the full range
+(e.g. `{sig1[4:3], sig2[0], sig4[66:43]}`), `s`/`S` sort by name
+ascending/descending, `r` reverse, `Enter` create, `Esc` cancel.
 
 ## Settings
 
@@ -249,67 +373,6 @@ override with `--gui` / `--no-gui`, or open the browser directly with `O`.
 Switching themes resets per-colour customisation; the choice lasts for the
 session.
 
-## Mouse
-
-| Action | Effect |
-| --- | --- |
-| click menu / toolbar | execute |
-| drag pane borders | resize panes |
-| drag scrollbars | scroll signals / pan time |
-| drag a Signal List row | reorder signals |
-| click ruler | set cursor; drag on the waveform selects a time range |
-| click inside a selection | zoom to the selected range |
-| wheel over waveform | zoom at the pointer (over lists: scroll) |
-| `Shift`+wheel | pan |
-| middle click | zoom out |
-| right click signal / group | context menu (submenus for radix, waveform, bus) |
-| `Shift`/`Alt`+click a signal | add / remove it from the multi-selection |
-| `Ctrl`+click a signal | select every signal between the anchor and the click |
-| click / double click in Source | move the code cursor / pick a signal name |
-| double click a group | collapse / expand it (rename with `r` or the context menu) |
-| double click | fold/unfold an instance in the Instance pane |
-| drag in Source / right-click | select lines / Add to Waveform |
-| dialog `✕` / scrollbar | close the dialog / drag the scrollbar |
-| Time button in the shortcut bar | cycle the ruler time base (timescale → fs … s) |
-
-> Windows Terminal reserves `Shift`+click for text selection and never
-> forwards it to the application; there the keyboard `V` / `Space` /
-> `Shift`+`↑`/`↓` bindings (or `Alt`+click) do the multi-selection.
-
-Actions such as `dd`, `r` (radix / rename), the context-menu radix and the
-waveform modes apply to the whole multi-selection when the clicked signal is
-part of it. The status bar shows the selection, the visual mode and the
-register size.
-
-## Groups
-
-The Signal List is organised in user groups instead of the design hierarchy:
-each signal row shows its leaf name (press `h` for the full hierarchical
-name). A default `G0` group exists; adding a signal puts it into the group
-under the cursor, and when a signal lands in the newest group a fresh empty
-group is appended after it. Group numbers always continue from the highest
-existing number (`G0 G1 G2 G3 G4`, delete `G3`, the next group is `G5`; delete
-`G5` and it is reused). Renaming a group with `r` or the context menu changes
-only its label, never its number. `J`/`K` (or dragging) move a signal across
-group boundaries — it joins the group it lands in — and the group context menu
-can create a new group after the clicked one.
-
-## Context menu
-
-- **Set Radix** ▸ Hex / Binary / Octal / Decimal / ASCII
-- **Set Waveform** ▸ Digital / Analog
-- **Bus Operations** ▸ Split Bus (opens a width prompt, `data` →
-  `data[0]`…`data[n]`), Create Bus (opens an ordering window for the
-  currently selected signals; any width, first row = MSB)
-- **Remove Signal**
-- On a group: New Group / Rename / Expand / Collapse / Expand All /
-  Collapse All / Remove Group
-
-Inside the Create Bus window: `↑`/`↓` select, `Shift`+`↑`/`↓` reorder,
-`h`/`l` trim the LSB, `H`/`L` trim the MSB, `x` reset to the full range
-(e.g. `{sig1[4:3], sig2[0], sig4[66:43]}`), `s`/`S` sort by name
-ascending/descending, `r` reverse, `Enter` create, `Esc` cancel.
-
 ## Project layout
 
 ```
@@ -320,8 +383,9 @@ shot/              README screenshot
 src/
 ├── main.rs        CLI, terminal setup, event loop
 ├── app/           state machine: input, keys, mouse, view, navigation, actions
-├── ui/            ratatui rendering: layout, tree, list, wave, menus, dialogs
-├── waveform/      data model: signals, values, time, scope tree
+├── ui/            ratatui rendering: layout, tree, source, list, wave, menus
+├── rtl/           RTL sources: filelist/KDB discovery, SV scanner, source view
+├── waveform/      data model: signals, values, time, scope tree, arrays
 ├── vcd.rs         VCD parser
 ├── fst.rs         FST loader (via wellen)
 ├── fsdb.rs        FSDB loader (via the Verdi FFR SDK, Linux)
