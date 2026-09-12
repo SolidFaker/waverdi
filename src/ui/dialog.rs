@@ -219,6 +219,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
         let buf = frame.buffer_mut();
         buf.set_style(l.area, Style::new().bg(t.overlay));
         Clear.render(area, buf);
+        buf.set_style(area, Style::new().bg(t.popup_bg));
         let mut block = Block::bordered()
             .title(format!(" {title} "))
             .title_style(Style::new().fg(t.accent).add_modifier(Modifier::BOLD))

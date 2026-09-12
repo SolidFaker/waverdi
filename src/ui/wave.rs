@@ -62,9 +62,9 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         let selected = Some(k) == app.sel_row;
         let multi = matches!(list_row, crate::app::ListRow::Signal { sig, .. } if app.selection.contains(sig));
         let row_bg = if selected {
-            t.row_sel_bg
+            t.wave_sel_bg
         } else if multi {
-            t.multi_sel_bg
+            t.wave_multi_bg
         } else if row.is_multiple_of(2) {
             t.wave_alt
         } else {
@@ -82,7 +82,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     if app.display.is_empty() {
         let msg = "Instance: select a signal, Enter / 'a' to add — or press 's' to search";
         let y = l.rows.y + (l.rows_h as u16 / 2);
-        text::put(buf, l.rows.x, y, msg, Style::new().fg(t.dim));
+        text::put(buf, l.rows.x, y, msg, Style::new().fg(t.wave_dim));
     }
 
     draw_range(buf, l, app);
@@ -92,7 +92,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
 
 /// Group boundary row: the group name is only shown in the Signal List.
 fn draw_group_row(buf: &mut Buffer, l: &Layout, t: &Theme, selected: bool, y: u16) {
-    let bg = if selected { t.row_sel_bg } else { t.wave_bg };
+    let bg = if selected { t.wave_sel_bg } else { t.wave_bg };
     buf.set_style(
         ratatui::layout::Rect {
             x: l.rows.x,
@@ -106,7 +106,7 @@ fn draw_group_row(buf: &mut Buffer, l: &Layout, t: &Theme, selected: bool, y: u1
         l.rows.x,
         y,
         "─".repeat(l.rows.width as usize),
-        Style::new().fg(t.dim).bg(bg),
+        Style::new().fg(t.wave_dim).bg(bg),
     );
 }
 
@@ -168,7 +168,13 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                 }
                 let gap = if clipped { 1 } else { 2 };
                 if lw > 1 && lx >= last_label_end + gap && lx + lw <= cursor_x as i64 {
-                    text::put(buf, lx as u16, l.ruler.y, &label, Style::new().fg(t.text));
+                    text::put(
+                        buf,
+                        lx as u16,
+                        l.ruler.y,
+                        &label,
+                        Style::new().fg(t.wave_text),
+                    );
                     last_label_end = lx + lw;
                 }
             }
@@ -467,9 +473,16 @@ fn draw_vscroll(buf: &mut Buffer, l: &Layout, app: &App) {
         let (symbol, fg) = if row >= top && row < top + thumb {
             (SCROLL_THUMB, t.accent)
         } else {
-            (VLINE, t.dim)
+            (VLINE, t.wave_dim)
         };
-        text::set_cell(buf, l.vscroll_x, l.rows.y + row as u16, symbol, fg, t.bg);
+        text::set_cell(
+            buf,
+            l.vscroll_x,
+            l.rows.y + row as u16,
+            symbol,
+            fg,
+            t.wave_bg,
+        );
     }
 }
 
@@ -516,7 +529,7 @@ fn draw_hscroll(buf: &mut Buffer, l: &Layout, app: &App) {
         let (symbol, fg) = if on_thumb {
             (SCROLL_THUMB, t.accent)
         } else {
-            (SCROLL_TRACK, t.dim)
+            (SCROLL_TRACK, t.wave_dim)
         };
         text::set_cell(
             buf,
@@ -524,7 +537,7 @@ fn draw_hscroll(buf: &mut Buffer, l: &Layout, app: &App) {
             l.hscroll.y,
             symbol,
             fg,
-            t.toolbar_bg,
+            t.wave_bg,
         );
     }
 }

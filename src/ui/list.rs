@@ -22,10 +22,11 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         Style::new().fg(t.text).add_modifier(Modifier::BOLD)
     };
     buf.set_string(l.list.x, l.list.y, " Signal List", title_style);
-    let value_w = value_col_width(l);
+    let value_w = l.value_col_width(app.splits.value_pct);
+    let grip = l.value_grip_x(app.splits.value_pct);
     text::put(
         buf,
-        l.list.right().saturating_sub(value_w as u16),
+        grip + 1,
         l.list.y,
         "Value",
         Style::new().fg(t.text).add_modifier(Modifier::BOLD),
@@ -62,6 +63,15 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                 height: 1,
             },
             Style::new().bg(bg),
+        );
+
+        text::set_cell(
+            buf,
+            grip,
+            y,
+            "│",
+            if focused { t.accent } else { t.panel_border },
+            bg,
         );
 
         match list_row {
@@ -122,22 +132,13 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                 } else {
                     Style::new().fg(t.value).bg(bg)
                 };
-                text::put(
-                    buf,
-                    l.list.right().saturating_sub(value_w as u16),
-                    y,
-                    &value,
-                    value_style,
-                );
+                // Keep the value inside its column: never over the divider.
+                text::put(buf, grip + 1, y, &text::trunc(&value, value_w), value_style);
             }
         }
     }
 }
 
 fn name_width(l: &Layout, value_w: usize) -> usize {
-    (l.list.width as usize).saturating_sub(value_w + 1)
-}
-
-fn value_col_width(l: &Layout) -> usize {
-    (l.list.width as usize / 4).clamp(6, 14)
+    (l.list.width as usize).saturating_sub(value_w + 2)
 }

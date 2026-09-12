@@ -7,6 +7,8 @@ pub struct Splits {
     pub list_pct: u16,
     /// Height percentage of the instance/source row above nWave.
     pub top_pct: u16,
+    /// Width percentage of the Value column inside the Signal List.
+    pub value_pct: u16,
 }
 
 impl Default for Splits {
@@ -15,6 +17,7 @@ impl Default for Splits {
             tree_pct: 24,
             list_pct: 31,
             top_pct: 60,
+            value_pct: 25,
         }
     }
 }
@@ -27,6 +30,9 @@ impl Splits {
     /// Bounds of the horizontal split between the top row and nWave.
     pub const MIN_TOP_PCT: u16 = 20;
     pub const MAX_TOP_PCT: u16 = 80;
+    /// Bounds of the Value column inside the Signal List.
+    pub const MIN_VALUE_PCT: u16 = 8;
+    pub const MAX_VALUE_PCT: u16 = 50;
 
     pub fn max_tree_pct(&self) -> u16 {
         (100 - self.list_pct - Self::MIN_WAVE_PCT).min(Self::MAX_PCT)
@@ -82,6 +88,20 @@ impl Layout {
     /// Row between the instance/source row and nWave, draggable.
     pub fn split_grip_y(&self) -> u16 {
         self.nwave.y
+    }
+
+    /// Width of the Signal List Value column for the given percentage.
+    pub fn value_col_width(&self, pct: u16) -> usize {
+        let width = self.list.width as usize;
+        let wanted = (width as u32 * pct as u32 / 100) as usize;
+        wanted.clamp(4, width.saturating_sub(4).max(4))
+    }
+
+    /// Column between the signal names and the Value column, draggable.
+    pub fn value_grip_x(&self, pct: u16) -> u16 {
+        self.list
+            .right()
+            .saturating_sub(self.value_col_width(pct) as u16 + 1)
     }
 }
 

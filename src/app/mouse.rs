@@ -270,10 +270,11 @@ fn mouse_down(
     }
 
     if btn == MouseButton::Left {
-        if let Some(mode) = grip_at(&l, col, row) {
+        if let Some(mode) = grip_at(&l, app.splits, col, row) {
             let (start, pct) = match mode {
-                // Vertical split: remember the grabbed row instead of a column.
+                // Vertical splits remember the grabbed row instead of a column.
                 DragMode::SplitTop => (row, app.splits.top_pct as f64),
+                DragMode::SplitValue => (col, app.splits.value_pct as f64),
                 _ => (col, split_pct(app, mode)),
             };
             app.dragging = Some(new_drag(mode, start, pct));
@@ -486,7 +487,7 @@ fn split_pct(app: &App, mode: DragMode) -> f64 {
 }
 
 /// Return the pane border under the pointer, if any.
-fn grip_at(l: &Layout, col: u16, row: u16) -> Option<DragMode> {
+fn grip_at(l: &Layout, splits: Splits, col: u16, row: u16) -> Option<DragMode> {
     if row == l.split_grip_y() && col >= l.area.x && col < l.area.right() {
         return Some(DragMode::SplitTop);
     }
@@ -495,6 +496,9 @@ fn grip_at(l: &Layout, col: u16, row: u16) -> Option<DragMode> {
     }
     if col == l.list_grip_x() && row >= l.list.y && row < l.list.bottom() {
         return Some(DragMode::SplitList);
+    }
+    if col == l.value_grip_x(splits.value_pct) && row >= l.list.y + 2 && row < l.list.bottom() {
+        return Some(DragMode::SplitValue);
     }
     None
 }
@@ -601,6 +605,14 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
             let pct = drag.start_pct + delta * 100.0 / l.area.height.max(1) as f64;
             app.splits.top_pct =
                 pct.clamp(Splits::MIN_TOP_PCT as f64, Splits::MAX_TOP_PCT as f64) as u16;
+        }
+        DragMode::SplitValue => {
+            // Dragging the grip left widens the Value column.
+            let list_w = l.list.width.max(1) as f64;
+            let delta = col as f64 - drag.start_x as f64;
+            let pct = drag.start_pct - delta * 100.0 / list_w;
+            app.splits.value_pct =
+                pct.clamp(Splits::MIN_VALUE_PCT as f64, Splits::MAX_VALUE_PCT as f64) as u16;
         }
     }
 }
@@ -755,6 +767,19 @@ mod tests {
         assert_eq!(app.focus, Focus::Wave);
         assert!(app.cursor > 0);
         assert!(app.dragging.is_some());
+    }
+
+    #[test]
+    fn drag_value_grip_resizes_the_value_column() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0]);
+        let l = app.layout();
+        let x = l.value_grip_x(app.splits.value_pct);
+        let y = l.list.y + 2;
+        crate::app::handle_mouse(&mut app, click(x, y));
+        crate::app::handle_mouse(&mut app, drag(x - 4, y));
+        app.dragging = None;
+        assert!(app.splits.value_pct > Splits::default().value_pct);
     }
 
     #[test]

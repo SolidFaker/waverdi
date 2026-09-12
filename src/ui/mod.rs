@@ -37,7 +37,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             wave::draw_nwave_frame(buf, &l, t, true);
         }
         toolbar::draw(buf, &l, app);
-        draw_divider(buf, &l, app);
         match &app.wf {
             None => status::draw_empty(buf, &l, t),
             Some(wf) => {
@@ -46,6 +45,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 wave::draw(buf, &l, app, wf);
             }
         }
+        draw_divider(buf, &l, app);
         source::draw(buf, &l, app);
         status::draw_messages(buf, &l, app);
         status::draw_status(buf, &l, app);
@@ -433,6 +433,42 @@ mod tests {
         assert_eq!(
             buffer.cell((l.list.x + 1, l.list.y)).unwrap().bg,
             crate::theme::Theme::LIGHT.list_header_bg
+        );
+    }
+
+    #[test]
+    fn values_never_cover_the_list_dividers() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.set_display(vec![1]);
+        app.splits.value_pct = crate::ui::layout::Splits::MIN_VALUE_PCT;
+        app.cursor = 5; // data 0 -> 5: the Value cell shows the transition
+        let screen = render_app(&mut app, 100, 30);
+        let l = app.layout();
+        let lines: Vec<Vec<char>> = screen.lines().map(|line| line.chars().collect()).collect();
+        let row = &lines[(l.list.y + 3) as usize]; // G0 header then the data row
+        assert_eq!(row[l.list_grip_x() as usize], '│');
+        assert_eq!(row[l.value_grip_x(app.splits.value_pct) as usize], '│');
+    }
+
+    #[test]
+    fn light_theme_dialog_uses_a_light_background() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.set_theme_kind(crate::theme::ThemeKind::Light);
+        app.open_dialog(crate::app::Dialog::Keys);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = super::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::Keys);
+        assert_eq!(
+            buffer.cell((area.x + 2, area.y + 2)).unwrap().bg,
+            crate::theme::Theme::LIGHT.popup_bg
         );
     }
 

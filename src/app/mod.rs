@@ -70,6 +70,7 @@ pub(crate) enum DragMode {
     SplitTree,
     SplitList,
     SplitTop,
+    SplitValue,
 }
 
 #[derive(Clone, Copy)]
