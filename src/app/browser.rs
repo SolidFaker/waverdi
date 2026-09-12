@@ -239,7 +239,10 @@ mod tests {
             .position(|e| e.name == "a.vcd")
             .unwrap();
         browser.select(a_vcd, 10);
-        assert_eq!(browser.activate(), Some(tmp.0.join("a.vcd")));
+        // Entry paths come from the canonicalised directory (`/private/var`
+        // on macOS, no `\\?\` prefix on Windows), so compare against it.
+        let expected = browser.dir.join("a.vcd");
+        assert_eq!(browser.activate(), Some(expected));
     }
 
     #[test]

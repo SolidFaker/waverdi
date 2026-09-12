@@ -660,6 +660,19 @@ mod tests {
         let mut app = App::new();
         app.use_gui = false;
         app.open_tui_browser();
+        // The working directory holds more entries than fit on screen: scroll
+        // the browser to Cargo.toml before rendering.
+        {
+            let rows = super::dialog::browser_rows(ratatui::layout::Rect::new(0, 0, 100, 30));
+            let browser = app.browser.as_mut().unwrap();
+            let index = browser
+                .entries
+                .iter()
+                .position(|entry| entry.name == "Cargo.toml")
+                .expect("Cargo.toml in the crate root");
+            browser.sel = index;
+            browser.scroll_to_sel(rows);
+        }
         let screen = render_app(&mut app, 100, 30);
         assert!(screen.contains("Open Waveform"), "{screen}");
         assert!(screen.contains("Enter open"), "{screen}");

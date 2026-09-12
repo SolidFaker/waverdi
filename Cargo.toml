@@ -2,14 +2,15 @@
 name = "waverdi"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.88"
 description = "Verdi-style terminal RTL waveform viewer (VCD/FST/FSDB)"
 
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
 clap = { version = "4", features = ["derive"] }
-rfd = { version = "0.17.2", optional = true }
+# Desktop portal backend: pure Rust, no GTK/Wayland development headers needed.
+rfd = { version = "0.17.2", optional = true, default-features = false, features = ["xdg-portal"] }
 wellen = "0.25.6"
 
 [build-dependencies]
