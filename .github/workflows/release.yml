@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Portable Linux binary: built without the optional GUI dialog.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            features: --no-default-features
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: ""
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            features: ""
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            features: ""
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.features }}
+      - name: Package (unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/waverdi" dist/
+          cp README.md dist/
+          tar -czf "waverdi-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" -C dist .
+          rm -rf dist
+      - name: Package (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/waverdi.exe" dist/
+          Copy-Item README.md dist/
+          Compress-Archive -Path "dist/*" -DestinationPath "waverdi-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          Remove-Item -Recurse -Force dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: waverdi-${{ matrix.target }}
+          path: waverdi-${{ github.ref_name }}-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum waverdi-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
