@@ -1,3 +1,4 @@
+mod arrays;
 mod signal;
 mod time;
 mod tree;

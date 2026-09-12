@@ -356,7 +356,10 @@ impl App {
 
     /// Install a parsed waveform and reset the view state.
     pub fn apply_parsed(&mut self, path: impl Into<String>, out: crate::dump::ParseOut) {
-        let wf = out.wf;
+        let mut wf = out.wf;
+        // Unpacked arrays are dumped element by element; group them under
+        // expandable parent signals.
+        wf.build_arrays();
         self.msg(format!("Loaded {}", wf.summary()));
         for warning in out.warnings {
             self.msg(format!("  warn: {warning}"));
@@ -556,7 +559,7 @@ impl App {
 
     /// Add the identifier under the Source cursor to the Signal List.
     pub fn add_source_word(&mut self) {
-        let Some((word, chain, module, index, port_line)) =
+        let Some((word, chain, module, indices, port_line)) =
             self.source_view.as_ref().and_then(|view| {
                 let (start, end) = view.word_span_at_cursor()?;
                 let word = view.word_at_cursor()?;
@@ -564,7 +567,7 @@ impl App {
                     word,
                     view.qualifier_chain(view.line, start),
                     view.module_at_line(view.line).to_string(),
-                    view.index_after(view.line, end),
+                    view.indices_after(view.line, end),
                     view.dotted_port(view.line, start).then_some(view.line),
                 ))
             })
@@ -572,7 +575,7 @@ impl App {
             self.msg("source: no signal name under the cursor (a: add)");
             return;
         };
-        match self.resolve_source_reference(&module, &chain, &word, index.as_deref(), port_line) {
+        match self.resolve_source_reference(&module, &chain, &word, &indices, port_line) {
             Some(index) => {
                 self.add_signal(index);
                 self.focus = Focus::Source;
@@ -664,15 +667,11 @@ impl App {
                     continue;
                 }
                 let chain = view.qualifier_chain(line, span_start);
-                let index = view.index_after(line, span_end);
+                let indices = view.indices_after(line, span_end);
                 let port_line = view.dotted_port(line, span_start).then_some(line);
-                match self.resolve_source_reference(
-                    &module,
-                    &chain,
-                    &span.text,
-                    index.as_deref(),
-                    port_line,
-                ) {
+                match self
+                    .resolve_source_reference(&module, &chain, &span.text, &indices, port_line)
+                {
                     Some(index) => {
                         if !signals.contains(&index) {
                             signals.push(index);
@@ -736,21 +735,21 @@ impl App {
         module: &str,
         chain: &[String],
         name: &str,
-        index: Option<&str>,
+        indices: &[String],
         port_line: Option<usize>,
     ) -> Option<usize> {
         if chain.is_empty() {
             if let Some(line) = port_line {
                 if let Some(instance) = self.port_instance(module, line, name) {
                     if let Some(found) =
-                        self.resolve_source_signal(module, &[instance], name, index)
+                        self.resolve_source_signal(module, &[instance], name, indices)
                     {
                         return Some(found);
                     }
                 }
             }
         }
-        self.resolve_source_signal(module, chain, name, index)
+        self.resolve_source_signal(module, chain, name, indices)
     }
 
     /// Instance of `module` whose named port connection on `line` (0-based
@@ -788,7 +787,7 @@ impl App {
         module: &str,
         chain: &[String],
         name: &str,
-        index: Option<&str>,
+        indices: &[String],
     ) -> Option<usize> {
         let Some(rtl) = self.rtl.as_ref() else {
             // No AST at all: trust the dump at the exact scope.
@@ -813,13 +812,22 @@ impl App {
         let (path, signal) = rtl.resolve_reference_with(module, chain, name, &bindings)?;
         let mut scope = base;
         scope.extend(path);
-        // `name[i]` with a bound genvar selects an element of an unpacked
-        // array; packed vectors fall back to the whole signal.
-        if let Some(value) = index
-            .and_then(crate::rtl::scan::parse_expr_text)
-            .and_then(|expr| crate::rtl::scan::eval(&expr, &bindings))
-        {
-            if let Some(index) = self.find_signal_exact(&scope, &format!("{signal}[{value}]")) {
+        // `arr[i][j]` first, then drop dimensions (`arr[i]`, `arr`) so both
+        // whole arrays and their elements can be added.
+        let mut candidates: Vec<String> = Vec::new();
+        let mut current = signal.clone();
+        for text in indices {
+            let Some(value) = crate::rtl::scan::parse_expr_text(text)
+                .and_then(|expr| crate::rtl::scan::eval(&expr, &bindings))
+            else {
+                break;
+            };
+            current = format!("{current}[{value}]");
+            candidates.push(current.clone());
+        }
+        candidates.reverse();
+        for candidate in candidates {
+            if let Some(index) = self.find_signal_exact(&scope, &candidate) {
                 return Some(index);
             }
         }

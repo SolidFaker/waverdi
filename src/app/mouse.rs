@@ -1238,6 +1238,50 @@ mod tests {
     }
 
     #[test]
+    fn double_click_expands_array_dimensions_step_by_step() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 8 ! e0 [7:0] $end\n\
+            $var wire 8 \" e1 [7:0] $end\n\
+            $var wire 8 # e2 [7:0] $end\n\
+            $var wire 8 $ e3 [7:0] $end\n\
+            $enddefinitions $end\n#0\nb0 !\nb0 \"\nb0 #\nb0 $\n";
+        let mut app = app_with(vcd);
+        {
+            let signals = &mut app.wf.as_mut().unwrap().signals;
+            signals[0].name = "arr[0][0][7:0]".to_string();
+            signals[1].name = "arr[0][1][7:0]".to_string();
+            signals[2].name = "arr[1][0][7:0]".to_string();
+            signals[3].name = "arr[1][1][7:0]".to_string();
+        }
+        app.wf.as_mut().unwrap().build_arrays();
+        // arr[0] = 4, arr[1] = 5, arr = 6.
+        app.set_display(vec![6]);
+        let row = app.layout().list.y + 3;
+        double_click(&mut app, row);
+        assert_eq!(app.display, vec![6, 4, 5]);
+
+        // Expanding arr[0] reveals its two elements.
+        let row0 = app.layout().list.y + 4;
+        double_click(&mut app, row0);
+        assert_eq!(app.display, vec![6, 4, 0, 1, 5]);
+
+        // Collapsing arr[0] removes only its subtree.
+        double_click(&mut app, row0);
+        assert_eq!(app.display, vec![6, 4, 5]);
+
+        // Collapsing the root removes every dimension below it.
+        double_click(&mut app, row);
+        assert_eq!(app.display, vec![6]);
+    }
+
+    fn double_click(app: &mut crate::app::App, row: u16) {
+        crate::app::handle_mouse(app, click(30, row));
+        crate::app::handle_mouse(app, click(30, row));
+        app.dragging = None;
+        app.last_click = None; // long enough pause for the next double click
+    }
+
+    #[test]
     fn double_click_group_toggles_collapse() {
         let mut app = app_with(VCD);
         app.set_display(vec![0]);

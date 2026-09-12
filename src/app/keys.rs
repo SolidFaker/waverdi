@@ -1482,6 +1482,74 @@ mod tests {
     }
 
     #[test]
+    fn source_references_add_arrays_and_sub_arrays() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 8 ! e0 [7:0] $end\n\
+            $var wire 8 \" e1 [7:0] $end\n\
+            $var wire 8 # e2 [7:0] $end\n\
+            $var wire 8 $ e3 [7:0] $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\nb0 !\nb0 \"\nb0 #\nb0 $\n";
+        let mut app = app_with(vcd);
+        {
+            let signals = &mut app.wf.as_mut().unwrap().signals;
+            signals[0].name = "arr[0][0][7:0]".to_string();
+            signals[1].name = "arr[0][1][7:0]".to_string();
+            signals[2].name = "arr[1][0][7:0]".to_string();
+            signals[3].name = "arr[1][1][7:0]".to_string();
+        }
+        app.wf.as_mut().unwrap().build_arrays();
+        let dir = std::env::temp_dir().join(format!("waverdi_src_array_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tb.sv");
+        std::fs::write(
+            &file,
+            "module tb;\n\
+             \x20   logic [7:0] arr [2][2];\n\
+             \x20   logic [7:0] x;\n\
+             \x20   assign x = arr;\n\
+             \x20   assign x = arr[0];\n\
+             \x20   assign x = arr[1][1];\n\
+             endmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "tb".to_string();
+        app.tree_sel = 1;
+        app.sync_source();
+        app.focus = Focus::Source;
+
+        let add = |app: &mut crate::app::App, needle: &str| {
+            let (line, col) = {
+                let view = app.source_view.as_ref().unwrap();
+                let (line, text) = view
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .find(|(_, text)| text.contains(needle))
+                    .unwrap();
+                (line, text.find("arr").unwrap())
+            };
+            app.set_source_cursor(line, col);
+            app.add_source_word();
+        };
+
+        // The whole array, a sub-array and one element.
+        add(&mut app, "assign x = arr;");
+        assert_eq!(app.display, vec![6]);
+        app.clear_all();
+        add(&mut app, "assign x = arr[0];");
+        assert_eq!(app.display, vec![4]);
+        app.clear_all();
+        add(&mut app, "assign x = arr[1][1];");
+        assert_eq!(app.display, vec![3]);
+    }
+
+    #[test]
     fn r_renames_a_group_and_h_toggles_names() {
         let mut app = app_with(VCD);
         app.add_signal(0);

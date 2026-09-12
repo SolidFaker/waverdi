@@ -320,11 +320,13 @@ impl App {
             self.select_signal_row(sig);
             self.msg(format!("expanded signal into {} bit(s)", children.len()));
         } else {
+            // Collapse the whole subtree below this signal.
+            let subtree = self.signal_subtree(sig);
             let mut positions: Vec<usize> = self
                 .display
                 .iter()
                 .enumerate()
-                .filter(|(_, signal)| children.contains(signal))
+                .filter(|(_, signal)| subtree.contains(signal))
                 .map(|(position, _)| position)
                 .collect();
             positions.sort_unstable_by(|a, b| b.cmp(a));
@@ -333,10 +335,28 @@ impl App {
                 self.display.remove(position);
                 self.groups[group].count = self.groups[group].count.saturating_sub(1);
             }
-            self.selection.retain(|signal| !children.contains(signal));
+            self.selection.retain(|signal| !subtree.contains(signal));
             self.select_signal_row(sig);
-            self.msg(format!("collapsed {} bit(s)", visible.len()));
+            self.msg(format!("collapsed {} row(s)", visible.len()));
         }
+    }
+
+    /// All signals below `root` (direct and expanded descendants).
+    fn signal_subtree(&self, root: usize) -> Vec<usize> {
+        let Some(wf) = &self.wf else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            for (index, signal) in wf.signals.iter().enumerate() {
+                if signal.parent == Some(node) {
+                    out.push(index);
+                    stack.push(index);
+                }
+            }
+        }
+        out
     }
 
     /// Select the row of `sig` and keep it visible.

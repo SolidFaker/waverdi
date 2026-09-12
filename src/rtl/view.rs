@@ -300,40 +300,52 @@ impl SourceView {
         start < 2 || !is_ident_char(chars[start - 2])
     }
 
-    /// Text of the `[...]` selector directly after `start` on `line`: for
-    /// `data_chain[k]` this returns `k`.
-    pub fn index_after(&self, line: usize, start: usize) -> Option<String> {
-        let text = self.lines.get(line)?;
+    /// Text of every `[...]` selector directly after `start` on `line`: for
+    /// `arr[i][j]` this returns `["i", "j"]`, for `count[3:0]` `["3:0"]`.
+    pub fn indices_after(&self, line: usize, start: usize) -> Vec<String> {
+        let Some(text) = self.lines.get(line) else {
+            return Vec::new();
+        };
         let chars: Vec<char> = text.chars().collect();
         let mut i = start.min(chars.len());
-        while chars.get(i) == Some(&' ') {
-            i += 1;
-        }
-        if chars.get(i) != Some(&'[') {
-            return None;
-        }
-        let mut depth = 0i32;
-        let mut out = String::new();
-        while i < chars.len() {
-            match chars[i] {
-                '[' => {
-                    depth += 1;
-                    if depth > 1 {
-                        out.push('[');
-                    }
-                }
-                ']' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(out);
-                    }
-                    out.push(']');
-                }
-                c => out.push(c),
+        let mut out = Vec::new();
+        loop {
+            while chars.get(i) == Some(&' ') {
+                i += 1;
             }
-            i += 1;
+            if chars.get(i) != Some(&'[') {
+                break;
+            }
+            let mut depth = 0i32;
+            let mut group = String::new();
+            let mut closed = false;
+            while i < chars.len() {
+                match chars[i] {
+                    '[' => {
+                        depth += 1;
+                        if depth > 1 {
+                            group.push('[');
+                        }
+                    }
+                    ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            closed = true;
+                            break;
+                        }
+                        group.push(']');
+                    }
+                    c => group.push(c),
+                }
+                i += 1;
+            }
+            if !closed {
+                break;
+            }
+            out.push(group);
         }
-        None
+        out
     }
 }
 
