@@ -369,6 +369,11 @@ fn draw_settings(buf: &mut Buffer, area: Rect, app: &App) {
         if row == 0 {
             let label = format!("theme                ◂ {:^7} ▸", app.theme_kind.name());
             text::put(buf, x, y, &text::trunc(&label, width), style);
+        } else if let Some(setting) = app.settings_ui(row) {
+            let color = setting.get(t);
+            let label = format!("{:<18} {:<9}", setting.label(), color_name(color));
+            text::put(buf, x, y, &label, style);
+            text::put(buf, x + 28, y, "██", Style::new().fg(color));
         } else if let Some(setting) = app.settings_setting(row) {
             let color = setting.get(t);
             let label = format!("{:<18} {:<9}", setting.label(), color_name(color));

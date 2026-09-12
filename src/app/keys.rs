@@ -410,24 +410,10 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Left | KeyCode::Right if app.dialog == Some(Dialog::Settings) => {
             let delta = if key.code == KeyCode::Left { -1 } else { 1 };
-            if app.settings_sel == 0 {
-                app.cycle_theme(delta);
-            } else if let Some(setting) = app.settings_setting(app.settings_sel) {
-                app.cycle_wave_setting(setting, delta);
-            }
+            settings_change(app, delta);
         }
-        KeyCode::Char('r') if app.dialog == Some(Dialog::Settings) => {
-            if let Some(setting) = app.settings_setting(app.settings_sel) {
-                app.reset_wave_setting(setting);
-            }
-        }
-        KeyCode::Enter if app.dialog == Some(Dialog::Settings) => {
-            if app.settings_sel == 0 {
-                app.cycle_theme(1);
-            } else if let Some(setting) = app.settings_setting(app.settings_sel) {
-                app.cycle_wave_setting(setting, 1);
-            }
-        }
+        KeyCode::Char('r') if app.dialog == Some(Dialog::Settings) => settings_reset(app),
+        KeyCode::Enter if app.dialog == Some(Dialog::Settings) => settings_change(app, 1),
         KeyCode::Enter => match app.dialog {
             Some(Dialog::Goto) => app.apply_goto(),
             Some(Dialog::FindValue) => app.apply_find_value(),
@@ -601,6 +587,26 @@ fn ctx_key(app: &mut App, key: KeyEvent) -> bool {
         _ => {}
     }
     false
+}
+
+/// Change the selected settings row (theme, UI colour or waveform colour).
+fn settings_change(app: &mut App, delta: i64) {
+    if app.settings_sel == 0 {
+        app.cycle_theme(delta);
+    } else if let Some(setting) = app.settings_ui(app.settings_sel) {
+        app.cycle_ui_setting(setting, delta);
+    } else if let Some(setting) = app.settings_setting(app.settings_sel) {
+        app.cycle_wave_setting(setting, delta);
+    }
+}
+
+/// Reset the selected settings row to the active theme's value.
+fn settings_reset(app: &mut App) {
+    if let Some(setting) = app.settings_ui(app.settings_sel) {
+        app.reset_ui_setting(setting);
+    } else if let Some(setting) = app.settings_setting(app.settings_sel) {
+        app.reset_wave_setting(setting);
+    }
 }
 
 /// Keys of the time-base dropdown in the nWave shortcut bar.
@@ -845,9 +851,15 @@ mod tests {
         assert_eq!(app.dialog, Some(Dialog::Settings));
         handle_key(&mut app, key(KeyCode::Right)); // theme row: Dark -> Light
         assert_eq!(app.theme_kind, ThemeKind::Light);
+        handle_key(&mut app, key(KeyCode::Down)); // UI background row
+        handle_key(&mut app, key(KeyCode::Right));
+        assert_ne!(app.theme.bg, Theme::LIGHT.bg);
+        handle_key(&mut app, key(KeyCode::Char('r')));
+        assert_eq!(app.theme.bg, Theme::LIGHT.bg);
         handle_key(&mut app, key(KeyCode::Down)); // waveform background row
         handle_key(&mut app, key(KeyCode::Right));
         assert_ne!(app.theme.wave_bg, Theme::LIGHT.wave_bg);
+        assert_eq!(app.theme.bg, Theme::LIGHT.bg); // UI colour untouched
         handle_key(&mut app, key(KeyCode::Char('r')));
         assert_eq!(app.theme.wave_bg, Theme::LIGHT.wave_bg);
         handle_key(&mut app, key(KeyCode::Esc));

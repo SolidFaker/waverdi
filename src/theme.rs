@@ -184,7 +184,8 @@ impl Theme {
 /// Waveform colours that the settings dialog can customise.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WaveSetting {
-    Background,
+    /// The waveform pane has its own background, independent of the UI one.
+    BackgroundWave,
     High,
     Low,
     Unknown,
@@ -198,7 +199,7 @@ pub enum WaveSetting {
 
 impl WaveSetting {
     pub const ALL: [WaveSetting; 10] = [
-        WaveSetting::Background,
+        WaveSetting::BackgroundWave,
         WaveSetting::High,
         WaveSetting::Low,
         WaveSetting::Unknown,
@@ -212,7 +213,7 @@ impl WaveSetting {
 
     pub fn label(self) -> &'static str {
         match self {
-            WaveSetting::Background => "background",
+            WaveSetting::BackgroundWave => "background (wave)",
             WaveSetting::High => "high level",
             WaveSetting::Low => "low level",
             WaveSetting::Unknown => "unknown (x)",
@@ -227,7 +228,7 @@ impl WaveSetting {
 
     pub fn get(self, theme: &Theme) -> Color {
         match self {
-            WaveSetting::Background => theme.wave_bg,
+            WaveSetting::BackgroundWave => theme.wave_bg,
             WaveSetting::High => theme.high,
             WaveSetting::Low => theme.low,
             WaveSetting::Unknown => theme.xcol,
@@ -242,7 +243,7 @@ impl WaveSetting {
 
     pub fn set(self, theme: &mut Theme, color: Color) {
         match self {
-            WaveSetting::Background => theme.wave_bg = color,
+            WaveSetting::BackgroundWave => theme.wave_bg = color,
             WaveSetting::High => theme.high = color,
             WaveSetting::Low => theme.low = color,
             WaveSetting::Unknown => theme.xcol = color,
@@ -254,6 +255,40 @@ impl WaveSetting {
             WaveSetting::Ticks => theme.tick = color,
         }
     }
+}
+
+/// General UI colours (shared by the windows) the settings dialog can change.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UiSetting {
+    Background,
+}
+
+impl UiSetting {
+    pub const ALL: [UiSetting; 1] = [UiSetting::Background];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            UiSetting::Background => "background (ui)",
+        }
+    }
+
+    pub fn get(self, theme: &Theme) -> Color {
+        match self {
+            UiSetting::Background => theme.bg,
+        }
+    }
+
+    pub fn set(self, theme: &mut Theme, color: Color) {
+        match self {
+            UiSetting::Background => theme.bg = color,
+        }
+    }
+}
+
+/// Next palette colour from current, wrapping around.
+pub fn cycle_color(current: Color, delta: i64) -> Color {
+    let start = PALETTE.iter().position(|c| *c == current).unwrap_or(0) as i64;
+    PALETTE[(start + delta).rem_euclid(PALETTE.len() as i64) as usize]
 }
 
 /// Colours cycled through by the settings dialog.

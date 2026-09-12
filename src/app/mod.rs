@@ -19,7 +19,7 @@ pub use keys::handle_key;
 pub use mouse::handle_mouse;
 pub use nav::{Group, ListRow};
 
-use crate::theme::{Theme, ThemeKind, WaveSetting, PALETTE};
+use crate::theme::{Theme, ThemeKind, UiSetting, WaveSetting};
 use crate::ui::layout::{compute_layout, Layout, Splits};
 use crate::waveform::{Radix, Ticks, TimeBase, Waveform};
 use ratatui::layout::Rect;
@@ -439,10 +439,8 @@ impl App {
 
     /// Cycle one waveform colour through the built-in palette.
     pub fn cycle_wave_setting(&mut self, setting: WaveSetting, delta: i64) {
-        let current = setting.get(&self.theme);
-        let start = PALETTE.iter().position(|c| *c == current).unwrap_or(0) as i64;
-        let next = (start + delta).rem_euclid(PALETTE.len() as i64) as usize;
-        setting.set(&mut self.theme, PALETTE[next]);
+        let color = crate::theme::cycle_color(setting.get(&self.theme), delta);
+        setting.set(&mut self.theme, color);
     }
 
     /// Restore the waveform colour to the value of the active theme.
@@ -451,14 +449,34 @@ impl App {
         setting.set(&mut self.theme, setting.get(&base));
     }
 
-    /// Settings dialog rows: theme first, then the customisable waveform colours.
-    pub fn settings_len(&self) -> usize {
-        1 + WaveSetting::ALL.len()
+    /// Cycle a general UI colour through the built-in palette.
+    pub fn cycle_ui_setting(&mut self, setting: UiSetting, delta: i64) {
+        let color = crate::theme::cycle_color(setting.get(&self.theme), delta);
+        setting.set(&mut self.theme, color);
     }
 
-    pub fn settings_setting(&self, row: usize) -> Option<WaveSetting> {
+    /// Restore a general UI colour to the value of the active theme.
+    pub fn reset_ui_setting(&mut self, setting: UiSetting) {
+        let base = self.theme_kind.theme();
+        setting.set(&mut self.theme, setting.get(&base));
+    }
+
+    /// Settings dialog rows: theme, UI colours, then waveform colours.
+    pub fn settings_len(&self) -> usize {
+        1 + UiSetting::ALL.len() + WaveSetting::ALL.len()
+    }
+
+    /// UI colour shown on a settings row, if the row is a UI colour.
+    pub fn settings_ui(&self, row: usize) -> Option<UiSetting> {
         row.checked_sub(1)
-            .and_then(|i| WaveSetting::ALL.get(i).copied())
+            .filter(|index| *index < UiSetting::ALL.len())
+            .and_then(|index| UiSetting::ALL.get(index).copied())
+    }
+
+    /// Waveform colour shown on a settings row, if the row is one.
+    pub fn settings_setting(&self, row: usize) -> Option<WaveSetting> {
+        row.checked_sub(1 + UiSetting::ALL.len())
+            .and_then(|index| WaveSetting::ALL.get(index).copied())
     }
 
     /// Test helper: install a flat display list owned by the first group.
@@ -523,6 +541,12 @@ mod tests {
         assert_eq!(app.theme_kind, ThemeKind::Dark);
         app.cycle_theme(1);
         assert_eq!(app.theme_kind, ThemeKind::Light);
+        assert_eq!(app.theme.bg, Theme::LIGHT.bg);
+        // The UI background and the waveform background are separate settings.
+        app.cycle_ui_setting(crate::theme::UiSetting::Background, 1);
+        assert_ne!(app.theme.bg, Theme::LIGHT.bg);
+        assert_eq!(app.theme.wave_bg, Theme::LIGHT.wave_bg);
+        app.reset_ui_setting(crate::theme::UiSetting::Background);
         assert_eq!(app.theme.bg, Theme::LIGHT.bg);
         // A custom waveform colour is applied and can be reset.
         app.cycle_wave_setting(WaveSetting::High, 1);

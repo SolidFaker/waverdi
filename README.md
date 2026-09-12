@@ -201,11 +201,14 @@ override with `--gui` / `--no-gui`, or open the browser directly with `O`.
 
 `F2` (or **View ▸ Settings...**) opens the settings dialog:
 
-- **Theme** — `Dark`, `Light` or `Mixed`. Mixed keeps a dark waveform pane
-  with light chrome everywhere else.
-- **Waveform colours** — background, high/low level, unknown (x), high-Z (z),
-  bus value and text, cursor, analog and time ticks. `←`/`→` cycle a built-in
-  palette, `Enter` advances, `r` restores the theme default.
+- **Theme** — `Dark`, `Light` or `Mixed`. Mixed keeps the waveform pane dark
+  while every other window stays light; the waveform has its own background
+  setting, independent of the UI background.
+- **UI colours** — the background shared by the windows.
+- **Waveform colours** — its own background (`background (wave)`), high/low
+  level, unknown (x), high-Z (z), bus value and text, cursor, analog and time
+  ticks. `←`/`→` cycle a built-in palette, `Enter` advances, `r` restores the
+  theme default.
 
 Switching themes resets per-colour customisation; the choice lasts for the
 session.
