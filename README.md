@@ -138,10 +138,26 @@ converter is part of the test suite.
 waverdi waveform/counter.vcd                 # open a VCD dump
 waverdi waveform/demo.fst                    # open an FST dump
 waverdi wave.fsdb                            # open an FSDB dump (Verdi SDK build)
+waverdi -f rtl.f wave.fsdb                   # ... with an RTL filelist for the Source pane
 waverdi --list-signals waveform/complex.vcd  # print the hierarchy and exit
 waverdi --no-gui waveform/counter.vcd        # force the built-in TUI file browser
 waverdi --gui waveform/counter.vcd           # force the native file dialog
 ```
+
+### RTL sources
+
+The upper-right **Source** pane is fed from an RTL filelist:
+
+- `-f <filelist>` on the command line, or repeated for several lists;
+- **File ▸ Load Filelist...** at runtime.
+
+The filelist uses the VCS format (`-f`/`-F` nesting, `-v`, `-y`, `+incdir+`,
+`+define+`, `//` comments). When no filelist is given and an FSDB is opened,
+waverdi tries to recover the compiled source list from the Verdi KDB
+(`simv.daidir/debug_dump/src_files_verilog`) next to the dump — or from the
+KDB path recorded inside the FSDB — and falls back to scanning the dump
+directory for `.v`/`.sv` files. The instance's defining module (recorded by
+FSDB per scope) is shown next to the selected instance.
 
 The `waveform/` folder contains demos: `counter.vcd` (4-bit counter with
 enable/carry), `complex.vcd` (a small CPU/RAM/sensor design with 16 signals,

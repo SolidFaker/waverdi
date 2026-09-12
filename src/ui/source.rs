@@ -1,4 +1,4 @@
-﻿use crate::app::App;
+use crate::app::App;
 use crate::theme::Theme;
 use crate::ui::layout::Layout;
 use crate::ui::text;
@@ -45,11 +45,58 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
         };
         text::put(buf, inner.x, inner.y + 1, &label, Style::new().fg(t.path));
     }
-    text::put(
-        buf,
-        inner.x,
-        inner.y + 3,
-        "(source loading is not implemented yet)",
-        Style::new().fg(t.dim),
-    );
+
+    let mut row = inner.y + 3;
+    let width = inner.width as usize;
+    match &app.sources {
+        None => {
+            text::put(
+                buf,
+                inner.x,
+                row,
+                "no RTL sources: pass -f <filelist> or use File > Load Filelist...",
+                Style::new().fg(t.dim),
+            );
+        }
+        Some(set) => {
+            text::put(
+                buf,
+                inner.x,
+                row,
+                &text::trunc(
+                    &format!("{} source file(s)  —  {}", set.files.len(), set.origin),
+                    width,
+                ),
+                Style::new().fg(t.dim),
+            );
+            row += 1;
+            if !set.tops.is_empty() {
+                text::put(
+                    buf,
+                    inner.x,
+                    row,
+                    &text::trunc(&format!("top: {}", set.tops.join(", ")), width),
+                    Style::new().fg(t.scope),
+                );
+                row += 1;
+            }
+            for file in &set.files {
+                if row >= inner.bottom() {
+                    break;
+                }
+                let name = file
+                    .file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default();
+                text::put(
+                    buf,
+                    inner.x,
+                    row,
+                    &text::trunc(&name, width),
+                    Style::new().fg(t.text),
+                );
+                row += 1;
+            }
+        }
+    }
 }

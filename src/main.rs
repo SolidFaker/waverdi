@@ -2,6 +2,7 @@ mod app;
 mod dump;
 mod fst;
 mod picker;
+mod rtl;
 mod theme;
 mod ui;
 mod vcd;
@@ -26,6 +27,13 @@ use waveform::Waveform;
 struct Cli {
     #[arg(help = "VCD file to open")]
     file: Option<PathBuf>,
+    #[arg(
+        short = 'f',
+        long = "filelist",
+        value_name = "FILELIST",
+        help = "RTL filelist (VCS format)"
+    )]
+    filelists: Vec<PathBuf>,
     #[arg(short, long, help = "list signals and exit")]
     list_signals: bool,
     #[arg(long, help = "force the native GUI file dialog")]
@@ -94,6 +102,11 @@ fn main() {
     } else if cli.list_signals {
         eprintln!("waverdi: --list-signals requires a VCD file");
         std::process::exit(1);
+    }
+
+    // A filelist passed on the command line wins over dump auto-discovery.
+    for list in &cli.filelists {
+        app.load_filelist(&list.display().to_string());
     }
 
     if let Err(e) = run_tui(app) {

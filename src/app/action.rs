@@ -20,6 +20,7 @@ pub enum Action {
     Prev,
     Next,
     Radix,
+    LoadFilelist,
     Settings,
     Keys,
     About,
@@ -54,6 +55,10 @@ impl Action {
             Action::Prev => app.jump_transition(false),
             Action::Next => app.jump_transition(true),
             Action::Radix => app.cycle_radix(),
+            Action::LoadFilelist => {
+                app.open_dialog(Dialog::Filelist);
+                app.input.clear();
+            }
             Action::Settings => {
                 app.settings_sel = 0;
                 app.open_dialog(Dialog::Settings);

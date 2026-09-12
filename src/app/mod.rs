@@ -19,6 +19,7 @@ pub use keys::handle_key;
 pub use mouse::handle_mouse;
 pub use nav::{Group, ListRow};
 
+use crate::rtl::SourceSet;
 use crate::theme::{Theme, ThemeKind, UiSetting, WaveSetting};
 use crate::ui::layout::{compute_layout, Layout, Splits};
 use crate::waveform::{Radix, Ticks, TimeBase, Waveform};
@@ -158,6 +159,10 @@ pub struct App {
     pub theme_kind: ThemeKind,
     /// Selected row of the settings dialog (0 = theme, rest = waveform colours).
     pub settings_sel: usize,
+    /// RTL sources for the Source pane (filelist or discovered from the dump).
+    pub sources: Option<SourceSet>,
+    /// True once a filelist was given explicitly (disables auto-discovery).
+    pub sources_explicit: bool,
     pending_fit: bool,
 }
 
@@ -211,6 +216,8 @@ impl App {
             theme: Theme::DARK,
             theme_kind: ThemeKind::Dark,
             settings_sel: 0,
+            sources: None,
+            sources_explicit: false,
             pending_fit: false,
         };
         app.msg("waverdi 0.1 — press 'o' to open a waveform dump, F1/? for key bindings");
@@ -287,6 +294,33 @@ impl App {
         }
     }
 
+    /// Load the filelist typed into the `Dialog::Filelist` prompt.
+    pub fn apply_load_filelist(&mut self) {
+        let path = self.input.as_string();
+        self.dialog = None;
+        let path = path.trim().to_string();
+        if !path.is_empty() {
+            self.load_filelist(&path);
+        }
+    }
+
+    /// Load a VCS-style RTL filelist into the Source pane.
+    pub fn load_filelist(&mut self, path: &str) {
+        match SourceSet::from_filelist(Path::new(path)) {
+            Ok(set) if !set.is_empty() => {
+                self.msg(format!(
+                    "RTL sources: {} file(s) from {}",
+                    set.files.len(),
+                    set.origin
+                ));
+                self.sources = Some(set);
+                self.sources_explicit = true;
+            }
+            Ok(set) => self.msg(format!("filelist {}: no source files found", set.origin)),
+            Err(e) => self.msg(format!("filelist error: {e}")),
+        }
+    }
+
     /// Open the operating system's file dialog and load the selection.
     pub fn open_file_dialog(&mut self) {
         if self.use_gui {
@@ -352,6 +386,23 @@ impl App {
         self.time_menu = None;
         self.focus = Focus::Tree;
         self.pending_fit = true;
+
+        // FSDB dumps that sit next to the Verdi KDB can recover their source
+        // list automatically; an explicit filelist always wins.
+        if !self.sources_explicit {
+            self.sources = self
+                .path
+                .ends_with(".fsdb")
+                .then(|| SourceSet::discover_from_dump(Path::new(&self.path)))
+                .flatten();
+            if let Some(set) = &self.sources {
+                self.msg(format!(
+                    "RTL sources: {} file(s) from {}",
+                    set.files.len(),
+                    set.origin
+                ));
+            }
+        }
     }
 
     /// Open a dialog, resetting its body scroll.
@@ -531,6 +582,37 @@ mod tests {
         // After sync_layout the pending fit ran, so the full range is visible.
         let wf = app.wf.as_ref().unwrap();
         assert!((app.scale - wf.total_ticks() as f64 / app.cols() as f64).abs() < 1e-9);
+    }
+
+    #[test]
+    fn filelist_loading_and_fsdb_source_discovery() {
+        let dir = std::env::temp_dir().join(format!("waverdi_app_fl_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("simv.daidir/debug_dump")).unwrap();
+        let src = dir.join("top.sv");
+        std::fs::write(&src, "module top; endmodule\n").unwrap();
+        std::fs::write(
+            dir.join("simv.daidir/debug_dump/src_files_verilog"),
+            format!("{}\n", src.display()),
+        )
+        .unwrap();
+        let list = dir.join("files.f");
+        std::fs::write(&list, "top.sv\n").unwrap();
+
+        let mut app = App::new();
+        app.load_filelist(&list.display().to_string());
+        assert!(app.sources_explicit);
+        assert_eq!(app.sources.as_ref().unwrap().files, vec![src.clone()]);
+
+        // Loading an .fsdb without an explicit filelist discovers the KDB list.
+        let mut app = App::new();
+        let out = crate::vcd::parse_bytes(
+            b"$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n#0\n0!\n",
+        )
+        .unwrap();
+        app.apply_parsed(dir.join("counter.fsdb").display().to_string(), out);
+        let set = app.sources.as_ref().expect("discovered sources");
+        assert!(set.files.iter().any(|file| file.ends_with("top.sv")));
     }
 
     #[test]

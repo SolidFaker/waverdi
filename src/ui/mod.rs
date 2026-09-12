@@ -521,6 +521,7 @@ mod tests {
             crate::app::Dialog::SplitBus,
             crate::app::Dialog::CreateBus,
             crate::app::Dialog::GroupName,
+            crate::app::Dialog::Filelist,
             crate::app::Dialog::Settings,
             crate::app::Dialog::Keys,
             crate::app::Dialog::About,

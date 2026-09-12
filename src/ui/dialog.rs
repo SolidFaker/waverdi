@@ -14,6 +14,7 @@ const KEYS: &[&str] = &[
     "          O open browser   : goto time   g: ge / gg / G",
     "          s search signal   F1 / ? help   F2 settings",
     "          F2 settings: theme + waveform colours",
+    "          -f filelist / File>Load Filelist: RTL sources",
     "Search    v find value (hex/bin/oct/dec/ascii text)",
     "          n / N next / previous match (wraps around)",
     "View      z / Z / - / = zoom   f fit   c center",
@@ -208,6 +209,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
         Dialog::SplitBus => "Split Bus",
         Dialog::CreateBus => "Create Bus",
         Dialog::GroupName => "Rename Group",
+        Dialog::Filelist => "Load Filelist",
         Dialog::Settings => "Settings",
         Dialog::Keys => "Key Bindings",
         Dialog::About => "About",
@@ -293,6 +295,16 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
                     inner_w,
                     app,
                     ("Name: ", "Enter: rename group    Esc: cancel"),
+                );
+            }
+            Dialog::Filelist => {
+                cursor = draw_input(
+                    buf,
+                    area,
+                    inner_x,
+                    inner_w,
+                    app,
+                    ("Filelist: ", "Enter: load RTL sources    Esc: cancel"),
                 );
             }
             Dialog::Settings => draw_settings(buf, area, app),

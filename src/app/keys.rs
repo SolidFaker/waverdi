@@ -418,6 +418,7 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
             Some(Dialog::Goto) => app.apply_goto(),
             Some(Dialog::FindValue) => app.apply_find_value(),
             Some(Dialog::SplitBus) => app.apply_split_bus(),
+            Some(Dialog::Filelist) => app.apply_load_filelist(),
             Some(Dialog::GroupName) => app.apply_rename_group(),
             Some(Dialog::Find) => {
                 let matches = app.find_matches();
