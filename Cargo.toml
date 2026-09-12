@@ -2,6 +2,7 @@
 name = "waverdi"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
 description = "Verdi-style terminal RTL waveform viewer (VCD/FST/FSDB)"
 
 [dependencies]

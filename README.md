@@ -41,12 +41,72 @@ terminal.
 
 ## Build
 
-```sh
-cargo build --release
+Rust (stable, 1.87+) is the only hard requirement; a C++ toolchain is needed
+only for the optional FSDB support on Linux. Clone the repository and build
+with `cargo build --release`; the binary lands in `target/release/`.
+
+### Windows
+
+1. Install Rust from <https://rustup.rs> (the default MSVC toolchain also
+   needs the *Desktop development with C++* workload from the Visual Studio
+   Build Tools).
+2. Build:
+
+```powershell
+git clone https://github.com/SolidFaker/waverdi.git
+cd waverdi
+cargo build --release          # target\release\waverdi.exe
 ```
 
-On a headless/SSH-only server, build without the optional `rfd` GUI
-dependency and the viewer always uses its built-in terminal file browser:
+### Linux
+
+1. Install a compiler toolchain, git and Rust:
+
+```sh
+# Debian / Ubuntu
+sudo apt update && sudo apt install build-essential git
+# Fedora / RHEL
+sudo dnf install gcc-c++ make git
+# Arch
+sudo pacman -S base-devel git rust
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+2. Build:
+
+```sh
+git clone https://github.com/SolidFaker/waverdi.git
+cd waverdi
+cargo build --release          # target/release/waverdi
+```
+
+Direct `.fsdb` reading additionally needs a Verdi installation, see below.
+
+### macOS
+
+1. Install the Xcode command line tools and Rust:
+
+```sh
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+2. Build:
+
+```sh
+git clone https://github.com/SolidFaker/waverdi.git
+cd waverdi
+cargo build --release          # target/release/waverdi
+```
+
+The FSDB Reader SDK is Linux-only, so on macOS `.fsdb` files print the
+`fsdb2vcd` conversion hint.
+
+### Headless / SSH-only
+
+The viewer always falls back to its built-in terminal file browser, but the
+optional `rfd` GUI dependency can be dropped entirely:
 
 ```sh
 cargo build --release --no-default-features
