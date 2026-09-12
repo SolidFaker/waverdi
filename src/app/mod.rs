@@ -68,6 +68,7 @@ pub(crate) enum DragMode {
     DialogScroll,
     SplitTree,
     SplitList,
+    SplitTop,
 }
 
 #[derive(Clone, Copy)]

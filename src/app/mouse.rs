@@ -270,10 +270,13 @@ fn mouse_down(
     }
 
     if btn == MouseButton::Left {
-        if let Some((mode, start_pct)) =
-            grip_at(&l, col, row).map(|mode| (mode, split_pct(app, mode)))
-        {
-            app.dragging = Some(new_drag(mode, col, start_pct));
+        if let Some(mode) = grip_at(&l, col, row) {
+            let (start, pct) = match mode {
+                // Vertical split: remember the grabbed row instead of a column.
+                DragMode::SplitTop => (row, app.splits.top_pct as f64),
+                _ => (col, split_pct(app, mode)),
+            };
+            app.dragging = Some(new_drag(mode, start, pct));
             return false;
         }
     }
@@ -484,6 +487,9 @@ fn split_pct(app: &App, mode: DragMode) -> f64 {
 
 /// Return the pane border under the pointer, if any.
 fn grip_at(l: &Layout, col: u16, row: u16) -> Option<DragMode> {
+    if row == l.split_grip_y() && col >= l.area.x && col < l.area.right() {
+        return Some(DragMode::SplitTop);
+    }
     if col == l.tree_grip_x() && row >= l.tree.y && row < l.tree.bottom() {
         return Some(DragMode::SplitTree);
     }
@@ -589,6 +595,12 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
             let pct = drag.start_pct + delta * 100.0 / l.area.width.max(1) as f64;
             app.splits.list_pct =
                 pct.clamp(Splits::MIN_PCT as f64, app.splits.max_list_pct() as f64) as u16;
+        }
+        DragMode::SplitTop => {
+            let delta = row as f64 - drag.start_x as f64;
+            let pct = drag.start_pct + delta * 100.0 / l.area.height.max(1) as f64;
+            app.splits.top_pct =
+                pct.clamp(Splits::MIN_TOP_PCT as f64, Splits::MAX_TOP_PCT as f64) as u16;
         }
     }
 }
@@ -743,6 +755,19 @@ mod tests {
         assert_eq!(app.focus, Focus::Wave);
         assert!(app.cursor > 0);
         assert!(app.dragging.is_some());
+    }
+
+    #[test]
+    fn drag_top_divider_resizes_the_areas() {
+        let mut app = app_with(VCD);
+        let l = app.layout();
+        let before = l.nwave.y;
+        let y = l.split_grip_y();
+        crate::app::handle_mouse(&mut app, click(50, y));
+        crate::app::handle_mouse(&mut app, drag(50, y + 5));
+        app.dragging = None;
+        assert!(app.splits.top_pct > Splits::default().top_pct);
+        assert!(app.layout().nwave.y > before);
     }
 
     #[test]

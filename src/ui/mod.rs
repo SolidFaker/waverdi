@@ -1,4 +1,4 @@
-pub mod context;
+﻿pub mod context;
 pub mod dialog;
 pub mod layout;
 pub mod list;
@@ -26,14 +26,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         let buf = frame.buffer_mut();
         buf.set_style(area, Style::new().bg(BG));
         menubar::draw_bar(buf, &l, app);
-        // Frames first: instance (top-left), source (top-right), nWave (bottom).
+        // Frames first: nWave (bottom), source and instance (top, shared row).
+        let tree_focused = app.focus == crate::app::Focus::Tree;
+        let nwave_focused = matches!(app.focus, crate::app::Focus::List | crate::app::Focus::Wave);
+        wave::draw_nwave_frame(buf, &l, false);
         source::draw_frame(buf, &l);
-        tree::draw_frame(buf, &l, app.focus == crate::app::Focus::Tree);
-        wave::draw_nwave_frame(
-            buf,
-            &l,
-            matches!(app.focus, crate::app::Focus::List | crate::app::Focus::Wave),
-        );
+        tree::draw_frame(buf, &l, tree_focused);
+        if nwave_focused {
+            // The shared row between the top row and nWave follows the focus.
+            wave::draw_nwave_frame(buf, &l, true);
+        }
         toolbar::draw(buf, &l, app);
         draw_divider(buf, &l, app);
         match &app.wf {
@@ -386,6 +388,27 @@ mod tests {
             pane_color(&mut app, l.tree.x, l.tree.y),
             crate::theme::ACCENT
         );
+    }
+
+    #[test]
+    fn ruler_labels_are_clipped_at_the_divider() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.set_display(vec![0]);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.time_base = crate::waveform::TimeBase::Ps;
+        app.t0 = 1000.0;
+        app.scale = 1.0;
+        let screen = render_app(&mut app, 100, 30);
+        let l = app.layout();
+        let lines: Vec<Vec<char>> = screen.lines().map(|line| line.chars().collect()).collect();
+        let ruler = &lines[l.ruler.y as usize];
+        // The divider column stays intact; the label is clipped with `<`.
+        assert_eq!(ruler[l.list_grip_x() as usize], '│');
+        assert_eq!(ruler[l.wave.x as usize], '<');
+        let text: String = ruler.iter().collect();
+        assert!(text.contains("<000ps"), "{screen}");
     }
 
     #[test]

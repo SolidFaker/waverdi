@@ -144,11 +144,22 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
             let x = l.wave.x as i64 + col;
             if x >= 0 && (x as usize) < l.wave.right() as usize {
                 text::set_cell(buf, x as u16, l.ruler.y + 1, RULER_TICK, tick_color, BG);
-                let label = waveform::format_time_base(t, &ts, app.time_base);
-                let lw = label.chars().count() as i64;
-                let lx = x - lw / 2;
-                // Never spill over the pane edge (divider / cursor label).
-                if lx >= l.wave.x as i64 && lx >= last_label_end + 2 && lx + lw <= cursor_x as i64 {
+                let mut label = waveform::format_time_base(t, &ts, app.time_base);
+                let mut lw = label.chars().count() as i64;
+                let mut lx = x - lw / 2;
+                // A label that would run under the list/wave divider is clipped
+                // and marked with `<` instead of being dropped.
+                let mut clipped = false;
+                if lx < l.wave.x as i64 {
+                    let skip = (l.wave.x as i64 - lx).min(lw) as usize;
+                    let rest: String = label.chars().skip(skip).collect();
+                    label = format!("<{rest}");
+                    lw = label.chars().count() as i64;
+                    lx = l.wave.x as i64;
+                    clipped = true;
+                }
+                let gap = if clipped { 1 } else { 2 };
+                if lw > 1 && lx >= last_label_end + gap && lx + lw <= cursor_x as i64 {
                     text::put(
                         buf,
                         lx as u16,

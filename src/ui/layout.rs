@@ -5,6 +5,8 @@ use ratatui::layout::{Constraint, Layout as TuiLayout, Rect};
 pub struct Splits {
     pub tree_pct: u16,
     pub list_pct: u16,
+    /// Height percentage of the instance/source row above nWave.
+    pub top_pct: u16,
 }
 
 impl Default for Splits {
@@ -12,6 +14,7 @@ impl Default for Splits {
         Self {
             tree_pct: 24,
             list_pct: 31,
+            top_pct: 60,
         }
     }
 }
@@ -21,6 +24,9 @@ impl Splits {
     pub const MAX_PCT: u16 = 60;
     /// Minimum width left for the waveform pane, in percent.
     pub const MIN_WAVE_PCT: u16 = 10;
+    /// Bounds of the horizontal split between the top row and nWave.
+    pub const MIN_TOP_PCT: u16 = 20;
+    pub const MAX_TOP_PCT: u16 = 80;
 
     pub fn max_tree_pct(&self) -> u16 {
         (100 - self.list_pct - Self::MIN_WAVE_PCT).min(Self::MAX_PCT)
@@ -72,6 +78,11 @@ impl Layout {
     pub fn list_grip_x(&self) -> u16 {
         self.wave.x.saturating_sub(1)
     }
+
+    /// Row between the instance/source row and nWave, draggable.
+    pub fn split_grip_y(&self) -> u16 {
+        self.nwave.y
+    }
 }
 
 const MENUBAR_H: u16 = 1;
@@ -79,8 +90,6 @@ const TOOLBAR_H: u16 = 1;
 const MESSAGE_H: u16 = 3;
 const STATUS_H: u16 = 1;
 const RULER_H: u16 = 2;
-/// Percentage of the main area taken by the instance/source row.
-const TOP_PCT: u32 = 60;
 
 pub fn compute_layout(area: Rect, splits: Splits) -> Layout {
     let rows = TuiLayout::vertical([
@@ -92,21 +101,22 @@ pub fn compute_layout(area: Rect, splits: Splits) -> Layout {
     .split(area);
     let (menu, main, msg, status) = (rows[0], rows[1], rows[2], rows[3]);
 
-    // Top 60%: Instance | Source. Bottom 40%: nWave (list + waveforms).
-    let top_h = ((main.height as u32 * TOP_PCT / 100) as u16)
-        .clamp(3, main.height.saturating_sub(4).max(3))
+    // Top row: Instance | Source. Bottom: nWave (list + waveforms). The panes
+    // share the border row between the two rows.
+    let top_rows = ((main.height as u32 * splits.top_pct as u32 / 100) as u16)
+        .clamp(4, main.height.saturating_sub(5).max(4))
         .min(main.height);
     let top = Rect {
         x: main.x,
         y: main.y,
         width: main.width,
-        height: top_h,
+        height: top_rows.saturating_sub(1),
     };
     let bottom = Rect {
         x: main.x,
-        y: main.y.saturating_add(top_h),
+        y: main.y.saturating_add(top.height),
         width: main.width,
-        height: main.height.saturating_sub(top_h),
+        height: main.height.saturating_sub(top.height),
     };
 
     let top_cols =
@@ -224,6 +234,9 @@ mod tests {
         assert_eq!(l.source.right(), l.area.right());
         assert!(l.nwave.y > l.tree.y);
         assert!(l.nwave.bottom() <= l.msg.y);
+        // The top row ends directly above nWave; the grip is the frame line.
+        assert_eq!(l.tree.bottom(), l.nwave.y);
+        assert_eq!(l.split_grip_y(), l.nwave.y);
         assert_eq!(l.rows.y, l.wave.y + 2);
         assert_eq!(l.rows.bottom(), l.hscroll.y);
         assert_eq!(l.rows.width as usize, l.cols);
@@ -241,6 +254,7 @@ mod tests {
             Splits {
                 tree_pct: 40,
                 list_pct: 30,
+                ..Splits::default()
             },
         );
         let narrow = compute_layout(
@@ -248,10 +262,32 @@ mod tests {
             Splits {
                 tree_pct: 12,
                 list_pct: 30,
+                ..Splits::default()
             },
         );
         assert!(wide.tree.width > narrow.tree.width);
         assert_eq!(wide.list.width, narrow.list.width);
+    }
+
+    #[test]
+    fn top_split_changes_the_row_heights() {
+        let tall = compute_layout(
+            Rect::new(0, 0, 100, 40),
+            Splits {
+                top_pct: 70,
+                ..Splits::default()
+            },
+        );
+        let short = compute_layout(
+            Rect::new(0, 0, 100, 40),
+            Splits {
+                top_pct: 30,
+                ..Splits::default()
+            },
+        );
+        assert!(tall.tree.height > short.tree.height);
+        assert!(tall.nwave.height < short.nwave.height);
+        assert_eq!(tall.tree.bottom(), tall.nwave.y);
     }
 
     #[test]
