@@ -4,6 +4,9 @@
 
 [English](README.md) | **简体中文**
 
+[![CI](https://github.com/SolidFaker/waverdi/actions/workflows/ci.yml/badge.svg)](https://github.com/SolidFaker/waverdi/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/SolidFaker/waverdi)](https://github.com/SolidFaker/waverdi/releases)
+
 waverdi 把日常 RTL 调试所需的层次、源码与波形集中在同一个 TUI 中，专为 SSH
 会话和无图形环境设计：打开 VCD / FST / FSDB，浏览信号、RTL 源码与波形，全程
 不用离开终端。

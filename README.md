@@ -4,6 +4,9 @@ A Verdi-style RTL waveform viewer for the terminal, written in Rust.
 
 **English** | [简体中文](README.zh-CN.md)
 
+[![CI](https://github.com/SolidFaker/waverdi/actions/workflows/ci.yml/badge.svg)](https://github.com/SolidFaker/waverdi/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/SolidFaker/waverdi)](https://github.com/SolidFaker/waverdi/releases)
+
 waverdi brings the daily RTL debug loop — hierarchy, source and waveforms —
 into a single TUI. It is built for SSH sessions and headless machines: open a
 VCD, FST or FSDB dump and browse signals, RTL source and waveform traces without
