@@ -12,7 +12,8 @@ const VLINE: &str = "│";
 const LEVEL_HIGH: &str = "▔";
 const LEVEL_LOW: &str = "▁";
 /// Rising / falling edges. Used when a cell contains a single transition;
-/// dense activity collapses back to a vertical bar.
+/// dense activity collapses to a vertical bar, so a narrow pulse is never
+/// dropped even at very coarse zoom levels.
 const EDGE_RISE: &str = "/";
 const EDGE_FALL: &str = "\\";
 /// Bus traces and their change markers.
@@ -206,9 +207,17 @@ fn draw_signal_row(
         } else {
             "…"
         };
-        text::put(buf, l.rows.x + 1, y, label, Style::new().fg(app.theme.dim));
+        text::put(
+            buf,
+            l.rows.x + 1,
+            y,
+            label,
+            Style::new().fg(app.theme.dim).bg(row_bg),
+        );
         return;
     }
+    // Highlighted signals paint their waveform row like the Signal List name.
+    let row_bg = app.highlight_of(idx).unwrap_or(row_bg);
     if let Some(&(min, max)) = app.analog.get(&idx) {
         draw_analog_row(buf, l, app, sig, row_bg, y, (min, max));
         return;
@@ -227,7 +236,6 @@ fn draw_bit_row(buf: &mut Buffer, l: &Layout, app: &App, sig: &Signal, row_bg: C
     let t = &app.theme;
     let (t0, scale) = (app.t0, app.scale);
     let changes = &sig.changes;
-    let n = changes.len();
     // A change belongs to the column its tick rounds to, so an edge symbol
     // sits exactly under the cursor line at the same time.
     let cut = t0 - 0.5 * scale;
@@ -236,11 +244,14 @@ fn draw_bit_row(buf: &mut Buffer, l: &Layout, app: &App, sig: &Signal, row_bg: C
 
     for col in 0..l.cols {
         let col_end = t0 + (col as f64 + 0.5) * scale;
-        let mut transitions = 0u32;
-        while i < n && (changes[i].t as f64) < col_end {
-            value = Some(&changes[i].v);
-            transitions += 1;
-            i += 1;
+        // Only the last change per column matters for the drawn level; a
+        // binary search keeps zoomed-out views independent of the change
+        // count (view-dependent sparse sampling).
+        let before = i;
+        i = changes.partition_point(|c| (c.t as f64) < col_end);
+        let transitions = (i - before) as u32;
+        if transitions > 0 {
+            value = Some(&changes[i - 1].v);
         }
         let (symbol, fg) = match transitions {
             0 => match summarize(value) {
@@ -254,6 +265,9 @@ fn draw_bit_row(buf: &mut Buffer, l: &Layout, app: &App, sig: &Signal, row_bg: C
                 Some(0) => (EDGE_FALL, t.low),
                 _ => (VLINE, rail_color(t, value)),
             },
+            // Several transitions in one cell (a pulse or dense activity):
+            // collapse them to a bar like `____|____`, never dropping the
+            // event from the view.
             _ => (VLINE, rail_color(t, value)),
         };
         text::set_cell(buf, l.rows.x + col as u16, y, symbol, fg, row_bg);
@@ -281,11 +295,11 @@ fn draw_bus_row(
 
     for col in 0..l.cols {
         let col_end = t0 + (col as f64 + 0.5) * scale;
-        let mut transition = false;
-        while i < n && (changes[i].t as f64) < col_end {
-            i += 1;
-            transition = true;
-        }
+        // Binary search instead of walking every change: zoomed-out views
+        // stay fast no matter how many changes the signal has.
+        let before = i;
+        i = changes.partition_point(|c| (c.t as f64) < col_end);
+        let transition = i > before;
         let symbol = if transition { BUS_CROSS } else { BUS_LINE };
         text::set_cell(buf, l.rows.x + col as u16, y, symbol, t.bus, row_bg);
     }
@@ -321,8 +335,19 @@ fn draw_bus_row(
                 &value,
                 Style::new().fg(t.bus_text).bg(row_bg),
             );
+            j += 1;
+        } else {
+            // Segment too narrow for a label: jump to the segment that is
+            // active at the first column where a label could fit. This skips
+            // long runs of narrow changes without ever skipping a wide
+            // segment that follows them.
+            let target_col = (c0 + (len + 2).max(1)).clamp(1, width);
+            let target_t = t0 + target_col as f64 * scale;
+            let active = changes
+                .partition_point(|c| (c.t as f64) <= target_t)
+                .saturating_sub(1);
+            j = active.max(j + 1);
         }
-        j += 1;
     }
 }
 
@@ -343,7 +368,6 @@ fn draw_analog_row(
     };
     let (t0, scale) = (app.t0, app.scale);
     let changes = &sig.changes;
-    let n = changes.len();
     let cut = t0 - 0.5 * scale;
     let mut i = changes.partition_point(|c| (c.t as f64) < cut);
     let mut value = if i > 0 {
@@ -357,9 +381,31 @@ fn draw_analog_row(
 
     for col in 0..l.cols {
         let col_end = t0 + (col as f64 + 0.5) * scale;
-        while i < n && (changes[i].t as f64) < col_end {
-            value = numeric_value(&changes[i].v).unwrap_or(value);
-            i += 1;
+        let before = i;
+        i = changes.partition_point(|c| (c.t as f64) < col_end);
+        if i > before {
+            // Keep spikes visible: if the column contains a value far from
+            // the previous level (e.g. a 1ps pulse) draw that extreme. The
+            // scan is capped so dense columns stay cheap.
+            let count = i - before;
+            let stride = (count / 64).max(1);
+            let mut extreme = value;
+            let mut best = 0.0f64;
+            let mut index = before;
+            while index < i {
+                let candidate = numeric_value(&changes[index].v).unwrap_or(value);
+                let distance = (candidate - value).abs();
+                if distance > best {
+                    best = distance;
+                    extreme = candidate;
+                }
+                index += stride;
+            }
+            let last = numeric_value(&changes[i - 1].v).unwrap_or(value);
+            if (last - value).abs() >= best {
+                extreme = last;
+            }
+            value = extreme;
         }
         let level = if max == min {
             0.5

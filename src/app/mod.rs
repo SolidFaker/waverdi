@@ -1,4 +1,5 @@
 mod action;
+mod add;
 mod browser;
 mod context;
 mod dialog;
@@ -11,6 +12,7 @@ mod value;
 mod view;
 
 pub use action::Action;
+pub use add::{AddFocus, AddSignals};
 pub(crate) use browser::is_waveform;
 pub use browser::{EntryKind, FileBrowser};
 pub use context::{BusBuilder, ContextMenu, CtxEntry, CtxTarget};
@@ -68,6 +70,8 @@ pub struct MenuState {
 pub(crate) enum DragMode {
     Cursor,
     Range,
+    /// Ctrl+drag in the waveform pane: pan the visible time window.
+    Pan,
     Reorder,
     GroupReorder,
     VScroll,
@@ -77,6 +81,8 @@ pub(crate) enum DragMode {
     SourceHScroll,
     ListHScroll,
     DialogScroll,
+    /// Dragging the scrollbar of one "Add Signals" picker pane.
+    AddScroll(AddFocus),
     SplitTree,
     SplitList,
     SplitTop,
@@ -169,6 +175,11 @@ pub struct App {
     pub splits: Splits,
     /// Per-signal analog rendering range; presence means "show as analog".
     pub analog: HashMap<usize, (f64, f64)>,
+    /// Per-signal highlight background chosen from the context menu.
+    pub highlight: HashMap<usize, ratatui::style::Color>,
+    /// Name-based highlights applied from the Source pane (they colour the
+    /// signal name wherever it appears in the code).
+    pub source_highlight: HashMap<String, ratatui::style::Color>,
     /// Last "Find Value" query, searched with `n` / `N`.
     pub value_query: Option<String>,
     pub ctx_menu: Option<ContextMenu>,
@@ -200,6 +211,8 @@ pub struct App {
     pub sources_explicit: bool,
     /// Background waveform load in flight (progress shown in the status line).
     pub load: Option<LoadJob>,
+    /// Open "Add Signals" picker state.
+    pub add_signals: Option<AddSignals>,
     pending_fit: bool,
 }
 
@@ -246,6 +259,8 @@ impl App {
             last_click: None,
             splits: Splits::default(),
             analog: HashMap::new(),
+            highlight: HashMap::new(),
+            source_highlight: HashMap::new(),
             value_query: None,
             ctx_menu: None,
             pending_split: None,
@@ -263,9 +278,10 @@ impl App {
             last_source_trace: None,
             sources_explicit: false,
             load: None,
+            add_signals: None,
             pending_fit: false,
         };
-        app.msg("waverdi 0.1 — press 'o' to open a waveform dump, F1/? for key bindings");
+        app.msg("waverdi 0.1 鈥攑ress 'o' to open a waveform dump, F1/? for key bindings");
         app
     }
 
@@ -398,7 +414,7 @@ impl App {
             String::new()
         };
         Some(format!(
-            "loading {}: {items}{changes} — Esc cancels",
+            "loading {}: {items}{changes} 鈥擡sc cancels",
             job.path
         ))
     }
@@ -611,6 +627,8 @@ impl App {
         self.range = None;
         self.radix.clear();
         self.analog.clear();
+        self.highlight.clear();
+        self.source_highlight.clear();
         self.ctx_menu = None;
         self.pending_split = None;
         self.renaming_group = None;
@@ -623,6 +641,7 @@ impl App {
         self.time_menu = None;
         self.focus = Focus::Tree;
         self.pending_fit = true;
+        self.add_signals = None;
         // A filelist may already be loaded (CLI `-f`, or a previous file).
         self.merge_generate_scopes();
     }
@@ -1497,6 +1516,167 @@ impl App {
         self.radix = radix;
     }
 
+    /// Apply (or clear) a highlight background for a signal. The colour is
+    /// shared with the Source pane signal names and the waveform row.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_highlight(&mut self, index: usize, color: Option<ratatui::style::Color>) {
+        self.set_highlight_many(&[index], color);
+    }
+
+    /// Apply (or clear) a highlight for several signals at once (a Signal
+    /// List multi-selection).
+    pub fn set_highlight_many(&mut self, targets: &[usize], color: Option<ratatui::style::Color>) {
+        if targets.is_empty() {
+            return;
+        }
+        for &index in targets {
+            match color {
+                Some(color) => {
+                    self.highlight.insert(index, color);
+                    // Keep the Source pane (which works by name) in sync even
+                    // when the signal was highlighted from the list.
+                    if let Some(base) = self.signal_base_name(index) {
+                        self.source_highlight.insert(base, color);
+                    }
+                }
+                None => {
+                    self.highlight.remove(&index);
+                    // Drop the name entry too, unless another highlighted
+                    // signal still carries that name.
+                    if let Some(base) = self.signal_base_name(index) {
+                        let still = self
+                            .highlight
+                            .keys()
+                            .any(|&other| self.signal_base_name(other).as_deref() == Some(&base));
+                        if !still {
+                            self.source_highlight.remove(&base);
+                        }
+                    }
+                }
+            }
+        }
+        let what = if targets.len() == 1 {
+            self.signal_name(targets[0])
+        } else {
+            format!("{} signals", targets.len())
+        };
+        if color.is_some() {
+            self.msg(format!("highlighted {what}"));
+        } else {
+            self.msg(format!("highlight cleared for {what}"));
+        }
+    }
+
+    fn signal_base_name(&self, index: usize) -> Option<String> {
+        let signal = self.wf.as_ref()?.signals.get(index)?;
+        Some(
+            signal
+                .name
+                .split('[')
+                .next()
+                .unwrap_or(&signal.name)
+                .to_string(),
+        )
+    }
+
+    /// Highlight (or clear) the signal under the Source cursor. The colour
+    /// belongs to the signal: it also paints the Signal List name and the
+    /// waveform row (now or when the signal is added later) and only clears
+    /// when the user picks "None". A multi-name selection highlights all of
+    /// the selected signals at once.
+    pub fn highlight_source_word(&mut self, color: Option<ratatui::style::Color>) {
+        let (signals, missing, _) = self.source_selection_signals();
+        if !signals.is_empty() || !missing.is_empty() {
+            self.apply_source_highlight(&signals, &missing, color);
+            return;
+        }
+        let Some((word, chain, module, indices, port_line)) =
+            self.source_view.as_ref().and_then(|view| {
+                let (start, end) = view.word_span_at_cursor()?;
+                let word = view.word_at_cursor()?;
+                Some((
+                    word,
+                    view.qualifier_chain(view.line, start),
+                    view.module_at_line(view.line).to_string(),
+                    view.indices_after(view.line, end),
+                    view.dotted_port(view.line, start).then_some(view.line),
+                ))
+            })
+        else {
+            self.msg("source: no signal name under the cursor");
+            return;
+        };
+        // Resolve to the dumped signal so the row/list highlight follows it.
+        let index = self
+            .resolve_source_reference(&module, &chain, &word, &indices, port_line)
+            .into_iter()
+            .collect::<Vec<_>>();
+        self.apply_source_highlight(&index, &[], color);
+    }
+
+    /// Apply/clear a highlight for a set of resolved signals plus names that
+    /// could not be resolved to a dump signal.
+    fn apply_source_highlight(
+        &mut self,
+        signals: &[usize],
+        missing: &[String],
+        color: Option<ratatui::style::Color>,
+    ) {
+        let mut names: Vec<String> = missing.to_vec();
+        if let Some(wf) = &self.wf {
+            for &index in signals {
+                if let Some(signal) = wf.signals.get(index) {
+                    let base = signal.name.split('[').next().unwrap_or(&signal.name);
+                    if !names.iter().any(|name| name == base) {
+                        names.push(base.to_string());
+                    }
+                }
+            }
+        }
+        let count = signals.len().max(names.len()).max(1);
+        match color {
+            Some(color) => {
+                for &index in signals {
+                    self.highlight.insert(index, color);
+                }
+                for name in names {
+                    self.source_highlight.insert(name, color);
+                }
+                self.msg(format!("highlighted {count} signal(s)"));
+            }
+            None => {
+                for &index in signals {
+                    self.highlight.remove(&index);
+                }
+                for name in names {
+                    self.source_highlight.remove(&name);
+                }
+                self.msg(format!("highlight cleared for {count} signal(s)"));
+            }
+        }
+    }
+
+    pub fn highlight_of(&self, index: usize) -> Option<ratatui::style::Color> {
+        self.highlight.get(&index).copied()
+    }
+
+    /// Highlight colours by signal base name, used by the Source pane.
+    pub fn highlighted_source_names(&self) -> HashMap<&str, ratatui::style::Color> {
+        let mut out: HashMap<&str, ratatui::style::Color> = HashMap::new();
+        if let Some(wf) = &self.wf {
+            for (index, color) in &self.highlight {
+                if let Some(signal) = wf.signals.get(*index) {
+                    let base = signal.name.split('[').next().unwrap_or(&signal.name);
+                    out.insert(base, *color);
+                }
+            }
+        }
+        for (name, color) in &self.source_highlight {
+            out.insert(name.as_str(), *color);
+        }
+        out
+    }
+
     /// Label of the current time base for the shortcut bar.
     pub fn time_base_label(&self) -> String {
         match self.time_base {
@@ -1794,6 +1974,7 @@ mod tests {
             name: "adr".to_string(),
             bits: 18,
             var_type: "wire".to_string(),
+            dir: "input".to_string(),
             scope: vec!["tb".to_string(), "dprx_if".to_string()],
             kind: SigKind::Bits,
             changes: vec![Change {
@@ -1824,16 +2005,16 @@ mod tests {
         app.sync_source();
         assert_eq!(app.selected_scope_steps(), vec!["tb", "u_dut"]);
 
-        // The whole interface port resolves to the connected scope's aggregate.
+        // The whole interface port resolves to an aggregate named after the
+        // port, sharing the connected instance's members.
         let whole = app
             .resolve_source_signal("dut", &[], "HOST_IF", &[])
             .expect("interface port aggregate");
-        assert_eq!(
-            app.wf.as_ref().unwrap().signals[whole].var_type,
-            "aggregate"
-        );
-        assert!(app.wf.as_ref().unwrap().signals[whole].scope == vec!["tb".to_string()]);
-        assert_eq!(app.wf.as_ref().unwrap().signals[whole].name, "dprx_if");
+        let aggregate = &app.wf.as_ref().unwrap().signals[whole];
+        assert_eq!(aggregate.var_type, "aggregate");
+        assert_eq!(aggregate.name, "HOST_IF");
+        assert_eq!(aggregate.scope, vec!["tb".to_string(), "u_dut".to_string()]);
+        assert_eq!(aggregate.members, vec![0]);
         // Members resolve to the signals of the connected instance.
         let member = app
             .resolve_source_signal("dut", &["HOST_IF".to_string()], "adr", &[])
@@ -1843,6 +2024,27 @@ mod tests {
         assert!(app.wf.as_ref().unwrap().tree.nodes[host_if]
             .signals
             .is_empty());
+    }
+
+    #[test]
+    fn highlight_applies_to_the_whole_list_selection() {
+        let mut app = app_with(
+            "$timescale 1ns $end\n\
+             $var wire 1 ! clk $end\n\
+             $var wire 4 \" data $end\n\
+             $enddefinitions $end\n#0\n0!\nb0000 \"\n",
+        );
+        app.set_display(vec![0, 1]);
+        app.selection = vec![0, 1];
+        let color = ratatui::style::Color::Rgb(0x1f, 0x4d, 0x1f);
+        app.open_context_menu(CtxTarget::Signal(0), 0, 0);
+        app.run_ctx_item(super::context::CtxItem::Highlight(Some(color)));
+        assert_eq!(app.highlight_of(0), Some(color));
+        assert_eq!(app.highlight_of(1), Some(color));
+        app.open_context_menu(CtxTarget::Signal(1), 0, 0);
+        app.run_ctx_item(super::context::CtxItem::Highlight(None));
+        assert_eq!(app.highlight_of(0), None);
+        assert_eq!(app.highlight_of(1), None);
     }
 
     #[test]
@@ -1879,6 +2081,142 @@ mod tests {
         app.add_signal(aggregate);
         let children = app.wf.as_ref().unwrap().children(aggregate);
         assert_eq!(children.len(), 2);
+    }
+
+    #[test]
+    fn add_signals_picker_filters_navigates_and_adds() {
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $scope module sub $end\n\
+            $var wire 1 ! clk $end\n\
+            $var reg 4 \" data $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\nb0 \"\n";
+        let mut app = app_with(vcd);
+        app.open_add_signals();
+        assert_eq!(app.dialog, Some(Dialog::AddSignals));
+        let (root, tb, sub) = {
+            let wf = app.wf.as_ref().unwrap();
+            let root = wf.tree.root;
+            let tb = wf.tree.nodes[root].children[0];
+            let sub = wf.tree.nodes[tb].children[0];
+            (root, tb, sub)
+        };
+        assert_eq!(app.add_signals.as_ref().unwrap().scope, root);
+        app.add_navigate(tb);
+        assert_eq!(app.add_signals.as_ref().unwrap().scope, tb);
+        let instances = app.add_instances();
+        assert_eq!(instances, vec![sub]);
+        app.add_navigate(sub);
+
+        // Both signals listed; the filters narrow them down.
+        assert_eq!(app.add_signal_list().len(), 2);
+        app.add_cycle_filter(); // -> input
+        assert!(app.add_signal_list().is_empty());
+        for _ in 0..3 {
+            app.add_cycle_filter();
+        }
+        assert_eq!(app.add_signals.as_ref().unwrap().filter.label(), "net");
+        assert_eq!(app.add_signal_list().len(), 1);
+        app.add_cycle_filter(); // -> reg
+        assert_eq!(app.add_signal_list().len(), 1);
+        app.add_cycle_filter(); // -> all
+        assert_eq!(app.add_signal_list().len(), 2);
+
+        // Choose both and add them with OK.
+        app.add_signals.as_mut().unwrap().signal_sel = 0;
+        app.add_toggle_signal();
+        app.add_signals.as_mut().unwrap().signal_sel = 1;
+        app.add_toggle_signal();
+        assert_eq!(app.add_signals.as_ref().unwrap().selected.len(), 2);
+        app.apply_add_signals(true);
+        assert_eq!(app.dialog, None);
+        assert!(app.add_signals.is_none());
+        assert_eq!(app.display.len(), 2);
+    }
+
+    #[test]
+    fn add_picker_lists_struct_and_interface_values_as_signals() {
+        use crate::waveform::{Change, ScopeTree, SigKind, SigState, TimeScale, Value, Waveform};
+        let leaf = |name: &str, scope: &[&str]| crate::waveform::Signal {
+            name: name.to_string(),
+            bits: 1,
+            var_type: "wire".to_string(),
+            dir: String::new(),
+            scope: scope.iter().map(|part| part.to_string()).collect(),
+            kind: SigKind::Bits,
+            changes: vec![Change {
+                t: 0,
+                v: Value::compact(vec![0]),
+            }],
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            parent: None,
+            members: Vec::new(),
+            state: SigState::Ready,
+        };
+        let mut wf = Waveform {
+            ts: TimeScale::default(),
+            start: 0,
+            end: 10,
+            signals: vec![
+                leaf("adr", &["tb", "clk_fetch"]),
+                leaf("mst", &["tb", "rom_if"]),
+            ],
+            tree: ScopeTree::new(),
+        };
+        let root = wf.tree.root;
+        let tb = wf.tree.add_scope(root, "tb".to_string(), "m".to_string());
+        let fetch = wf
+            .tree
+            .add_scope(tb, "clk_fetch".to_string(), String::new());
+        wf.tree.nodes[fetch].group = true;
+        wf.tree.nodes[fetch].signals = vec![0];
+        let rom = wf
+            .tree
+            .add_scope(tb, "rom_if".to_string(), "rom_t".to_string());
+        wf.tree.nodes[rom].signals = vec![1];
+        // Interface port recorded as a reference to the connected instance.
+        wf.tree
+            .add_scope(tb, "ROM_IF".to_string(), "tb/.rom_if/.mst".to_string());
+        wf.build_scope_aggregates();
+
+        let mut app = App::new();
+        app.wf = Some(wf);
+        app.sync_layout(Rect::new(0, 0, 100, 40));
+        app.open_add_signals();
+        // Root level: tb is a real instance.
+        assert_eq!(app.add_instances().len(), 1);
+        app.add_navigate(tb);
+        // The struct and the interface value move to the signals pane; the
+        // plain module instance stays above.
+        let names: Vec<String> = app
+            .add_instances()
+            .iter()
+            .map(|&node| app.wf.as_ref().unwrap().tree.nodes[node].name.clone())
+            .collect();
+        assert_eq!(names, vec!["rom_if".to_string()]);
+        let list = app.add_signal_list();
+        let signal_names: Vec<String> = list
+            .iter()
+            .map(|&index| app.wf.as_ref().unwrap().signals[index].name.clone())
+            .collect();
+        assert!(
+            signal_names.contains(&"clk_fetch".to_string()),
+            "{signal_names:?}"
+        );
+        assert!(
+            signal_names.contains(&"ROM_IF".to_string()),
+            "{signal_names:?}"
+        );
+        // The aggregate can be selected and added to the waveform.
+        let aggregate = *list
+            .iter()
+            .find(|&&index| app.wf.as_ref().unwrap().signals[index].name == "clk_fetch")
+            .unwrap();
+        app.add_toggle_signal_at(aggregate);
+        app.apply_add_signals(true);
+        assert!(app.display.contains(&aggregate));
     }
 
     #[test]

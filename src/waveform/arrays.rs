@@ -82,6 +82,7 @@ impl super::Waveform {
                     name,
                     bits,
                     var_type: "array".to_string(),
+                    dir: String::new(),
                     scope: scope.to_vec(),
                     kind: SigKind::Str,
                     changes,
@@ -115,11 +116,11 @@ impl super::Waveform {
                     .push(index);
             }
         }
-        let mut paths: Vec<Vec<String>> = Vec::new();
+        let mut paths: Vec<(usize, Vec<String>)> = Vec::new();
         let mut stack = vec![(self.tree.root, Vec::<String>::new())];
         while let Some((id, path)) = stack.pop() {
             if !path.is_empty() {
-                paths.push(path.clone());
+                paths.push((id, path.clone()));
             }
             for &child in &self.tree.nodes[id].children {
                 let mut child_path = path.clone();
@@ -127,8 +128,8 @@ impl super::Waveform {
                 stack.push((child, child_path));
             }
         }
-        for path in paths {
-            let Some(members) = by_scope.get(&path) else {
+        for (_, path) in &paths {
+            let Some(members) = by_scope.get(path) else {
                 continue;
             };
             if members.is_empty() {
@@ -143,25 +144,88 @@ impl super::Waveform {
             {
                 continue;
             }
-            let bits = members
-                .iter()
-                .map(|&m| self.signals[m].bits.max(1))
-                .sum::<u32>()
-                .max(1);
-            self.signals.push(Signal {
-                name,
-                bits,
-                var_type: "aggregate".to_string(),
-                scope,
-                kind: SigKind::Str,
-                changes: Vec::new(),
-                min: f64::INFINITY,
-                max: f64::NEG_INFINITY,
-                parent: None,
-                members: members.clone(),
-                state: SigState::Lazy,
-            });
+            self.push_aggregate(name, scope, members.clone());
         }
+        // Interface ports are recorded as references to the connected
+        // instance (`module = tb/.if_inst/.mst`, no signals). Give each one
+        // an aggregate named after the *port* (`ROM_IF`) that shares the
+        // members of the connected scope, instead of showing the interface's
+        // own instance/modport name.
+        for (node, path) in &paths {
+            if !self.tree.nodes[*node].signals.is_empty() {
+                continue;
+            }
+            let module = self.tree.nodes[*node].module.clone();
+            if !module.contains("/.") {
+                continue;
+            }
+            let mut target = Vec::new();
+            let mut cursor = self.tree.root;
+            for step in module.split("/.") {
+                let Some(child) = self.tree.nodes[cursor]
+                    .children
+                    .iter()
+                    .copied()
+                    .find(|&child| self.tree.nodes[child].name == step)
+                else {
+                    break;
+                };
+                cursor = child;
+                target.push(step.to_string());
+            }
+            if target.is_empty() || target == *path {
+                continue;
+            }
+            let members = match self.scope_aggregate(&target) {
+                Some(aggregate) => self.signals[aggregate].members.clone(),
+                None => self
+                    .signals
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, signal)| {
+                        signal.parent.is_none()
+                            && signal.var_type != "aggregate"
+                            && signal.scope == target
+                    })
+                    .map(|(index, _)| index)
+                    .collect(),
+            };
+            if members.is_empty() {
+                continue;
+            }
+            let name = path.last().cloned().unwrap_or_default();
+            let scope = path[..path.len() - 1].to_vec();
+            if self
+                .signals
+                .iter()
+                .any(|s| s.var_type == "aggregate" && s.name == name && s.scope == scope)
+            {
+                continue;
+            }
+            self.push_aggregate(name, scope, members);
+        }
+    }
+
+    fn push_aggregate(&mut self, name: String, scope: Vec<String>, members: Vec<usize>) {
+        let bits = members
+            .iter()
+            .map(|&member| self.signals[member].bits.max(1))
+            .sum::<u32>()
+            .max(1);
+        self.signals.push(Signal {
+            name,
+            bits,
+            var_type: "aggregate".to_string(),
+            dir: String::new(),
+            scope,
+            kind: SigKind::Str,
+            changes: Vec::new(),
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            parent: None,
+            members,
+            state: SigState::Lazy,
+        });
     }
 
     /// Aggregate signal synthesized for a dump scope path, if any.
@@ -461,6 +525,7 @@ mod tests {
             name: name.to_string(),
             bits: bits.len() as u32,
             var_type: "wire".to_string(),
+            dir: String::new(),
             scope: vec!["tb".to_string()],
             kind: SigKind::Bits,
             changes: vec![Change {
@@ -517,6 +582,41 @@ mod tests {
             Some(Value::Str(text)) => assert!(text.starts_with('{'), "{text}"),
             other => panic!("expected brace value, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn interface_port_aggregates_use_the_port_name() {
+        let mut wf = waveform(vec![leaf("adr", &[0, 1], 0)]);
+        let tb = wf
+            .tree
+            .add_scope(wf.tree.root, "tb".to_string(), String::new());
+        let rom = wf
+            .tree
+            .add_scope(tb, "rom_if".to_string(), "prt_riscv_rom_if".to_string());
+        wf.tree.nodes[rom].signals = vec![0];
+        wf.signals[0].scope = vec!["tb".to_string(), "rom_if".to_string()];
+        let cpu = wf
+            .tree
+            .add_scope(tb, "u_cpu".to_string(), "prt_riscv_cpu".to_string());
+        // Interface port recorded as a reference to the connected instance.
+        wf.tree
+            .add_scope(cpu, "ROM_IF".to_string(), "tb/.rom_if/.mst".to_string());
+        wf.build_scope_aggregates();
+
+        let port = wf
+            .scope_aggregate(&["tb".to_string(), "u_cpu".to_string(), "ROM_IF".to_string()])
+            .expect("port aggregate");
+        assert_eq!(wf.signals[port].name, "ROM_IF");
+        assert_eq!(
+            wf.signals[port].scope,
+            vec!["tb".to_string(), "u_cpu".to_string()]
+        );
+        assert_eq!(wf.signals[port].members, vec![0]);
+        assert!(wf.recompute_aggregate(port));
+        // The connected instance keeps its own aggregate as well.
+        assert!(wf
+            .scope_aggregate(&["tb".to_string(), "rom_if".to_string()])
+            .is_some());
     }
 
     #[test]

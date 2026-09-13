@@ -249,6 +249,7 @@ impl Parser {
                         name,
                         bits: size,
                         var_type,
+                        dir: String::new(),
                         scope: self.cur_scope.clone(),
                         kind,
                         changes: Vec::new(),

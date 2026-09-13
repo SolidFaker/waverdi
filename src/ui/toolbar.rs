@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Clear, Widget as _};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
-    Open,
+    Add,
     ZoomIn,
     ZoomOut,
     Fit,
@@ -24,7 +24,7 @@ pub enum Tool {
 impl Tool {
     fn action(self) -> Action {
         match self {
-            Tool::Open => Action::Open,
+            Tool::Add => Action::AddSignals,
             Tool::ZoomIn => Action::ZoomIn,
             Tool::ZoomOut => Action::ZoomOut,
             Tool::Fit => Action::Fit,
@@ -39,7 +39,7 @@ impl Tool {
 }
 
 const TOOLS: [(&str, Tool); 10] = [
-    ("Open", Tool::Open),
+    ("Add", Tool::Add),
     ("Zoom In", Tool::ZoomIn),
     ("Zoom Out", Tool::ZoomOut),
     ("Fit", Tool::Fit),
@@ -173,7 +173,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
     let enabled = app.wf.is_some();
     for (tool, rect) in toolbar_rects(l.toolbar, app) {
         let label = tool_label(tool, app);
-        let style = if !enabled && tool != Tool::Open {
+        let style = if !enabled && tool != Tool::Add {
             Style::new().fg(t.dim)
         } else {
             Style::new().fg(t.accent).add_modifier(Modifier::BOLD)

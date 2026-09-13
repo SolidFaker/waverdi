@@ -11,7 +11,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::Path;
 
 type ScopeCb = extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char, u32);
-type VarCb = extern "C" fn(*mut c_void, *const c_char, i64, u32, u32, u32, u32, u32);
+type VarCb = extern "C" fn(*mut c_void, *const c_char, i64, u32, u32, u32, u32, u32, u32);
 type UpscopeCb = extern "C" fn(*mut c_void);
 type GroupBeginCb = extern "C" fn(*mut c_void, *const c_char, u32);
 
@@ -51,6 +51,8 @@ struct VarMeta {
     width: u32,
     var_type: u32,
     bytes_per_bit: u32,
+    /// `fsdbVarDirection`: 1 input, 2 output, 3 inout, else implicit.
+    direction: u32,
     tree_node: usize,
 }
 
@@ -344,6 +346,7 @@ fn assemble(
             name: var.name.clone(),
             bits: var.width,
             var_type: var_type_name(var.var_type),
+            dir: direction_name(var.direction),
             scope: var.scope.clone(),
             kind,
             changes,
@@ -469,21 +472,37 @@ fn read_changes(
     changes
 }
 
-/// Keep at most `cap` evenly spaced changes, preserving the first and last.
-fn decimate(mut changes: Vec<Change>, cap: usize) -> Vec<Change> {
-    let step = changes.len().div_ceil(cap);
+/// Keep at most `cap` changes, preserving the first and last and any
+/// isolated pulse (a change whose neighbours have the same value), so narrow
+/// glitches survive even in heavily decimated signals.
+fn decimate(changes: Vec<Change>, cap: usize) -> Vec<Change> {
+    let n = changes.len();
+    let step = n.div_ceil(cap);
     if step <= 1 {
         return changes;
     }
-    let last = changes.pop();
-    let mut kept = Vec::with_capacity(cap + 1);
-    for (i, change) in changes.into_iter().enumerate() {
-        if i % step == 0 {
-            kept.push(change);
+    let mut keep = vec![false; n];
+    let mut index = 0usize;
+    while index < n {
+        keep[index] = true;
+        index += step;
+    }
+    keep[n - 1] = true;
+    for index in 1..n.saturating_sub(1) {
+        if changes[index].v != changes[index - 1].v
+            && changes[index].v != changes[index + 1].v
+            && changes[index - 1].v == changes[index + 1].v
+        {
+            keep[index - 1] = true;
+            keep[index] = true;
+            keep[index + 1] = true;
         }
     }
-    if let Some(last) = last {
-        kept.push(last);
+    let mut kept = Vec::with_capacity(cap + cap / 4 + 1);
+    for (index, change) in changes.into_iter().enumerate() {
+        if keep[index] {
+            kept.push(change);
+        }
     }
     kept
 }
@@ -559,6 +578,19 @@ fn parse_timescale(
     }
     warnings.push("unknown FSDB timescale, assuming 1ns".to_string());
     TimeScale::DEFAULT
+}
+
+/// `fsdbVarDirection` -> RTL port direction, empty for implicit variables.
+fn direction_name(direction: u32) -> String {
+    match direction {
+        1 => "input",
+        2 => "output",
+        3 => "inout",
+        4 => "buffer",
+        5 => "linkage",
+        _ => "",
+    }
+    .to_string()
 }
 
 fn var_type_name(var_type: u32) -> String {
@@ -647,6 +679,7 @@ extern "C" fn on_group_begin(user: *mut c_void, name: *const c_char, _field_coun
     }
     let parent = collector.scope_nodes.last().copied().unwrap_or(tree.root);
     let id = tree.add_scope(parent, name.clone(), String::new());
+    tree.nodes[id].group = true;
     collector.scope_names.push(name);
     collector.scope_nodes.push(id);
     collector.current_node = id;
@@ -661,6 +694,7 @@ extern "C" fn on_var(
     _dtidcode: u32,
     var_type: u32,
     bytes_per_bit: u32,
+    direction: u32,
 ) {
     let collector = unsafe { &mut *(user as *mut Collector) };
     let name = unsafe { CStr::from_ptr(name) }
@@ -674,6 +708,7 @@ extern "C" fn on_var(
         width,
         var_type,
         bytes_per_bit,
+        direction,
         tree_node: collector.current_node,
     });
 }
@@ -702,6 +737,27 @@ mod tests {
         assert_eq!(kept.len(), 11);
         assert_eq!(kept.first().unwrap().t, 0);
         assert_eq!(kept.last().unwrap().t, 999);
+    }
+
+    #[test]
+    #[cfg(fsdb_sdk)]
+    fn decimation_keeps_isolated_pulses() {
+        let mut changes: Vec<Change> = (0..10_000)
+            .map(|i| Change {
+                t: i,
+                v: Value::Real(0.0),
+            })
+            .collect();
+        changes[5_000] = Change {
+            t: 5_000,
+            v: Value::Real(1.0),
+        };
+        let kept = decimate(changes, 100);
+        assert!(
+            kept.iter()
+                .any(|change| change.t == 5_000 && change.v.as_real() == Some(1.0)),
+            "pulse was decimated away"
+        );
     }
 
     #[test]

@@ -4,6 +4,9 @@ pub struct ScopeNode {
     /// Defining module/definition name of the instance (FSDB records it per
     /// scope; empty for VCD/FST and for old dumps that do not store it).
     pub module: String,
+    /// True for SV struct/union (VHDL record) groups: their fields are dumped
+    /// as a scope, but they are values, not instances.
+    pub group: bool,
     pub children: Vec<usize>,
     pub signals: Vec<usize>,
 }
@@ -24,6 +27,7 @@ impl ScopeTree {
             nodes: vec![ScopeNode {
                 name: "design".to_string(),
                 module: String::new(),
+                group: false,
                 children: vec![],
                 signals: vec![],
             }],
@@ -47,6 +51,7 @@ impl ScopeTree {
         self.nodes.push(ScopeNode {
             name: name.clone(),
             module,
+            group: false,
             children: vec![],
             signals: vec![],
         });
@@ -79,6 +84,26 @@ impl ScopeTree {
             .get(id)
             .map(|node| node.module.as_str())
             .unwrap_or("")
+    }
+
+    /// Scope path from the root down to `id` (root's name excluded).
+    pub fn path_of(&self, id: usize) -> Vec<String> {
+        fn rec(tree: &ScopeTree, id: usize, target: usize, path: &mut Vec<String>) -> bool {
+            if id == target {
+                return true;
+            }
+            for &child in &tree.nodes[id].children {
+                path.push(tree.nodes[child].name.clone());
+                if rec(tree, child, target, path) {
+                    return true;
+                }
+                path.pop();
+            }
+            false
+        }
+        let mut path = Vec::new();
+        let _ = rec(self, self.root, id, &mut path);
+        path
     }
 }
 

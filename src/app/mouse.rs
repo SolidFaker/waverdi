@@ -21,7 +21,8 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
     if let Some(dialog) = app.dialog {
         // While a dialog owns the focus, mouse input goes to it only.
         let l = app.layout();
-        if m.kind == MouseEventKind::Down(MouseButton::Left)
+        if dialog != Dialog::AddSignals
+            && m.kind == MouseEventKind::Down(MouseButton::Left)
             && pt_in(
                 crate::ui::dialog::close_button(l.area, app, dialog),
                 col,
@@ -44,6 +45,8 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
                 MouseEventKind::Down(MouseButton::Left) => browser_click(app, col, row),
                 _ => {}
             }
+        } else if dialog == Dialog::AddSignals {
+            add_signals_mouse(app, m);
         } else {
             dialog_mouse(app, dialog, m);
         }
@@ -157,6 +160,85 @@ fn browser_wheel(app: &mut App, delta: i64) {
 }
 
 /// Mouse events forwarded to a focused dialog: scrollbar drag and the wheel.
+fn add_signals_mouse(app: &mut App, m: MouseEvent) {
+    match m.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let rows = if m.kind == MouseEventKind::ScrollUp {
+                -(WHEEL_STEP as i64)
+            } else {
+                WHEEL_STEP as i64
+            };
+            if let Some(pane) = crate::ui::add::pane_at(app.last_area, m.column, m.row) {
+                app.add_scroll_rows(pane, rows);
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some(hit) = crate::ui::add::hit(app.last_area, app, m.column, m.row) else {
+                return;
+            };
+            match hit {
+                crate::ui::add::AddHit::Tree(node, arrow) => {
+                    let position = app.add_tree_rows().iter().position(|(id, _)| *id == node);
+                    if let Some(add) = app.add_signals.as_mut() {
+                        add.focus = crate::app::AddFocus::Tree;
+                        if let Some(position) = position {
+                            add.tree_sel = position;
+                        }
+                        if arrow && !add.expanded.remove(&node) {
+                            add.expanded.insert(node);
+                        }
+                    }
+                    if !arrow {
+                        app.add_navigate(node);
+                    }
+                }
+                crate::ui::add::AddHit::Instance(index) => {
+                    let node = app.add_instances().get(index).copied();
+                    if let Some(add) = app.add_signals.as_mut() {
+                        add.focus = crate::app::AddFocus::Instances;
+                        add.instance_sel = index;
+                    }
+                    if let Some(node) = node {
+                        app.add_navigate(node);
+                        if let Some(add) = app.add_signals.as_mut() {
+                            add.instance_sel = index;
+                        }
+                    }
+                }
+                crate::ui::add::AddHit::Signal(signal) => {
+                    let position = app
+                        .add_signal_list()
+                        .iter()
+                        .position(|&index| index == signal);
+                    if let Some(add) = app.add_signals.as_mut() {
+                        add.focus = crate::app::AddFocus::Signals;
+                        if let Some(position) = position {
+                            add.signal_sel = position;
+                        }
+                    }
+                    app.add_toggle_signal_at(signal);
+                }
+                crate::ui::add::AddHit::Scrollbar(pane) => {
+                    app.dragging = Some(new_drag(DragMode::AddScroll(pane), m.column, 0.0));
+                    app.add_scroll_to_row(pane, m.row);
+                }
+                crate::ui::add::AddHit::Filter => app.add_cycle_filter(),
+                crate::ui::add::AddHit::Apply => app.apply_add_signals(false),
+                crate::ui::add::AddHit::Ok => app.apply_add_signals(true),
+                crate::ui::add::AddHit::Cancel => app.close_add_signals(),
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(drag) = app.dragging {
+                if let DragMode::AddScroll(pane) = drag.mode {
+                    app.add_scroll_to_row(pane, m.row);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
     if let Some(area) = crate::ui::dialog::scroll_area(app.layout().area, app, dialog) {
         match m.kind {
@@ -529,6 +611,16 @@ fn mouse_down(
     }
 
     if pt_in(l.ruler, col, row) {
+        if btn == MouseButton::Left && ctrl {
+            app.focus = Focus::Wave;
+            app.dragging = Some(Drag {
+                mode: DragMode::Pan,
+                start_x: col,
+                start_pct: app.t0,
+                row: 0,
+            });
+            return false;
+        }
         app.cursor = app.tick_at_x(col);
         app.dragging = Some(new_drag(DragMode::Cursor, col, 0.0));
         app.focus = Focus::Wave;
@@ -549,14 +641,22 @@ fn mouse_down(
             .into_iter()
             .nth(app.row_scroll + row_in_wave)
             .filter(|_| row_in_wave < app.rows_h());
-        if list_row.is_some() && btn == MouseButton::Left && (shift || ctrl) {
+        // Ctrl+drag pans the time window; multi-selection stays a Signal List
+        // gesture.
+        if btn == MouseButton::Left && ctrl {
+            app.focus = Focus::Wave;
+            app.dragging = Some(Drag {
+                mode: DragMode::Pan,
+                start_x: col,
+                start_pct: app.t0,
+                row: 0,
+            });
+            return false;
+        }
+        if list_row.is_some() && btn == MouseButton::Left && shift {
             let index = app.row_scroll + row_in_wave;
             app.focus = Focus::Wave;
-            if shift {
-                app.toggle_row_selection(index);
-            } else {
-                app.select_range_to(index);
-            }
+            app.toggle_row_selection(index);
             return false;
         }
         app.cursor = app.tick_at_x(col);
@@ -703,6 +803,13 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
             app.range = Some((anchor.min(t), anchor.max(t)));
             app.cursor = t;
         }
+        DragMode::Pan => {
+            // Drag the time window with the pointer: moving right shows
+            // earlier time, moving left shows later time.
+            let dx = col as i64 - drag.start_x as i64;
+            app.t0 = drag.start_pct - dx as f64 * app.scale;
+            app.clamp_view();
+        }
         DragMode::Reorder => {
             let rows = app.list_rows();
             if rows.is_empty() || drag.row >= app.display.len() {
@@ -847,6 +954,7 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
                 pct.clamp(Splits::MIN_HIER_PCT as f64, Splits::MAX_HIER_PCT as f64) as u16;
         }
         DragMode::DialogScroll => {}
+        DragMode::AddScroll(_) => {}
         DragMode::HScroll => pan_to_col(app, &l, col),
         DragMode::SplitTree => {
             let delta = col as f64 - drag.start_x as f64;
@@ -1180,6 +1288,46 @@ mod tests {
         assert_eq!(app.focus, Focus::Wave);
         assert!(app.cursor > 0);
         assert!(app.dragging.is_some());
+    }
+
+    #[test]
+    fn ctrl_drag_in_the_waveform_pans_the_window() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        let mid = app.wf.as_ref().unwrap().total_ticks() / 2;
+        app.cursor = mid;
+        app.zoom_in();
+        app.zoom_in();
+        let l = app.layout();
+        let x = l.rows.x + 30;
+        let y = l.rows.y + 1;
+        crate::app::handle_mouse(&mut app, click_with(x, y, KeyModifiers::CONTROL));
+        assert!(app.dragging.is_some());
+        let before = app.t0;
+        crate::app::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: x + 5,
+                row: y,
+                modifiers: KeyModifiers::CONTROL,
+            },
+        );
+        assert!(
+            app.t0 < before,
+            "pan did not move the window: {before} -> {}",
+            app.t0
+        );
+        crate::app::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: x + 5,
+                row: y,
+                modifiers: KeyModifiers::CONTROL,
+            },
+        );
+        assert!(app.dragging.is_none());
     }
 
     #[test]

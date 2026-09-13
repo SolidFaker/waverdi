@@ -64,6 +64,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.open_tui_browser();
             false
         }
+        KeyCode::Char('A') => {
+            app.open_add_signals();
+            false
+        }
         KeyCode::F(2) => {
             app.settings_sel = 0;
             app.open_dialog(Dialog::Settings);
@@ -461,6 +465,10 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         bus_builder_key(app, key);
         return false;
     }
+    if app.dialog == Some(Dialog::AddSignals) {
+        add_signals_key(app, key);
+        return false;
+    }
     match key.code {
         KeyCode::Esc => {
             app.dialog = None;
@@ -534,6 +542,79 @@ enum BrowserCmd {
 }
 
 /// Keys of the "Create Bus" ordering window.
+fn add_signals_key(app: &mut App, key: KeyEvent) {
+    let focus = app
+        .add_signals
+        .as_ref()
+        .map(|add| add.focus)
+        .unwrap_or(crate::app::AddFocus::Tree);
+    match key.code {
+        KeyCode::Esc => app.close_add_signals(),
+        KeyCode::Tab => {
+            if let Some(add) = app.add_signals.as_mut() {
+                add.focus = add.focus.next();
+            }
+        }
+        KeyCode::BackTab => {
+            if let Some(add) = app.add_signals.as_mut() {
+                add.focus = match add.focus {
+                    crate::app::AddFocus::Tree => crate::app::AddFocus::Signals,
+                    crate::app::AddFocus::Instances => crate::app::AddFocus::Tree,
+                    crate::app::AddFocus::Signals => crate::app::AddFocus::Instances,
+                };
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => app.add_move(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.add_move(1),
+        KeyCode::Home => app.add_move(-1000),
+        KeyCode::End => app.add_move(1000),
+        KeyCode::Right if focus == crate::app::AddFocus::Tree => app.add_toggle_expand(),
+        KeyCode::Left if focus == crate::app::AddFocus::Tree => app.add_toggle_expand(),
+        KeyCode::Right => {
+            if let Some(add) = app.add_signals.as_mut() {
+                add.focus = add.focus.next();
+            }
+        }
+        KeyCode::Left => {
+            if let Some(add) = app.add_signals.as_mut() {
+                add.focus = match add.focus {
+                    crate::app::AddFocus::Tree => crate::app::AddFocus::Signals,
+                    crate::app::AddFocus::Instances => crate::app::AddFocus::Tree,
+                    crate::app::AddFocus::Signals => crate::app::AddFocus::Instances,
+                };
+            }
+        }
+        KeyCode::Char(' ') if focus == crate::app::AddFocus::Tree => {
+            let node = app
+                .add_tree_rows()
+                .get(
+                    app.add_signals
+                        .as_ref()
+                        .map(|add| add.tree_sel)
+                        .unwrap_or(0),
+                )
+                .map(|&(node, _)| node);
+            if let Some(node) = node {
+                app.add_navigate(node);
+            }
+        }
+        KeyCode::Char(' ') if focus == crate::app::AddFocus::Signals => app.add_toggle_signal(),
+        KeyCode::Enter if focus == crate::app::AddFocus::Instances => {
+            let picked = app
+                .add_signals
+                .as_ref()
+                .and_then(|add| app.add_instances().get(add.instance_sel).copied());
+            if let Some(node) = picked {
+                app.add_navigate(node);
+            }
+        }
+        KeyCode::Enter => app.apply_add_signals(true),
+        KeyCode::Char('a') => app.apply_add_signals(false),
+        KeyCode::Char('f') => app.add_cycle_filter(),
+        _ => {}
+    }
+}
+
 fn bus_builder_key(app: &mut App, key: KeyEvent) {
     let reorder = key.modifiers.contains(KeyModifiers::SHIFT)
         || key.modifiers.contains(KeyModifiers::CONTROL);

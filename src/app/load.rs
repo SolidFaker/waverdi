@@ -51,6 +51,7 @@ pub struct LoadJob {
     pub rx: Receiver<LoadEvent>,
     requests: Option<Sender<LoadRequest>>,
     cancel: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
     pub progress: LoadProgress,
     pub finished: bool,
 }
@@ -68,7 +69,7 @@ impl LoadJob {
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&cancel);
         let path_owned = path.to_string();
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let cancelled = || flag.load(Ordering::Relaxed);
 
             #[cfg(fsdb_sdk)]
@@ -140,6 +141,7 @@ impl LoadJob {
             rx,
             requests: Some(req_tx),
             cancel,
+            worker: Some(worker),
             progress: LoadProgress {
                 stage: Stage::Waveform,
                 done: 0,
@@ -186,6 +188,11 @@ impl Drop for LoadJob {
         self.cancel();
         if let Some(tx) = &self.requests {
             let _ = tx.send(LoadRequest::Shutdown);
+        }
+        // Wait for the worker to leave FFR before the process exits: the
+        // library's teardown stalls while a reader thread is still inside it.
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }

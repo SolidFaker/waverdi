@@ -537,47 +537,47 @@ impl RtlDb {
 
     /// Walk one body and add the labeled generate scopes it declares.
     fn merge_generate_items(&self, wf: &mut Waveform, node: usize, env: &ParamEnv, items: &[Body]) {
+        let mut unnamed = 0usize;
         for item in items {
             match item {
                 Body::For(gen) => {
-                    if gen.label.is_some() {
-                        for value in gen_values(gen, env) {
-                            let name = block_dump_name(gen.label.as_deref(), None, Some(value));
-                            let Some(child) = ensure_tree_child(wf, node, &name) else {
-                                continue;
-                            };
-                            let mut env = env.clone();
-                            env.insert(gen.var.clone(), value);
-                            self.merge_generate_items(wf, child, &env, &gen.items);
-                        }
-                    } else if let Some(value) = gen_values(gen, env).into_iter().next() {
-                        // Unlabeled loops carry no scope of their own; look
-                        // for named blocks inside.
+                    let number = if gen.label.is_none() {
+                        Some(unnamed_ordinal(&mut unnamed))
+                    } else {
+                        None
+                    };
+                    for value in gen_values(gen, env) {
+                        let name = block_dump_name(gen.label.as_deref(), number, Some(value));
+                        let Some(child) = ensure_tree_child(wf, node, &name) else {
+                            continue;
+                        };
                         let mut env = env.clone();
                         env.insert(gen.var.clone(), value);
-                        self.merge_generate_items(wf, node, &env, &gen.items);
+                        self.merge_generate_items(wf, child, &env, &gen.items);
                     }
                 }
                 Body::If(gen_if) => {
-                    for (_, block) in &gen_if.branches {
-                        if block.label.is_some() {
-                            let name = block_dump_name(block.label.as_deref(), None, None);
-                            if let Some(child) = ensure_tree_child(wf, node, &name) {
-                                self.merge_generate_items(wf, child, env, &block.items);
-                            }
+                    for block in taken_branches(gen_if, env) {
+                        let number = if block.label.is_none() {
+                            Some(unnamed_ordinal(&mut unnamed))
                         } else {
-                            self.merge_generate_items(wf, node, env, &block.items);
+                            None
+                        };
+                        let name = block_dump_name(block.label.as_deref(), number, None);
+                        if let Some(child) = ensure_tree_child(wf, node, &name) {
+                            self.merge_generate_items(wf, child, env, &block.items);
                         }
                     }
                 }
                 Body::Block(block) => {
-                    if block.label.is_some() {
-                        let name = block_dump_name(block.label.as_deref(), None, None);
-                        if let Some(child) = ensure_tree_child(wf, node, &name) {
-                            self.merge_generate_items(wf, child, env, &block.items);
-                        }
+                    let number = if block.label.is_none() {
+                        Some(unnamed_ordinal(&mut unnamed))
                     } else {
-                        self.merge_generate_items(wf, node, env, &block.items);
+                        None
+                    };
+                    let name = block_dump_name(block.label.as_deref(), number, None);
+                    if let Some(child) = ensure_tree_child(wf, node, &name) {
+                        self.merge_generate_items(wf, child, env, &block.items);
                     }
                 }
                 Body::Instance(_) => {}

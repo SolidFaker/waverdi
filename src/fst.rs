@@ -124,6 +124,7 @@ fn visit_item(
                 name: var.name(hierarchy).to_string(),
                 bits,
                 var_type: format!("{:?}", var.var_type()).to_lowercase(),
+                dir: String::new(),
                 scope: scope.clone(),
                 kind,
                 changes,

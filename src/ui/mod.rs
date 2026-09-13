@@ -1,3 +1,4 @@
+pub mod add;
 pub mod context;
 pub mod dialog;
 pub mod layout;
@@ -61,7 +62,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         toolbar::draw_time_menu(buf, &l, app);
     }
 
-    if let Some(dialog) = app.dialog {
+    if app.dialog == Some(crate::app::Dialog::AddSignals) {
+        add::draw(frame, l.area, app);
+    } else if let Some(dialog) = app.dialog {
         dialog::draw(frame, &l, app, dialog);
     }
 }
@@ -111,6 +114,28 @@ mod tests {
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn mouse_at(col: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    fn wheel_at(col: u16, row: u16, up: bool) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: if up {
+                crossterm::event::MouseEventKind::ScrollUp
+            } else {
+                crossterm::event::MouseEventKind::ScrollDown
+            },
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
     }
 
     #[test]
@@ -350,6 +375,7 @@ mod tests {
         let screen = render_app(&mut app, 100, 30);
         assert!(screen.contains("Set Radix"), "{screen}");
         assert!(screen.contains("Bus Operations"), "{screen}");
+        assert!(screen.contains("Highlight"), "{screen}");
         app.open_ctx_submenu(0);
         let screen = render_app(&mut app, 100, 30);
         assert!(screen.contains("Hex"), "{screen}");
@@ -357,8 +383,303 @@ mod tests {
         app.close_ctx_submenu();
         app.open_ctx_submenu(2);
         let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("Red"), "{screen}");
+        assert!(screen.contains("Cyan"), "{screen}");
+        app.close_ctx_submenu();
+        app.open_ctx_submenu(3);
+        let screen = render_app(&mut app, 100, 30);
         assert!(screen.contains("Split Bus..."), "{screen}");
         assert!(screen.contains("Create Bus..."), "{screen}");
+    }
+
+    #[test]
+    fn highlight_color_paints_list_wave_and_source() {
+        use crate::rtl::{RtlDb, SourceSet};
+        use crate::ui::layout::Layout;
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 8 ! data [7:0] $end\n\
+            $var wire 8 \" other [7:0] $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\nb0 !\nb0 \"\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 40));
+        let dir = std::env::temp_dir().join(format!("waverdi_hl_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tb.sv");
+        std::fs::write(
+            &path,
+            "module tb;\n    logic [7:0] data;\n    logic [7:0] other;\nendmodule\n",
+        )
+        .unwrap();
+        app.sources = Some(SourceSet::from_files(vec![path], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "tb".to_string();
+        app.expanded.insert(1);
+        app.tree_sel = 1;
+        app.sync_source();
+        app.add_signal(0);
+        app.sel_row = None; // added rows are selected while focused
+        let color = ratatui::style::Color::Rgb(0x5c, 0x1f, 0x1f);
+        app.set_highlight(0, Some(color));
+        assert_eq!(app.highlight_of(0), Some(color));
+
+        // Renders the app and counts cells with `color` in one pane.
+        let count_bg = |app: &mut App,
+                        pick: fn(&Layout) -> ratatui::layout::Rect,
+                        color: ratatui::style::Color|
+         -> usize {
+            let backend = TestBackend::new(100, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| super::render(f, app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let rect = pick(&app.layout());
+            let mut count = 0usize;
+            for y in rect.y..rect.bottom() {
+                for x in rect.x..rect.right() {
+                    if buffer.cell((x, y)).map(|cell| cell.bg) == Some(color) {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
+        assert!(
+            count_bg(&mut app, |l| l.list, color) > 0,
+            "Signal List name not highlighted"
+        );
+        assert!(
+            count_bg(&mut app, |l| l.rows, color) > 0,
+            "waveform row not highlighted"
+        );
+        assert!(
+            count_bg(&mut app, |l| l.source, color) > 0,
+            "Source name not highlighted"
+        );
+
+        // A multi-name source selection highlights every selected signal and
+        // the colour belongs to the signal, so it shows when added later.
+        app.set_highlight(0, None);
+        app.clear_all();
+        let source_color = ratatui::style::Color::Rgb(0x1f, 0x4d, 0x4d);
+        let (line_a, col_a, line_b, col_b) = {
+            let view = app.source_view.as_ref().unwrap();
+            let line_a = 1usize;
+            let line_b = 2usize;
+            (
+                line_a,
+                view.lines[line_a].find("data").unwrap(),
+                line_b,
+                view.lines[line_b].find("other").unwrap() + "other".len(),
+            )
+        };
+        app.set_source_cursor(line_a, col_a);
+        app.begin_source_selection();
+        app.extend_source_selection_to(line_b, col_b);
+        app.finish_source_selection();
+        app.highlight_source_word(Some(source_color));
+        assert_eq!(app.highlight_of(0), Some(source_color));
+        assert_eq!(app.highlight_of(1), Some(source_color));
+        assert!(app.highlighted_source_names().contains_key("data"));
+        assert!(app.highlighted_source_names().contains_key("other"));
+        assert!(count_bg(&mut app, |l| l.source, source_color) > 0);
+        assert_eq!(count_bg(&mut app, |l| l.rows, source_color), 0);
+        app.add_signal(0);
+        app.add_signal(1);
+        app.sel_row = None;
+        assert!(count_bg(&mut app, |l| l.list, source_color) > 0);
+        assert!(count_bg(&mut app, |l| l.rows, source_color) > 0);
+
+        // Only an explicit clear removes the highlight.
+        app.highlight_source_word(None);
+        assert!(!app.highlighted_source_names().contains_key("data"));
+        assert!(!app.highlighted_source_names().contains_key("other"));
+        assert_eq!(app.highlight_of(0), None);
+        assert_eq!(app.highlight_of(1), None);
+        assert_eq!(count_bg(&mut app, |l| l.source, source_color), 0);
+        assert_eq!(count_bg(&mut app, |l| l.list, source_color), 0);
+        assert_eq!(count_bg(&mut app, |l| l.rows, source_color), 0);
+
+        // Clearing from the Signal List also removes the Source highlight of
+        // that signal, but keeps the other selected signal highlighted.
+        app.highlight_source_word(Some(source_color));
+        app.set_highlight_many(&[0], None);
+        assert_eq!(app.highlight_of(0), None);
+        assert_eq!(app.highlight_of(1), Some(source_color));
+        assert!(!app.highlighted_source_names().contains_key("data"));
+        assert!(app.highlighted_source_names().contains_key("other"));
+        app.set_highlight_many(&[1], None);
+        assert!(!app.highlighted_source_names().contains_key("other"));
+    }
+
+    #[test]
+    fn zoomed_out_view_shows_a_narrow_pulse() {
+        // A single 1ps high pulse in a 1s range must stay visible.
+        let vcd = "$timescale 1ps $end\n\
+            $var wire 1 ! sig $end\n\
+            $enddefinitions $end\n\
+            #0\n0!\n#1000000\n1!\n#1000001\n0!\n#1000000000000\n0!\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.set_display(vec![0]);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        // Keep the cursor line away from the pulse column under test.
+        let span = app.wf.as_ref().unwrap().total_ticks();
+        app.cursor = app.wf.as_ref().unwrap().start + span * 7 / 10;
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        let row = app
+            .list_rows()
+            .iter()
+            .position(|row| matches!(row, crate::app::ListRow::Signal { sig: 0, .. }))
+            .unwrap();
+        let y = l.rows.y + row as u16;
+        let pulse_col = app.x_at_tick(1_000_000) as u16;
+        let cell = buffer.cell((l.rows.x + pulse_col, y)).unwrap();
+        assert_eq!(
+            cell.symbol(),
+            "│",
+            "pulse marker missing: {} fg={:?}",
+            cell.symbol().escape_unicode(),
+            cell.fg
+        );
+        // The surrounding low level is still drawn normally.
+        let quiet = buffer.cell((l.rows.x + pulse_col + 10, y)).unwrap();
+        assert_eq!(quiet.symbol(), "▁");
+    }
+
+    #[test]
+    fn bus_labels_survive_narrow_segments() {
+        // `h1` is too narrow for a label; `h2` right after it is wide and
+        // must still be labelled.
+        let vcd = "$timescale 1ns $end\n\
+            $var reg 4 ! data $end\n\
+            $enddefinitions $end\n\
+            #0\nh1 !\n#1\nh2 !\n#100\nh3 !\n#1000\nh4 !\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.set_display(vec![0]);
+        let screen = render_app(&mut app, 120, 30);
+        assert!(
+            screen.contains("h2"),
+            "missing value after narrow segment:\n{screen}"
+        );
+        assert!(screen.contains("h3"), "{screen}");
+    }
+
+    #[test]
+    fn add_signals_dialog_renders() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.open_add_signals();
+        let screen = render_app(&mut app, 120, 30);
+        assert!(screen.contains("Add Signals"), "{screen}");
+        assert!(screen.contains("Apply"), "{screen}");
+        assert!(screen.contains("OK"), "{screen}");
+        assert!(screen.contains("Cancel"), "{screen}");
+        assert!(screen.contains("Filter: all"), "{screen}");
+    }
+
+    #[test]
+    fn add_dialog_click_selects_the_clicked_signal_in_nested_scopes() {
+        let vcd = "$timescale 1ns $end\n\
+            $scope module top $end\n\
+            $var wire 1 ! a $end\n\
+            $var wire 1 \" b $end\n\
+            $scope module sub $end\n\
+            $var wire 1 # c $end\n\
+            $var wire 1 $ d $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n0\"\n0#\n0$\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 120, 30));
+        app.open_add_signals();
+        let sub = {
+            let wf = app.wf.as_ref().unwrap();
+            let top = wf.tree.nodes[wf.tree.root].children[0];
+            wf.tree.nodes[top].children[0]
+        };
+        app.add_navigate(sub);
+        assert_eq!(app.add_signal_list(), vec![2, 3]);
+        let screen = app.last_area;
+        let l = crate::ui::add::layout(screen);
+        let mut clicked = false;
+        for col in l.signals.x..l.signals.right() {
+            if let Some(crate::ui::add::AddHit::Signal(signal)) =
+                crate::ui::add::hit(screen, &app, col, l.signals.y)
+            {
+                if signal == 3 {
+                    crate::app::handle_mouse(&mut app, mouse_at(col, l.signals.y));
+                    clicked = true;
+                    break;
+                }
+            }
+        }
+        assert!(clicked, "signal cell not found");
+        let selected = &app.add_signals.as_ref().unwrap().selected;
+        assert!(selected.contains(&3), "{selected:?}");
+        assert!(
+            !selected.contains(&0) && !selected.contains(&1),
+            "{selected:?}"
+        );
+    }
+
+    #[test]
+    fn add_dialog_panes_scroll_independently() {
+        use crate::app::AddFocus;
+        let mut vcd = String::from("$timescale 1ns $end\n$scope module top $end\n");
+        for i in 0..40u8 {
+            vcd.push_str(&format!(
+                "$var wire 1 {} s{:02} $end\n",
+                (33 + i) as char,
+                i
+            ));
+        }
+        vcd.push_str("$upscope $end\n$enddefinitions $end\n#0\n0!\n");
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 60, 20));
+        app.open_add_signals();
+        let top = {
+            let wf = app.wf.as_ref().unwrap();
+            wf.tree.nodes[wf.tree.root].children[0]
+        };
+        app.add_navigate(top);
+        let cols = crate::ui::add::pane_cols(app.last_area, &app, AddFocus::Signals);
+        let visible = crate::ui::add::pane_visible(app.last_area, &app, AddFocus::Signals);
+        assert!(cols > 0);
+        assert!(app.add_pane_len(AddFocus::Signals) > visible);
+
+        let l = crate::ui::add::layout(app.last_area);
+        // Wheel over the signals pane scrolls that pane only.
+        crate::app::handle_mouse(&mut app, wheel_at(l.signals.x + 1, l.signals.y, false));
+        assert_eq!(app.add_scroll_of(AddFocus::Signals), 3 * cols);
+        assert_eq!(app.add_scroll_of(AddFocus::Tree), 0);
+
+        // Wheel over the tree does not disturb the signals pane.
+        crate::app::handle_mouse(&mut app, wheel_at(l.tree.x + 1, l.tree.y, false));
+        assert_eq!(app.add_scroll_of(AddFocus::Signals), 3 * cols);
+
+        // Dragging the signals scrollbar to the bottom shows the last page.
+        crate::app::handle_mouse(
+            &mut app,
+            mouse_at(l.signals.right() - 1, l.signals.bottom() - 1),
+        );
+        let len = app.add_pane_len(AddFocus::Signals);
+        assert_eq!(app.add_scroll_of(AddFocus::Signals), len - visible);
     }
 
     fn pane_color(app: &mut App, x: u16, y: u16) -> ratatui::style::Color {

@@ -30,6 +30,8 @@ pub struct Signal {
     pub name: String,
     pub bits: u32,
     pub var_type: String,
+    /// Port direction when the dump records it (`input`/`output`/`inout`).
+    pub dir: String,
     pub scope: Vec<String>,
     pub kind: SigKind,
     pub changes: Vec<Change>,
@@ -123,6 +125,7 @@ mod tests {
             name: "s".into(),
             bits,
             var_type: String::new(),
+            dir: String::new(),
             scope: vec![],
             kind,
             changes: vec![],

@@ -10,4 +10,5 @@ pub enum Dialog {
     Settings,
     Keys,
     About,
+    AddSignals,
 }

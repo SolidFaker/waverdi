@@ -4,6 +4,7 @@
 pub enum Action {
     Open,
     OpenTui,
+    AddSignals,
     Quit,
     ZoomIn,
     ZoomOut,
@@ -33,6 +34,7 @@ impl Action {
             Action::Quit => return true,
             Action::Open => app.open_file_dialog(),
             Action::OpenTui => app.open_tui_browser(),
+            Action::AddSignals => app.open_add_signals(),
             Action::ZoomIn => app.zoom_in(),
             Action::ZoomOut => app.zoom_out(),
             Action::Fit => app.fit(),

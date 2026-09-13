@@ -151,6 +151,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
         let mut x = text_x;
         let mut col = 0usize;
         let active = view.module_at_line(index) == view.module;
+        let highlights = app.highlighted_source_names();
         'line: for span in spans {
             // Code of other modules in the same file is shown dimmed.
             let fg = if !active {
@@ -166,6 +167,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
                     HlKind::Signal => t.src_signal,
                 }
             };
+            let highlight_bg = highlights.get(span.text.as_str()).copied();
             for ch in span.text.chars() {
                 let column = col;
                 col += 1;
@@ -180,6 +182,9 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
                     .unwrap_or(false);
                 let (fg, bg) = if focused && index == view.line && column == view.col {
                     (t.bg, t.cursor)
+                } else if let Some(color) = highlight_bg {
+                    // A user highlight stays visible even inside a selection.
+                    (fg, color)
                 } else if in_sel && span.kind == HlKind::Signal {
                     // Selected signal names stand out.
                     (t.bg, t.src_signal)

@@ -19,6 +19,7 @@ pub enum CtxItem {
     ExpandAll,
     CollapseAll,
     RemoveGroup,
+    Highlight(Option<ratatui::style::Color>),
 }
 
 /// One row of a context menu: either a leaf item or a submenu.
@@ -46,9 +47,40 @@ const BUS_MENU: &[CtxEntry] = &[
     CtxEntry::Item("Create Bus...", CtxItem::CreateBus),
 ];
 
+/// Waveform/source highlight backgrounds. Muted so the signal text stays
+/// readable on top.
+const HIGHLIGHT_MENU: &[CtxEntry] = &[
+    CtxEntry::Item("None", CtxItem::Highlight(None)),
+    CtxEntry::Item(
+        "Red",
+        CtxItem::Highlight(Some(ratatui::style::Color::Rgb(0x5c, 0x1f, 0x1f))),
+    ),
+    CtxEntry::Item(
+        "Green",
+        CtxItem::Highlight(Some(ratatui::style::Color::Rgb(0x1f, 0x4d, 0x1f))),
+    ),
+    CtxEntry::Item(
+        "Blue",
+        CtxItem::Highlight(Some(ratatui::style::Color::Rgb(0x1f, 0x33, 0x5c))),
+    ),
+    CtxEntry::Item(
+        "Yellow",
+        CtxItem::Highlight(Some(ratatui::style::Color::Rgb(0x5c, 0x50, 0x1f))),
+    ),
+    CtxEntry::Item(
+        "Magenta",
+        CtxItem::Highlight(Some(ratatui::style::Color::Rgb(0x50, 0x1f, 0x50))),
+    ),
+    CtxEntry::Item(
+        "Cyan",
+        CtxItem::Highlight(Some(ratatui::style::Color::Rgb(0x1f, 0x4d, 0x4d))),
+    ),
+];
+
 pub const SIGNAL_MENU: &[CtxEntry] = &[
     CtxEntry::Submenu("Set Radix", RADIX_MENU),
     CtxEntry::Submenu("Set Waveform", WAVEFORM_MENU),
+    CtxEntry::Submenu("Highlight", HIGHLIGHT_MENU),
     CtxEntry::Submenu("Bus Operations", BUS_MENU),
     CtxEntry::Item("Remove Signal", CtxItem::Remove),
 ];
@@ -65,6 +97,7 @@ pub const GROUP_MENU: &[CtxEntry] = &[
 
 pub const SOURCE_MENU: &[CtxEntry] = &[
     CtxEntry::Item("Add to Waveform", CtxItem::AddToWaveform),
+    CtxEntry::Submenu("Highlight", HIGHLIGHT_MENU),
     CtxEntry::Item("Select All Module Text", CtxItem::SelectAllSource),
 ];
 
@@ -176,6 +209,10 @@ impl App {
                 self.remove_selected()
             }
             (CtxTarget::Signal(sig), CtxItem::Remove) => self.remove_signal(sig),
+            (CtxTarget::Signal(sig), CtxItem::Highlight(color)) => {
+                let targets = self.action_targets(sig);
+                self.set_highlight_many(&targets, color);
+            }
             (CtxTarget::Group(id), CtxItem::NewGroup) => {
                 if let Some(index) = self.group_index(id) {
                     self.insert_group_after(index);
@@ -200,6 +237,9 @@ impl App {
                 }
             }
             (CtxTarget::Source, CtxItem::AddToWaveform) => self.add_source_selection(),
+            (CtxTarget::Source, CtxItem::Highlight(color)) => {
+                self.highlight_source_word(color);
+            }
             (CtxTarget::Source, CtxItem::SelectAllSource) => self.select_all_source(),
             _ => {}
         }
@@ -420,6 +460,7 @@ impl App {
                 name,
                 bits: chunk_bits as u32,
                 var_type: source.var_type.clone(),
+                dir: source.dir.clone(),
                 scope: source.scope.clone(),
                 kind: SigKind::Bits,
                 changes,
@@ -544,6 +585,7 @@ impl App {
             name: format!("{base}_bus[{}:0]", width - 1),
             bits: width as u32,
             var_type: "wire".to_string(),
+            dir: String::new(),
             scope,
             kind: SigKind::Bits,
             changes,

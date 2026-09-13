@@ -101,10 +101,18 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
             }
             ListRow::Signal { sig, depth } => {
                 let signal = &wf.signals[*sig];
-                let name_style = if selected && app.focus == Focus::List {
-                    Style::new().fg(t.text).bg(bg)
+                // Highlighted signals keep the colour on their name and in the
+                // waveform row; the selected row wins while it is focused.
+                let highlight = app.highlight_of(*sig);
+                let name_bg = if selected && app.focus == Focus::List {
+                    bg
                 } else {
-                    Style::new().fg(t.name).bg(bg)
+                    highlight.unwrap_or(bg)
+                };
+                let name_style = if selected && app.focus == Focus::List {
+                    Style::new().fg(t.text).bg(name_bg)
+                } else {
+                    Style::new().fg(t.name).bg(name_bg)
                 };
                 let full = signal.full_name();
                 let (prefix, leaf) = if app.show_full_names {
@@ -133,7 +141,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                     let room = (right - start) as usize;
                     let visible: String = full_text.chars().skip(skip).take(room).collect();
                     if ellipsis {
-                        text::set_cell(buf, l.list.x, y, "…", t.dim, bg);
+                        text::set_cell(buf, l.list.x, y, "…", t.dim, name_bg);
                     }
                     // The hierarchy path is dim; the signal name keeps its colour.
                     let split = indent.chars().count() + prefix.chars().count();
@@ -143,7 +151,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                     let prefix_part: String = visible.chars().take(prefix_cells).collect();
                     let leaf_part: String = visible.chars().skip(prefix_cells).collect();
                     let start = start as u16;
-                    buf.set_string(start, y, &prefix_part, Style::new().fg(t.dim).bg(bg));
+                    buf.set_string(start, y, &prefix_part, Style::new().fg(t.dim).bg(name_bg));
                     buf.set_string(start + prefix_cells as u16, y, &leaf_part, name_style);
                 }
 

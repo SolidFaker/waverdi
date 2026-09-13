@@ -19,7 +19,8 @@ typedef void (*wav_scope_cb)(void *user, const char *name, const char *module,
                              const char *time_unit, unsigned scope_type);
 typedef void (*wav_var_cb)(void *user, const char *name, long long idcode,
                            unsigned lbit, unsigned rbit, unsigned dtidcode,
-                           unsigned var_type, unsigned bytes_per_bit);
+                           unsigned var_type, unsigned bytes_per_bit,
+                           unsigned direction);
 typedef void (*wav_upscope_cb)(void *user);
 typedef void (*wav_group_cb)(void *user, const char *name, unsigned field_count);
 typedef void (*wav_group_end_cb)(void *user);
@@ -57,7 +58,8 @@ bool_T tree_cb(fsdbTreeCBType type, void *client, void *data) {
         fsdb->cbs.var(fsdb->cbs.user, safe(var->name),
                       (long long)var->u.idcode, (unsigned)var->lbitnum,
                       (unsigned)var->rbitnum, (unsigned)var->dtidcode,
-                      (unsigned)var->type, (unsigned)var->bytes_per_bit);
+                      (unsigned)var->type, (unsigned)var->bytes_per_bit,
+                      (unsigned)var->direction);
         break;
     }
     case FSDB_TREE_CBT_UPSCOPE:

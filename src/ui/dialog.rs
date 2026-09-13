@@ -15,6 +15,11 @@ const KEYS: &[&str] = &[
     "          s search signal   F1 / ? help   F2 settings",
     "          F2 settings: theme + waveform colours",
     "          -f filelist / File>Load Filelist: RTL sources",
+    "          Shift+A add signals (hierarchy picker)",
+    "Add       Tab cycle panes   ↑ ↓ select   Space toggle",
+    "          Tree: Space opens a scope, ← → folds it",
+    "          Instances: Enter opens it; f cycles the filter",
+    "          a applies, Enter applies and closes, Esc cancels",
     "Search    v find value (hex/bin/oct/dec/ascii text)",
     "          n / N next / previous match (wraps around)",
     "View      z / Z / - / = zoom   f fit   c center",
@@ -216,6 +221,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
         Dialog::Settings => "Settings",
         Dialog::Keys => "Key Bindings",
         Dialog::About => "About",
+        Dialog::AddSignals => "Add Signals",
     };
     let area = dialog_rect(l.area, app, dialog);
 
@@ -249,6 +255,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
         let inner_x = area.x + 2;
         let inner_w = area.width.saturating_sub(4) as usize;
         match dialog {
+            Dialog::AddSignals => {}
             Dialog::Open => draw_browser(buf, area, app),
             Dialog::Goto => {
                 cursor = draw_input(
