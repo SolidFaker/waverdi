@@ -150,14 +150,37 @@ pub(crate) struct ScopeMatch<'a> {
     pub instance_scope: Vec<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DefKind {
+    Module,
+    Interface,
+    Program,
+    Package,
+}
+
+/// A user-defined type (`typedef`) with its packed width when statically known.
+#[derive(Clone, Debug, Default)]
+pub struct TypeDef {
+    pub width: Option<u32>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ModuleDef {
     pub name: String,
     pub file: PathBuf,
     pub start: usize,
     pub end: usize,
+    /// What kind of definition this is (`module`, `interface`, `package`, ...).
+    pub kind: DefKind,
     /// Module parameter/localparam values (evaluated from defaults), if known.
     pub params: BTreeMap<String, Option<i64>>,
+    /// Parameter initializers in declaration order, so they can be evaluated
+    /// again once package parameters are known.
+    pub param_exprs: Vec<(String, Expr)>,
+    /// Local `typedef`s, used to recognise declarations of user types.
+    pub typedefs: BTreeMap<String, TypeDef>,
+    /// Packages named by `import pkg::*;` / `import pkg::name;`.
+    pub imports: Vec<String>,
     pub ports: Vec<SignalDecl>,
     pub signals: Vec<SignalDecl>,
     pub assigns: Vec<Assign>,
@@ -337,22 +360,79 @@ pub struct SignalTrace {
 pub struct RtlDb {
     pub modules: BTreeMap<String, ModuleDef>,
     pub files: Vec<PathBuf>,
+    /// Evaluated parameters of every `package`, by package name. Package
+    /// parameters are visible to modules as `pkg::NAME` (and via `import`).
+    pub package_params: BTreeMap<String, BTreeMap<String, i64>>,
 }
 
 impl RtlDb {
     /// Parse every `.v`/`.sv` file of a source set.
     pub fn parse_sources(set: &SourceSet) -> RtlDb {
+        RtlDb::parse_sources_with_progress(set, &mut |_, _| true)
+    }
+
+    /// Parse the source set, reporting file progress. Returning `false` from
+    /// the callback stops after the current file.
+    pub fn parse_sources_with_progress(
+        set: &SourceSet,
+        progress: &mut dyn FnMut(usize, usize) -> bool,
+    ) -> RtlDb {
         let mut db = RtlDb::default();
-        for path in &set.files {
-            if !is_verilog(path) {
+        let total = set.files.len();
+        for (done, path) in set.files.iter().enumerate() {
+            if is_verilog(path) {
+                if let Ok(text) = fs::read_to_string(path) {
+                    db.files.push(path.clone());
+                    for module in parse_module_text(&text, path) {
+                        db.modules.entry(module.name.clone()).or_insert(module);
+                    }
+                }
+            }
+            if !progress(done + 1, total) {
+                break;
+            }
+        }
+        for module in db.modules.values() {
+            if module.kind == DefKind::Package {
+                let params = module
+                    .params
+                    .iter()
+                    .filter_map(|(name, value)| value.map(|value| (name.clone(), value)))
+                    .collect();
+                db.package_params.insert(module.name.clone(), params);
+            }
+        }
+        // User-typed declarations may live in a package parsed after the
+        // module that uses them: fill in the packed width once all packages
+        // are known.
+        let mut global_typedefs: BTreeMap<String, TypeDef> = BTreeMap::new();
+        for module in db.modules.values() {
+            if module.kind == DefKind::Package {
+                for (name, def) in &module.typedefs {
+                    global_typedefs
+                        .entry(format!("{}::{name}", module.name))
+                        .or_insert_with(|| def.clone());
+                    global_typedefs
+                        .entry(name.clone())
+                        .or_insert_with(|| def.clone());
+                }
+            }
+        }
+        for module in db.modules.values_mut() {
+            if module.kind == DefKind::Package {
                 continue;
             }
-            let Ok(text) = fs::read_to_string(path) else {
-                continue;
-            };
-            db.files.push(path.clone());
-            for module in parse_module_text(&text, path) {
-                db.modules.entry(module.name.clone()).or_insert(module);
+            for signal in &mut module.signals {
+                if signal.range.is_none() {
+                    if let Some(width) = module
+                        .typedefs
+                        .get(&signal.kind)
+                        .and_then(|def| def.width)
+                        .or_else(|| global_typedefs.get(&signal.kind).and_then(|def| def.width))
+                    {
+                        signal.range = Some(width_range(width));
+                    }
+                }
             }
         }
         db
@@ -380,7 +460,28 @@ impl RtlDb {
 
     /// Known parameter/genvar values of a module (default overrides).
     pub(crate) fn default_env(&self, def: &ModuleDef) -> ParamEnv {
-        module_env(def)
+        let mut env = ParamEnv::new();
+        // `pkg::NAME` is visible everywhere; `import pkg::*` also binds the
+        // plain name (module-local parameters win).
+        for (package, params) in &self.package_params {
+            for (name, value) in params {
+                env.insert(format!("{package}::{name}"), *value);
+                if def.imports.iter().any(|import| import == package) {
+                    env.entry(name.clone()).or_insert(*value);
+                }
+            }
+        }
+        for (name, expr) in &def.param_exprs {
+            if let Some(value) = eval(expr, &env) {
+                env.insert(name.clone(), value);
+            }
+        }
+        for (name, value) in &def.params {
+            if let Some(value) = value {
+                env.entry(name.clone()).or_insert(*value);
+            }
+        }
+        env
     }
 
     /// Parameter environment of an instance: child defaults plus overrides.
@@ -574,6 +675,21 @@ impl RtlDb {
         let mut env = self.default_env(def);
         for (key, value) in bindings {
             env.insert(key.clone(), *value);
+        }
+        // Whole instance (`dprx_if`, `u_dut`): resolved to the aggregate of
+        // its dump scope by the caller.
+        if chain.is_empty() && def.instances.iter().any(|inst| inst.name == name) {
+            return Some((Vec::new(), name.to_string()));
+        }
+        // Struct/interface variable member (`clk_fetch.run`): the dump stores
+        // struct members in a scope of the variable's name, so the chain walks
+        // scopes here instead of instances.
+        if let Some((head, rest)) = chain.split_first() {
+            if def.declares(head) && !def.instances.iter().any(|inst| inst.name == *head) {
+                let mut path = vec![head.clone()];
+                path.extend(rest.iter().cloned());
+                return Some((path, name.to_string()));
+            }
         }
         let (path, target) = self.walk_chain(def, &env, &def.body, chain)?;
         if target.declares(name) {
@@ -869,7 +985,8 @@ impl RtlDb {
         }
         trace.drivers.sort();
         trace.drivers.dedup();
-        trace.loads.retain(|loc| !trace.drivers.contains(loc));
+        let driver_lines: HashSet<usize> = trace.drivers.iter().map(|loc| loc.line).collect();
+        trace.loads.retain(|loc| !driver_lines.contains(&loc.line));
         trace.loads.sort();
         trace.loads.dedup();
         Some(trace)
@@ -1135,9 +1252,28 @@ impl Parser {
 fn parse_module_text(text: &str, path: &Path) -> Vec<ModuleDef> {
     let mut parser = Parser::new(lex(text));
     let mut modules = Vec::new();
+    let mut package_typedefs: BTreeMap<String, TypeDef> = BTreeMap::new();
     while parser.pos < parser.tokens.len() {
-        if parser.eat_ident("module") || parser.eat_ident("macromodule") {
-            if let Some(module) = parse_module(&mut parser, path) {
+        let kind = match parser.peek() {
+            Some(Tok::Ident(word)) => match word.as_str() {
+                "module" | "macromodule" => Some(DefKind::Module),
+                "interface" => Some(DefKind::Interface),
+                "program" => Some(DefKind::Program),
+                "package" => Some(DefKind::Package),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            parser.next();
+            if let Some(module) = parse_definition(&mut parser, path, kind, &package_typedefs) {
+                if module.kind == DefKind::Package {
+                    for (name, def) in &module.typedefs {
+                        package_typedefs
+                            .entry(name.clone())
+                            .or_insert_with(|| def.clone());
+                    }
+                }
                 modules.push(module);
             }
         } else {
@@ -1147,7 +1283,21 @@ fn parse_module_text(text: &str, path: &Path) -> Vec<ModuleDef> {
     modules
 }
 
-fn parse_module(parser: &mut Parser, path: &Path) -> Option<ModuleDef> {
+fn def_end_keyword(kind: DefKind) -> &'static str {
+    match kind {
+        DefKind::Module => "endmodule",
+        DefKind::Interface => "endinterface",
+        DefKind::Program => "endprogram",
+        DefKind::Package => "endpackage",
+    }
+}
+
+fn parse_definition(
+    parser: &mut Parser,
+    path: &Path,
+    kind: DefKind,
+    inherited: &BTreeMap<String, TypeDef>,
+) -> Option<ModuleDef> {
     let start = parser.line();
     let (name, _) = parser.take_ident()?;
     let mut module = ModuleDef {
@@ -1155,7 +1305,11 @@ fn parse_module(parser: &mut Parser, path: &Path) -> Option<ModuleDef> {
         file: path.to_path_buf(),
         start,
         end: start,
+        kind,
         params: BTreeMap::new(),
+        param_exprs: Vec::new(),
+        typedefs: inherited.clone(),
+        imports: Vec::new(),
         ports: Vec::new(),
         signals: Vec::new(),
         assigns: Vec::new(),
@@ -1163,32 +1317,60 @@ fn parse_module(parser: &mut Parser, path: &Path) -> Option<ModuleDef> {
         instances: Vec::new(),
         body: Vec::new(),
     };
-
-    // Optional parameter list, then the port list (ANSI declarations inside).
-    if matches!(parser.peek(), Some(Tok::Punct('#'))) {
-        parser.next();
+    if kind == DefKind::Package {
+        parse_package_body(parser, &mut module);
+    } else {
+        // Optional parameter list, then the port list (ANSI declarations inside).
+        if matches!(parser.peek(), Some(Tok::Punct('#'))) {
+            parser.next();
+            if matches!(parser.peek(), Some(Tok::Punct('('))) {
+                parser.next();
+                parse_param_decls(parser, &mut module);
+                parser.eat_punct(')');
+            }
+        }
         if matches!(parser.peek(), Some(Tok::Punct('('))) {
             parser.next();
-            parse_param_decls(parser, &mut module);
+            parse_declarations(parser, &mut module, true);
             parser.eat_punct(')');
         }
+        // Skip anything else before the body (e.g. `;`).
+        if matches!(parser.peek(), Some(Tok::Punct(';'))) {
+            parser.next();
+        }
+        module.body = parse_body(parser, &mut module);
     }
-    if matches!(parser.peek(), Some(Tok::Punct('('))) {
-        parser.next();
-        parse_declarations(parser, &mut module, true);
-        parser.eat_punct(')');
-    }
-    // Skip anything else before the body (e.g. `;`).
-    if matches!(parser.peek(), Some(Tok::Punct(';'))) {
-        parser.next();
-    }
-
-    module.body = parse_body(parser, &mut module);
     module.end = parser.line();
-    if parser.at_ident("endmodule") {
+    if parser.at_ident(def_end_keyword(kind)) {
         parser.next();
     }
     Some(module)
+}
+
+/// `package pkg;` body: parameters, typedefs and imports are collected; the
+/// rest (functions, tasks, classes) is skipped to `endpackage`.
+fn parse_package_body(parser: &mut Parser, module: &mut ModuleDef) {
+    loop {
+        match parser.peek() {
+            None => break,
+            Some(Tok::Ident(word)) if word == "endpackage" || word == "end" => break,
+            Some(Tok::Ident(word)) => match word.as_str() {
+                "parameter" | "localparam" => parse_param_decls(parser, module),
+                "typedef" => parse_typedef(parser, module),
+                "import" | "export" => parse_import(parser, module),
+                "function" => parser.skip_to(&["endfunction"]),
+                "task" => parser.skip_to(&["endtask"]),
+                "class" => parser.skip_to(&["endclass"]),
+                "covergroup" => parser.skip_to(&["endcovergroup"]),
+                "property" => parser.skip_to(&["endproperty"]),
+                "sequence" => parser.skip_to(&["endsequence"]),
+                _ => parser.skip_statement(),
+            },
+            Some(_) => {
+                parser.next();
+            }
+        }
+    }
 }
 
 /// Parse module-body items until `end`/`endmodule` (not consumed).
@@ -1197,7 +1379,14 @@ fn parse_body(parser: &mut Parser, module: &mut ModuleDef) -> Vec<Body> {
     loop {
         match parser.peek() {
             None => break,
-            Some(Tok::Ident(word)) if word == "end" || word == "endmodule" => break,
+            Some(Tok::Ident(word))
+                if matches!(
+                    word.as_str(),
+                    "end" | "endmodule" | "endinterface" | "endprogram" | "endpackage" | "endclass"
+                ) =>
+            {
+                break;
+            }
             _ => {}
         }
         if let Some(item) = parse_body_item(parser, module) {
@@ -1220,12 +1409,28 @@ fn parse_body_item(parser: &mut Parser, module: &mut ModuleDef) -> Option<Body> 
         }
         "input" | "output" | "inout" | "wire" | "reg" | "logic" | "bit" | "integer" | "real"
         | "time" | "genvar" | "supply0" | "supply1" | "tri" | "triand" | "trior" | "wand"
-        | "wor" | "trireg" => {
+        | "wor" | "trireg" | "byte" | "shortint" | "longint" | "struct" | "enum" | "union" => {
             parse_declarations(parser, module, false);
             None
         }
         "parameter" | "localparam" => {
             parse_param_decls(parser, module);
+            None
+        }
+        "typedef" => {
+            parse_typedef(parser, module);
+            None
+        }
+        "import" | "export" => {
+            parse_import(parser, module);
+            None
+        }
+        "modport" => {
+            parser.skip_statement();
+            None
+        }
+        "virtual" => {
+            parser.skip_statement();
             None
         }
         "assign" => {
@@ -1246,6 +1451,26 @@ fn parse_body_item(parser: &mut Parser, module: &mut ModuleDef) -> Option<Body> 
             parser.skip_to(&["endtask"]);
             None
         }
+        "class" => {
+            parser.skip_to(&["endclass"]);
+            None
+        }
+        "covergroup" => {
+            parser.skip_to(&["endcovergroup"]);
+            None
+        }
+        "property" => {
+            parser.skip_to(&["endproperty"]);
+            None
+        }
+        "sequence" => {
+            parser.skip_to(&["endsequence"]);
+            None
+        }
+        "clocking" => {
+            parser.skip_to(&["endclocking"]);
+            None
+        }
         "defparam" | "specify" | "endspecify" => {
             parser.skip_statement();
             None
@@ -1257,9 +1482,14 @@ fn parse_body_item(parser: &mut Parser, module: &mut ModuleDef) -> Option<Body> 
         "for" => parse_gen_for(parser, module).map(Body::For),
         "if" => parse_gen_if(parser, module).map(Body::If),
         "begin" => Some(Body::Block(parse_gen_block(parser, module))),
-        "end" | "endmodule" => None,
+        "end" | "endmodule" | "endinterface" | "endprogram" | "endpackage" => None,
         _ => {
-            if let Some(instance) = parse_instance(parser, module) {
+            // A declaration of a user type (`state_t s;`, `pkg::t x, y;`,
+            // `if_t.master bus;`) is not an instance.
+            if looks_like_user_decl(parser, module) {
+                parse_declarations(parser, module, false);
+                None
+            } else if let Some(instance) = parse_instance(parser, module) {
                 module.instances.push(instance.clone());
                 Some(Body::Instance(instance))
             } else {
@@ -1276,6 +1506,9 @@ fn parse_gen_for(parser: &mut Parser, module: &mut ModuleDef) -> Option<GenFor> 
     parser.eat_ident("for");
     if !parser.eat_punct('(') {
         return None;
+    }
+    if parser.at_ident("genvar") {
+        parser.next();
     }
     let var = parser.take_ident()?.0;
     if !parser.eat_punct('=') {
@@ -1406,7 +1639,21 @@ fn parse_param_decls(parser: &mut Parser, module: &mut ModuleDef) {
                     | "var" | "const" | "static" | "automatic" => {
                         parser.next();
                     }
-                    _ => break,
+                    _ => {
+                        // User type: `pkg::t P = ...` / `type_t P = ...`.
+                        if parser.peek_at(1) == Some(&Tok::Punct(':')) {
+                            parser.next();
+                            parser.next();
+                            parser.next();
+                            parser.take_ident();
+                        } else if parser.peek_at(1) == Some(&Tok::Punct('.')) {
+                            parser.next();
+                            parser.next();
+                            parser.take_ident();
+                        } else {
+                            break;
+                        }
+                    }
                 },
                 Some(Tok::Punct('[')) => parser.skip_balanced(),
                 _ => break,
@@ -1420,6 +1667,7 @@ fn parse_param_decls(parser: &mut Parser, module: &mut ModuleDef) {
         if parser.eat_punct('=') {
             let expr = parse_expr(parser);
             value = eval(&expr, &module_env(module));
+            module.param_exprs.push((name.clone(), expr));
         }
         module.params.insert(name, value);
         match parser.peek() {
@@ -1539,6 +1787,16 @@ fn parse_primary(parser: &mut Parser) -> Expr {
         }
         Some(Tok::Ident(name)) => {
             parser.next();
+            // Package-qualified constant: `pkg::NAME`.
+            if parser.peek() == Some(&Tok::Punct(':'))
+                && parser.peek_at(1) == Some(&Tok::Punct(':'))
+            {
+                parser.next();
+                parser.next();
+                if let Some((member, _)) = parser.take_ident() {
+                    return Expr::Name(format!("{name}::{member}"));
+                }
+            }
             Expr::Name(name)
         }
         Some(Tok::Punct('(')) => {
@@ -1692,14 +1950,50 @@ fn parse_declarations(parser: &mut Parser, module: &mut ModuleDef, header: bool)
                         }
                         "wire" | "reg" | "logic" | "bit" | "integer" | "real" | "time"
                         | "supply0" | "supply1" | "tri" | "triand" | "trior" | "wand" | "wor"
-                        | "trireg" => {
+                        | "trireg" | "byte" | "shortint" | "longint" => {
                             kind.get_or_insert(word);
                             parser.next();
                         }
-                        "signed" | "unsigned" | "var" | "const" | "static" | "automatic" => {
+                        "struct" | "enum" | "union" => {
+                            kind.get_or_insert(word.clone());
+                            if let Some(width) = parse_anonymous_type(parser, module) {
+                                range = Some(width_range(width));
+                            }
+                        }
+                        "signed" | "unsigned" | "var" | "const" | "static" | "automatic"
+                        | "packed" => {
                             parser.next();
                         }
-                        _ => break,
+                        _ => {
+                            // User-defined type: `state_t`, `pkg::t`,
+                            // `if_t.master`, `type_t [3:0]`. Only before the
+                            // declared name is reached.
+                            if kind.is_some() || direction.is_some() {
+                                break;
+                            }
+                            let mut type_name = word.clone();
+                            parser.next();
+                            if parser.peek() == Some(&Tok::Punct(':'))
+                                && parser.peek_at(1) == Some(&Tok::Punct(':'))
+                            {
+                                parser.next();
+                                parser.next();
+                                if let Some((second, _)) = parser.take_ident() {
+                                    type_name = format!("{word}::{second}");
+                                }
+                            } else if parser.peek() == Some(&Tok::Punct('.')) {
+                                parser.next();
+                                if let Some((modport, _)) = parser.take_ident() {
+                                    type_name = format!("{word}.{modport}");
+                                }
+                            }
+                            if let Some(width) =
+                                module.typedefs.get(&type_name).and_then(|t| t.width)
+                            {
+                                range = Some(width_range(width));
+                            }
+                            kind.get_or_insert(type_name);
+                        }
                     }
                 }
                 Some(Tok::Punct('[')) => {
@@ -1779,6 +2073,315 @@ fn collect_range(parser: &mut Parser) -> String {
     text
 }
 
+fn width_range(width: u32) -> String {
+    format!("{}:0", width.saturating_sub(1))
+}
+
+/// Width of a packed range like `7:0` or `WIDTH-1:0`.
+fn range_width(range: &str, module: &ModuleDef) -> Option<u32> {
+    let (hi, lo) = range.split_once(':')?;
+    if lo.contains('+') || lo.contains('-') && range.contains("+:") {
+        return None;
+    }
+    let env = module_env(module);
+    let hi = eval(&parse_expr_text(hi.trim())?, &env)?;
+    let lo = eval(&parse_expr_text(lo.trim())?, &env)?;
+    Some((hi - lo).unsigned_abs() as u32 + 1)
+}
+
+/// Consume one type (keywords, packed ranges, user types, anonymous
+/// `struct`/`union`/`enum`) and report its packed width when known.
+fn consume_type_width(parser: &mut Parser, module: &ModuleDef) -> Option<u32> {
+    let mut width = match parser.peek().cloned() {
+        Some(Tok::Ident(word)) => match word.as_str() {
+            "byte" => {
+                parser.next();
+                Some(8)
+            }
+            "shortint" => {
+                parser.next();
+                Some(16)
+            }
+            "int" | "integer" => {
+                parser.next();
+                Some(32)
+            }
+            "longint" | "time" => {
+                parser.next();
+                Some(64)
+            }
+            "struct" | "union" | "enum" => parse_anonymous_type(parser, module),
+            "wire" | "reg" | "logic" | "bit" | "tri" | "triand" | "trior" | "wand" | "wor"
+            | "trireg" | "supply0" | "supply1" => {
+                parser.next();
+                Some(1)
+            }
+            "real" => {
+                parser.next();
+                None
+            }
+            _ => {
+                let mut name = word.clone();
+                parser.next();
+                if parser.peek() == Some(&Tok::Punct(':'))
+                    && parser.peek_at(1) == Some(&Tok::Punct(':'))
+                {
+                    parser.next();
+                    parser.next();
+                    if let Some((member, _)) = parser.take_ident() {
+                        name = format!("{word}::{member}");
+                    }
+                } else if parser.peek() == Some(&Tok::Punct('.')) {
+                    parser.next();
+                    if let Some((modport, _)) = parser.take_ident() {
+                        name = format!("{word}.{modport}");
+                    }
+                }
+                module.typedefs.get(&name).and_then(|t| t.width)
+            }
+        },
+        Some(Tok::Punct('[')) => None,
+        _ => None,
+    };
+    while matches!(parser.peek(), Some(Tok::Punct('['))) {
+        let range = collect_range(parser);
+        if let Some(w) = range_width(&range, module) {
+            width = Some(w);
+        }
+    }
+    width
+}
+
+/// Consume an anonymous `struct`/`union`/`enum` body and report its packed
+/// width (`struct`: sum of fields, `union`: widest, `enum`: base type or the
+/// bits needed by the largest member).
+fn parse_anonymous_type(parser: &mut Parser, module: &ModuleDef) -> Option<u32> {
+    let is_union = matches!(parser.peek(), Some(Tok::Ident(word)) if word == "union");
+    let is_enum = matches!(parser.peek(), Some(Tok::Ident(word)) if word == "enum");
+    if !is_union && !is_enum && !matches!(parser.peek(), Some(Tok::Ident(word)) if word == "struct")
+    {
+        return None;
+    }
+    parser.next();
+    loop {
+        match parser.peek() {
+            Some(Tok::Ident(word)) if matches!(word.as_str(), "packed" | "signed" | "unsigned") => {
+                parser.next();
+            }
+            _ => break,
+        }
+    }
+    if is_enum {
+        let base = if matches!(parser.peek(), Some(Tok::Punct('{'))) {
+            None
+        } else {
+            consume_type_width(parser, module)
+        };
+        if !parser.eat_punct('{') {
+            parser.skip_statement();
+            return base;
+        }
+        let mut next = 0i64;
+        let mut max_value = 0i64;
+        loop {
+            match parser.peek() {
+                Some(Tok::Punct('}')) | None => {
+                    parser.eat_punct('}');
+                    break;
+                }
+                Some(Tok::Punct(',')) => {
+                    parser.next();
+                }
+                Some(Tok::Punct('[')) => parser.skip_balanced(),
+                Some(Tok::Ident(_)) => {
+                    parser.next();
+                    if parser.eat_punct('=') {
+                        let expr = parse_expr(parser);
+                        if let Some(value) = eval(&expr, &module_env(module)) {
+                            next = value;
+                        }
+                    }
+                    max_value = max_value.max(next);
+                    next += 1;
+                }
+                _ => {
+                    parser.next();
+                }
+            }
+        }
+        if let Some(base) = base {
+            return Some(base);
+        }
+        let bits = 64 - (max_value.max(1) as u64).leading_zeros();
+        return Some(bits.max(1));
+    }
+    if !parser.eat_punct('{') {
+        parser.skip_statement();
+        return None;
+    }
+    let mut total = 0u32;
+    let mut widest = 0u32;
+    loop {
+        match parser.peek() {
+            Some(Tok::Punct('}')) | None => {
+                parser.eat_punct('}');
+                break;
+            }
+            Some(Tok::Punct(';')) => {
+                parser.next();
+            }
+            _ => {
+                let Some(field) = consume_type_width(parser, module) else {
+                    parser.skip_statement();
+                    continue;
+                };
+                total = total.saturating_add(field);
+                widest = widest.max(field);
+                // Field names (and unpacked dimensions) up to `;`.
+                while !matches!(
+                    parser.peek(),
+                    Some(Tok::Punct(';')) | Some(Tok::Punct('}')) | None
+                ) {
+                    if matches!(parser.peek(), Some(Tok::Punct('['))) {
+                        parser.skip_balanced();
+                    } else {
+                        parser.next();
+                    }
+                }
+                parser.eat_punct(';');
+            }
+        }
+    }
+    Some(if is_union { widest } else { total })
+}
+
+/// `typedef ... name;` — stores the type with its packed width when known.
+fn parse_typedef(parser: &mut Parser, module: &mut ModuleDef) {
+    parser.eat_ident("typedef");
+    loop {
+        match parser.peek() {
+            Some(Tok::Ident(word)) if matches!(word.as_str(), "packed" | "signed" | "unsigned") => {
+                parser.next();
+            }
+            _ => break,
+        }
+    }
+    let width = match parser.peek() {
+        Some(Tok::Ident(word)) if matches!(word.as_str(), "struct" | "union" | "enum") => {
+            parse_anonymous_type(parser, module)
+        }
+        _ => consume_type_width(parser, module),
+    };
+    if let Some((name, _)) = parser.take_ident() {
+        while matches!(parser.peek(), Some(Tok::Punct('['))) {
+            parser.skip_balanced();
+        }
+        module.typedefs.insert(name, TypeDef { width });
+    }
+    while !matches!(
+        parser.peek(),
+        Some(Tok::Punct(';')) | Some(Tok::Punct('}')) | None
+    ) {
+        parser.next();
+    }
+    parser.eat_punct(';');
+}
+
+/// `import pkg::*;` / `import pkg::name;` — records the package names.
+fn parse_import(parser: &mut Parser, module: &mut ModuleDef) {
+    parser.next(); // import / export
+    loop {
+        match parser.peek() {
+            Some(Tok::Punct(';')) | Some(Tok::Punct(')')) | None => {
+                parser.eat_punct(';');
+                return;
+            }
+            Some(Tok::Ident(name)) => {
+                let package = name.clone();
+                parser.next();
+                if parser.eat_punct(':') {
+                    parser.eat_punct(':');
+                    if matches!(parser.peek(), Some(Tok::Punct('*'))) {
+                        parser.next();
+                    } else {
+                        parser.take_ident();
+                    }
+                }
+                if !module.imports.contains(&package) {
+                    module.imports.push(package);
+                }
+            }
+            _ => {
+                parser.next();
+            }
+        }
+    }
+}
+
+/// Tokens after `[`..`]` starting at index `i`.
+fn skip_balanced_tokens(parser: &Parser, mut i: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    loop {
+        match parser.peek_at(i)? {
+            Tok::Punct('[') => depth += 1,
+            Tok::Punct(']') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// Heuristic: does the current statement declare signals of a user type
+/// (`state_t s;`, `pkg::t x, y;`, `if_t.master bus;`) rather than instantiate
+/// a module (`my_mod u ( ... );`)?
+fn looks_like_user_decl(parser: &Parser, module: &ModuleDef) -> bool {
+    let Some(Tok::Ident(first)) = parser.peek() else {
+        return false;
+    };
+    if is_keyword(first) {
+        return false;
+    }
+    let mut i = 1;
+    match (parser.peek_at(i), parser.peek_at(i + 1)) {
+        (Some(Tok::Punct(':')), Some(Tok::Punct(':'))) => {
+            i += 2;
+            if matches!(parser.peek_at(i), Some(Tok::Ident(_))) {
+                i += 1;
+            } else {
+                return false;
+            }
+        }
+        (Some(Tok::Punct('.')), _) => {
+            i += 1;
+            if matches!(parser.peek_at(i), Some(Tok::Ident(_))) {
+                i += 1;
+            } else {
+                return false;
+            }
+        }
+        _ => {}
+    }
+    while matches!(parser.peek_at(i), Some(Tok::Punct('['))) {
+        let Some(next) = skip_balanced_tokens(parser, i) else {
+            return false;
+        };
+        i = next;
+    }
+    match parser.peek_at(i) {
+        Some(Tok::Ident(name)) if !is_keyword(name) => {}
+        _ => return false,
+    }
+    matches!(
+        parser.peek_at(i + 1),
+        Some(Tok::Punct(',' | ';' | '=')) | None
+    ) || module.typedefs.contains_key(first)
+}
+
 fn parse_assign(parser: &mut Parser, module: &mut ModuleDef) {
     let line = parser.line();
     let mut lhs = String::new();
@@ -1851,9 +2454,10 @@ fn parse_process(parser: &mut Parser, module: &mut ModuleDef) {
         }
     }
     let (drivers, uses, end) = scan_statement(parser);
+    let driver_names: HashSet<&str> = drivers.iter().map(|(name, _)| name.as_str()).collect();
     let mut all_uses = sensitivity.clone();
     all_uses.extend(uses);
-    all_uses.retain(|entry| !drivers.contains(entry));
+    all_uses.retain(|entry| !driver_names.contains(entry.0.as_str()));
     module.always.push(AlwaysBlock {
         start,
         end,
@@ -2017,7 +2621,7 @@ fn parse_instance(parser: &mut Parser, module: &ModuleDef) -> Option<Instance> {
     if !matches!(parser.peek_at(offset + 1), Some(Tok::Punct('('))) {
         return None;
     }
-    if module.name == module_type {
+    if module.name == module_type || module.typedefs.contains_key(&module_type) {
         return None;
     }
     // Consume the type, parameter overrides, instance name and port list.
@@ -2209,6 +2813,19 @@ pub fn is_keyword(name: &str) -> bool {
             | "primitive"
             | "endprimitive"
             | "macromodule"
+            | "program"
+            | "endprogram"
+            | "modport"
+            | "virtual"
+            | "class"
+            | "endclass"
+            | "covergroup"
+            | "endcovergroup"
+            | "clocking"
+            | "endclocking"
+            | "byte"
+            | "shortint"
+            | "longint"
             | "supply0"
             | "supply1"
             | "tri"
@@ -2339,6 +2956,95 @@ endmodule
     }
 
     #[test]
+    fn resolves_struct_members_and_instance_aggregates() {
+        let text = r#"
+module m(input logic clk);
+    typedef struct packed { logic run; logic [3:0] pc; } fetch_t;
+    fetch_t clk_fetch;
+    fetch_t clk_pc;
+    child u_child(.clk(clk));
+endmodule
+
+module child(input logic clk);
+endmodule
+
+module top(input logic clk);
+    if_t vif(.clk(clk));
+    assign y = vif.valid;
+endmodule
+
+interface if_t(input logic clk);
+    logic valid;
+endinterface
+"#;
+        let dir = std::env::temp_dir().join(format!("waverdi_sv_member_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("m.sv");
+        fs::write(&file, text).unwrap();
+        let set = SourceSet::from_files(vec![file], "test");
+        let db = RtlDb::parse_sources(&set);
+
+        // Struct variable member: the chain walks the dump scope of the
+        // variable (`clk_fetch.run`).
+        let (path, signal) = db
+            .resolve_reference("m", &["clk_fetch".to_string()], "run")
+            .expect("struct member");
+        assert_eq!(path, vec!["clk_fetch".to_string()]);
+        assert_eq!(signal, "run");
+        // Whole struct variable.
+        let (path, signal) = db
+            .resolve_reference("m", &[], "clk_fetch")
+            .expect("struct variable");
+        assert!(path.is_empty());
+        assert_eq!(signal, "clk_fetch");
+        // Interface instance member resolves through the instance scope.
+        let (path, signal) = db
+            .resolve_reference("top", &["vif".to_string()], "valid")
+            .expect("interface member");
+        assert_eq!(path, vec!["vif".to_string()]);
+        assert_eq!(signal, "valid");
+        // A whole instance resolves to its scope aggregate.
+        let (path, signal) = db.resolve_reference("top", &[], "vif").expect("instance");
+        assert!(path.is_empty());
+        assert_eq!(signal, "vif");
+    }
+
+    #[test]
+    fn large_generated_case_tables_parse_without_quadratic_blowup() {
+        // Generated video overlay tables are single always blocks with
+        // hundreds of thousands of case items; use/trace filtering must not
+        // be quadratic in the number of items.
+        let items = 20_000;
+        let mut text = String::from("module big(input logic clk, output logic data);\n");
+        text.push_str("    always_ff @(posedge clk) begin\n        case (clk)\n");
+        for i in 0..items {
+            text.push_str(&format!("            32'd{i} : data <= 1'b0;\n"));
+        }
+        text.push_str("        endcase\n    end\n");
+        for i in 0..items {
+            text.push_str(&format!("    assign use_{i} = data;\n"));
+        }
+        text.push_str("endmodule\n");
+
+        let dir = std::env::temp_dir().join(format!("waverdi_big_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.sv");
+        fs::write(&file, text).unwrap();
+        let set = SourceSet::from_files(vec![file], "test");
+        let db = RtlDb::parse_sources(&set);
+
+        let m = db.module("big").expect("module");
+        assert_eq!(m.always.len(), 1);
+        assert_eq!(m.always[0].drivers.len(), items);
+        assert_eq!(m.assigns.len(), items);
+        let trace = db.trace("big", "data").expect("trace");
+        assert_eq!(trace.drivers.len(), items);
+        assert_eq!(trace.loads.len(), items);
+    }
+
+    #[test]
     fn elaborates_the_design_hierarchy_and_resolves_references() {
         let text = r#"
 module counter(input logic clk, output logic [3:0] count);
@@ -2381,7 +3087,12 @@ endmodule
             .expect("qualified");
         assert_eq!(path, vec!["u_dut".to_string()]);
         assert_eq!(signal, "count");
-        assert!(db.resolve_reference("tb", &[], "u_dut").is_none());
+        // An instance name resolves to the aggregate of its dump scope.
+        let (path, signal) = db
+            .resolve_reference("tb", &[], "u_dut")
+            .expect("instance aggregate");
+        assert!(path.is_empty());
+        assert_eq!(signal, "u_dut");
         // Elaborated placements cover the whole design, with top first.
         let placements = db.placements();
         assert!(placements.contains(&(steps(&["tb"]), "tb".to_string())));
@@ -2632,5 +3343,106 @@ endmodule
         let modules = parse_module_text(text, Path::new("small.sv"));
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].name, "small");
+    }
+
+    const SV_TYPES: &str = r#"
+package cfg_pkg;
+    parameter int WIDTH = 16;
+    localparam int DEPTH = 4;
+    typedef enum logic [1:0] {S_IDLE, S_RUN} state_e;
+    typedef struct packed { logic [WIDTH-1:0] data; logic last; } beat_t;
+endpackage
+
+interface lb_if (input logic clk);
+    logic valid;
+    modport master (output valid, input clk);
+endinterface
+
+module top #(parameter int N = cfg_pkg::WIDTH) (input logic clk);
+    import cfg_pkg::*;
+    typedef logic [7:0] byte_t;
+    state_e state;
+    beat_t beat;
+    byte_t a, b;
+    lb_if u_if (.clk(clk));
+    lb_if.master bus;
+    generate
+        for (genvar i = 0; i < DEPTH; i++) begin : g
+            sub u_sub (.clk(clk));
+        end
+    endgenerate
+endmodule
+
+module sub(input logic clk);
+    logic flag;
+endmodule
+"#;
+
+    #[test]
+    fn parses_interfaces_packages_and_typedefs() {
+        let modules = parse_module_text(SV_TYPES, Path::new("sv.sv"));
+        assert_eq!(modules.len(), 4);
+        let package = &modules[0];
+        assert_eq!(package.name, "cfg_pkg");
+        assert_eq!(package.kind, DefKind::Package);
+        assert_eq!(package.params.get("WIDTH"), Some(&Some(16)));
+        assert_eq!(package.params.get("DEPTH"), Some(&Some(4)));
+        assert_eq!(package.typedefs.get("state_e").unwrap().width, Some(2));
+
+        let interface = &modules[1];
+        assert_eq!(interface.kind, DefKind::Interface);
+        assert!(interface.signal("valid").is_some());
+
+        let top = &modules[2];
+        assert_eq!(top.kind, DefKind::Module);
+        assert!(top.imports.contains(&"cfg_pkg".to_string()));
+        // User-typed declarations become signals, not instances.
+        assert!(top.signal("state").is_some());
+        assert_eq!(top.signal("state").unwrap().range.as_deref(), Some("1:0"));
+        assert!(top.signal("beat").is_some());
+        assert_eq!(top.signal("beat").unwrap().range.as_deref(), Some("16:0"));
+        assert_eq!(top.signal("a").unwrap().range.as_deref(), Some("7:0"));
+        assert!(top.signal("b").is_some());
+        // Interface instances are instances; interface ports are signals.
+        assert!(top
+            .instances
+            .iter()
+            .any(|inst| inst.module == "lb_if" && inst.name == "u_if"));
+        assert!(top.signal("bus").is_some());
+        assert!(!top.instances.iter().any(|inst| inst.name == "bus"));
+        // `for (genvar i = 0; i < DEPTH; ...)` with an imported parameter.
+        assert_eq!(top.body.len(), 2);
+    }
+
+    #[test]
+    fn package_parameters_and_imports_elaborate() {
+        let dir = std::env::temp_dir().join(format!("waverdi_sv_pkg_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sv.sv");
+        fs::write(&file, SV_TYPES).unwrap();
+        let set = SourceSet::from_files(vec![file], "test");
+        let db = RtlDb::parse_sources(&set);
+        // `pkg::NAME` is visible everywhere, `import pkg::*` binds plain names.
+        let top = db.module("top").unwrap();
+        let env = db.default_env(top);
+        assert_eq!(env.get("cfg_pkg::WIDTH"), Some(&16));
+        assert_eq!(env.get("WIDTH"), Some(&16));
+        assert_eq!(env.get("DEPTH"), Some(&4));
+        assert_eq!(env.get("N"), Some(&16));
+        // The generate loop elaborates into g[0..3].u_sub.
+        let placements = db.placements();
+        let paths: Vec<String> = placements
+            .iter()
+            .map(|(steps, _)| steps.join("."))
+            .collect();
+        for index in 0..4 {
+            assert!(
+                paths
+                    .iter()
+                    .any(|path| path.ends_with(&format!("g[{index}].u_sub"))),
+                "missing g[{index}].u_sub in {paths:?}"
+            );
+        }
     }
 }

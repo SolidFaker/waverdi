@@ -1,5 +1,5 @@
 use super::{App, Dialog};
-use crate::waveform::{Change, Radix, SigKind, Signal, Ticks, Value};
+use crate::waveform::{Change, Radix, SigKind, SigState, Signal, Ticks, Value};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -348,6 +348,16 @@ impl App {
     /// Create the bit/chunk signals of a bus and append them to the waveform.
     /// Returns the `(first, last)` range of the new signals.
     pub(crate) fn append_bit_chunks(&mut self, idx: usize, width: u32) -> Option<(usize, usize)> {
+        if self
+            .wf
+            .as_ref()
+            .and_then(|wf| wf.signals.get(idx))
+            .is_some_and(|signal| signal.state != SigState::Ready)
+        {
+            self.request_signal(idx);
+            self.msg("bus: signal values are being loaded, try again in a moment");
+            return None;
+        }
         let source = self
             .wf
             .as_ref()
@@ -372,10 +382,10 @@ impl App {
             let chunk_bits = (hi - offset) as usize;
             let mut changes: Vec<Change> = Vec::new();
             for change in &source.changes {
-                let Some(bits) = change.v.as_bits() else {
+                let Some(bits) = change.v.to_bits_vec() else {
                     continue;
                 };
-                let value = Value::Bits(
+                let value = Value::compact(
                     (offset..hi)
                         .map(|bit| bits.get(bit as usize).copied().unwrap_or(2))
                         .collect(),
@@ -404,6 +414,8 @@ impl App {
                 min: f64::INFINITY,
                 max: f64::NEG_INFINITY,
                 parent: Some(idx),
+                members: Vec::new(),
+                state: SigState::Ready,
             });
             offset = hi;
         }
@@ -457,6 +469,23 @@ impl App {
         if items.len() < 2 {
             return;
         }
+        let pending: Vec<usize> = items
+            .iter()
+            .map(|item| item.sig)
+            .filter(|&sig| {
+                self.wf
+                    .as_ref()
+                    .and_then(|wf| wf.signals.get(sig))
+                    .is_some_and(|signal| signal.state != SigState::Ready)
+            })
+            .collect();
+        if !pending.is_empty() {
+            for sig in pending {
+                self.request_signal(sig);
+            }
+            self.msg("bus: member values are being loaded, try again in a moment");
+            return;
+        }
         let width: usize = items.iter().map(|item| item.width() as usize).sum();
         let (changes, min, max, scope, base) = {
             let Some(wf) = self.wf.as_ref() else { return };
@@ -473,7 +502,7 @@ impl App {
                 for item in items {
                     let bits = wf.signals[item.sig]
                         .value_at(t)
-                        .and_then(|v| v.as_bits().map(<[u8]>::to_vec));
+                        .and_then(|v| v.to_bits_vec());
                     for bit in (item.lo..=item.hi).rev() {
                         value[width - 1 - pos] = bits
                             .as_ref()
@@ -482,7 +511,7 @@ impl App {
                         pos += 1;
                     }
                 }
-                let value = Value::Bits(value);
+                let value = Value::compact(value);
                 if changes.last().map(|c| c.v == value).unwrap_or(false) {
                     continue;
                 }
@@ -509,6 +538,8 @@ impl App {
             min,
             max,
             parent: None,
+            members: Vec::new(),
+            state: SigState::Ready,
         };
         let new_index = {
             let wf = self.wf.as_mut().unwrap();
@@ -698,16 +729,9 @@ fn bits_range(changes: &[Change]) -> (f64, f64) {
     let mut min = f64::INFINITY;
     let mut max = f64::NEG_INFINITY;
     for change in changes {
-        let Some(bits) = change.v.as_bits() else {
+        let Some(value) = crate::waveform::value_number(&change.v) else {
             continue;
         };
-        if bits.len() > 64 || bits.iter().any(|&b| b >= 2) {
-            continue;
-        }
-        let mut value: u64 = 0;
-        for &b in bits.iter().rev() {
-            value = (value << 1) | b as u64;
-        }
         min = min.min(value as f64);
         max = max.max(value as f64);
     }
@@ -772,7 +796,7 @@ mod tests {
         assert_eq!(wf.signals[6].name, "wide[7:4]");
         assert_eq!(wf.signals[6].bits, 4);
         // wide = 0b10101010 -> [3:0] = 0xa
-        let low = wf.signals[5].value_at(10).unwrap().as_bits().unwrap();
+        let low = wf.signals[5].value_at(10).unwrap().to_bits_vec().unwrap();
         assert_eq!(low, &[0, 1, 0, 1]);
     }
 
@@ -789,7 +813,7 @@ mod tests {
         assert_eq!(wf.signals[7].name, "wide[7:6]");
         assert_eq!(wf.signals[7].bits, 2);
         // wide = 0b10101010 -> [7:6] = 0b10
-        let top = wf.signals[7].value_at(10).unwrap().as_bits().unwrap();
+        let top = wf.signals[7].value_at(10).unwrap().to_bits_vec().unwrap();
         assert_eq!(top, &[0, 1]);
     }
 
@@ -807,7 +831,7 @@ mod tests {
         assert_eq!(bus.bits, 3);
         assert_eq!(bus.name, "b2_bus[2:0]");
         // at t=15: b2=0 (MSB), b1=1, b0=1 -> 0b011
-        let bits = bus.value_at(15).unwrap().as_bits().unwrap();
+        let bits = bus.value_at(15).unwrap().to_bits_vec().unwrap();
         assert_eq!(bits, &[1, 1, 0]);
     }
 
@@ -837,10 +861,10 @@ mod tests {
         assert_eq!(bus.bits, 3);
         assert_eq!(bus.name, "data_bus[2:0]");
         // at t=5: data=0000 -> [3:2]=00, b0=1 -> 0b001
-        let bits = bus.value_at(5).unwrap().as_bits().unwrap();
+        let bits = bus.value_at(5).unwrap().to_bits_vec().unwrap();
         assert_eq!(bits, &[1, 0, 0]);
         // at t=15: data=1010 -> [3:2]=10, b0=1 -> 0b101
-        let bits = bus.value_at(15).unwrap().as_bits().unwrap();
+        let bits = bus.value_at(15).unwrap().to_bits_vec().unwrap();
         assert_eq!(bits, &[1, 0, 1]);
     }
 

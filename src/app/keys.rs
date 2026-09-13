@@ -48,6 +48,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     match key.code {
         KeyCode::Char('q') => true,
         KeyCode::Esc => {
+            if app.load.is_some() {
+                app.cancel_load();
+            }
             app.selection.clear();
             app.sel_anchor = None;
             app.visual = false;
@@ -1543,12 +1546,13 @@ mod tests {
             app.add_source_word();
         };
 
-        // The whole array, a sub-array and one element.
+        // The whole array, a sub-array and one element. The scope aggregate
+        // occupies one slot after the dump signals, so parents shift by one.
         add(&mut app, "assign x = arr;");
-        assert_eq!(app.display, vec![6]);
+        assert_eq!(app.display, vec![7]);
         app.clear_all();
         add(&mut app, "assign x = arr[0];");
-        assert_eq!(app.display, vec![4]);
+        assert_eq!(app.display, vec![5]);
         app.clear_all();
         add(&mut app, "assign x = arr[1][1];");
         assert_eq!(app.display, vec![3]);
@@ -1680,9 +1684,10 @@ mod tests {
         };
         app.set_source_cursor(line, col);
         app.add_source_word();
-        // The synthesized `stage` group is appended after the dump signals.
-        assert_eq!(app.display, vec![1]);
-        assert_eq!(app.wf.as_ref().unwrap().signals[1].name, "stage");
+        // The synthesized `stage` group is appended after the dump signals
+        // and the scope aggregate (index 1).
+        assert_eq!(app.display, vec![2]);
+        assert_eq!(app.wf.as_ref().unwrap().signals[2].name, "stage");
     }
 
     #[test]

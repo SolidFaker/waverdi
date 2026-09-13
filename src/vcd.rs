@@ -1,5 +1,7 @@
-﻿use crate::dump::ParseOut;
-use crate::waveform::{Change, ScopeTree, SigKind, Signal, Ticks, TimeScale, Value, Waveform};
+use crate::dump::ParseOut;
+use crate::waveform::{
+    Change, ScopeTree, SigKind, SigState, Signal, Ticks, TimeScale, Value, Waveform,
+};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -253,6 +255,8 @@ impl Parser {
                         min: f64::INFINITY,
                         max: f64::NEG_INFINITY,
                         parent: None,
+                        members: Vec::new(),
+                        state: SigState::Ready,
                     };
                     self.wf.signals.push(sig);
                     self.idmap.insert(id, idx);
@@ -292,7 +296,7 @@ impl Parser {
                 } else if b.len() > w {
                     b.truncate(w);
                 }
-                Value::Bits(b)
+                Value::compact(b)
             }
             other => other,
         };
@@ -518,9 +522,9 @@ $end
         let clk = &w.signals[0];
         let ts: Vec<u64> = clk.changes.iter().map(|c| c.t).collect();
         assert_eq!(ts, vec![0, 10]);
-        assert_eq!(clk.value_at(0).unwrap().as_bits(), Some(&[0u8][..]));
-        assert_eq!(clk.value_at(5).unwrap().as_bits(), Some(&[0u8][..]));
-        assert_eq!(clk.value_at(10).unwrap().as_bits(), Some(&[1u8][..]));
+        assert_eq!(clk.value_at(0).unwrap().to_bits_vec(), Some(vec![0u8]));
+        assert_eq!(clk.value_at(5).unwrap().to_bits_vec(), Some(vec![0u8]));
+        assert_eq!(clk.value_at(10).unwrap().to_bits_vec(), Some(vec![1u8]));
     }
 
     #[test]
@@ -543,31 +547,16 @@ $end
 "#;
         let (w, _) = wf(vcd);
         assert_eq!(
-            w.signals[0].value_at(0).unwrap().as_bits(),
-            Some(&[2u8][..])
+            w.signals[0].value_at(0).unwrap().to_bits_vec(),
+            Some(vec![2u8])
         );
-        let b = w.signals[1]
-            .value_at(0)
-            .unwrap()
-            .as_bits()
-            .unwrap()
-            .to_vec();
+        let b = w.signals[1].value_at(0).unwrap().to_bits_vec().unwrap();
         assert_eq!(b, vec![1, 2, 0, 1]);
-        let c = w.signals[2]
-            .value_at(0)
-            .unwrap()
-            .as_bits()
-            .unwrap()
-            .to_vec();
+        let c = w.signals[2].value_at(0).unwrap().to_bits_vec().unwrap();
         assert_eq!(c[0], 3); // lsb nibble z
         assert_eq!(c[4], 0); // msb nibble 0xA
         assert_eq!(c[5], 1);
-        let d = w.signals[3]
-            .value_at(0)
-            .unwrap()
-            .as_bits()
-            .unwrap()
-            .to_vec();
+        let d = w.signals[3].value_at(0).unwrap().to_bits_vec().unwrap();
         assert_eq!(d.len(), 8);
         let mut v: u64 = 0;
         for (i, &bit) in d.iter().enumerate() {
@@ -575,8 +564,8 @@ $end
         }
         assert_eq!(v, 255);
         assert_eq!(
-            w.signals[0].value_at(5).unwrap().as_bits(),
-            Some(&[3u8][..])
+            w.signals[0].value_at(5).unwrap().to_bits_vec(),
+            Some(vec![3u8])
         );
     }
 
@@ -616,10 +605,10 @@ b101 #
 $end
 "#;
         let (w, _) = wf(vcd);
-        let d = w.signals[0].value_at(0).unwrap().as_bits().unwrap();
-        assert_eq!(d, &[1, 2, 2, 2, 2, 2, 2, 2]);
-        let e = w.signals[1].value_at(0).unwrap().as_bits().unwrap();
-        assert_eq!(e, &[1, 0]);
+        let d = w.signals[0].value_at(0).unwrap().to_bits_vec().unwrap();
+        assert_eq!(d, vec![1, 2, 2, 2, 2, 2, 2, 2]);
+        let e = w.signals[1].value_at(0).unwrap().to_bits_vec().unwrap();
+        assert_eq!(e, vec![1, 0]);
     }
 
     #[test]

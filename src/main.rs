@@ -84,21 +84,19 @@ fn main() {
     }
 
     if let Some(file) = &cli.file {
-        match dump::parse(file) {
-            Ok(out) => {
-                if cli.list_signals {
+        if cli.list_signals {
+            match dump::parse(file) {
+                Ok(out) => {
                     print_tree(&out.wf);
                     return;
                 }
-                let path = file.display().to_string();
-                app.apply_parsed(path.clone(), out);
-                app::set_title(&path);
-            }
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
             }
         }
+        app.start_load(&file.display().to_string());
     } else if cli.list_signals {
         eprintln!("waverdi: --list-signals requires a VCD file");
         std::process::exit(1);

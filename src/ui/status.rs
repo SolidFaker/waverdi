@@ -42,6 +42,15 @@ pub fn draw_status(buf: &mut Buffer, l: &Layout, app: &App) {
         x = (x + shown.chars().count() as u16).min(l.status.right());
     };
 
+    if let Some(progress) = app.load_progress_text() {
+        write(" ", Style::new().fg(t.path));
+        write(
+            &progress,
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+        );
+        return;
+    }
+
     if app.path.is_empty() {
         write(" no file", Style::new().fg(t.dim));
     } else {

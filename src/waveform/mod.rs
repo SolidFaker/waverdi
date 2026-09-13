@@ -4,13 +4,14 @@ mod time;
 mod tree;
 mod value;
 
-pub use signal::{Change, SigKind, Signal};
+pub use signal::{Change, SigKind, SigState, Signal};
 pub use time::{format_time, format_time_base, nice_step, TimeBase, TimeScale};
 pub use tree::ScopeTree;
-pub use value::{fmt_bits, fmt_real, Radix, Value};
+pub use value::{fmt_real, fmt_value, value_number, Radix, Value};
 
 pub type Ticks = u64;
 
+#[derive(Clone)]
 pub struct Waveform {
     pub ts: TimeScale,
     pub start: Ticks,

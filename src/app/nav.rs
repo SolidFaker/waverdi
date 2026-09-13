@@ -108,11 +108,13 @@ impl App {
         }
     }
 
-    /// Insert a signal at `at` and hand it to `group`.
+    /// Insert a signal at `at` and hand it to `group`. Lazily loaded signals
+    /// request their value changes from the backend as soon as they are added.
     pub(crate) fn display_insert(&mut self, group: usize, at: usize, sig: usize) {
         let at = at.min(self.display.len());
         self.display.insert(at, sig);
         self.groups[group].count += 1;
+        self.request_signal(sig);
     }
 
     /// Append a fresh empty group when a signal lands in the newest group.
@@ -492,13 +494,7 @@ impl App {
     /// or collapse the bit rows created earlier (also those of `Split Bus`).
     pub fn toggle_signal_expand(&mut self, sig: usize) {
         let children: Vec<usize> = match &self.wf {
-            Some(wf) => wf
-                .signals
-                .iter()
-                .enumerate()
-                .filter(|(_, signal)| signal.parent == Some(sig))
-                .map(|(index, _)| index)
-                .collect(),
+            Some(wf) => wf.children(sig),
             None => return,
         };
         let Some(pos) = self.display.iter().position(|&s| s == sig) else {
@@ -566,11 +562,9 @@ impl App {
         let mut out = Vec::new();
         let mut stack = vec![root];
         while let Some(node) = stack.pop() {
-            for (index, signal) in wf.signals.iter().enumerate() {
-                if signal.parent == Some(node) {
-                    out.push(index);
-                    stack.push(index);
-                }
+            for child in wf.children(node) {
+                out.push(child);
+                stack.push(child);
             }
         }
         out
@@ -1012,7 +1006,9 @@ impl App {
         wf.signals
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.full_name().to_lowercase().contains(&query))
+            .filter(|(_, s)| {
+                s.var_type != "aggregate" && s.full_name().to_lowercase().contains(&query)
+            })
             .map(|(i, _)| i)
             .take(200)
             .collect()

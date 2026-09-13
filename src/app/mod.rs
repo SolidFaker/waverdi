@@ -4,6 +4,7 @@ mod context;
 mod dialog;
 mod input;
 mod keys;
+mod load;
 mod mouse;
 mod nav;
 mod value;
@@ -16,6 +17,7 @@ pub use context::{BusBuilder, ContextMenu, CtxEntry, CtxTarget};
 pub use dialog::Dialog;
 pub use input::{parse_time_spec, InputState};
 pub use keys::handle_key;
+pub use load::{LoadEvent, LoadJob};
 pub use mouse::handle_mouse;
 pub use nav::{Group, ListRow};
 
@@ -196,6 +198,8 @@ pub struct App {
     pub(crate) last_source_trace: Option<String>,
     /// True once a filelist was given explicitly (disables auto-discovery).
     pub sources_explicit: bool,
+    /// Background waveform load in flight (progress shown in the status line).
+    pub load: Option<LoadJob>,
     pending_fit: bool,
 }
 
@@ -258,6 +262,7 @@ impl App {
             source_view: None,
             last_source_trace: None,
             sources_explicit: false,
+            load: None,
             pending_fit: false,
         };
         app.msg("waverdi 0.1 — press 'o' to open a waveform dump, F1/? for key bindings");
@@ -319,19 +324,158 @@ impl App {
         (center - 0.5 * self.scale, center + 0.5 * self.scale)
     }
 
-    /// Load a VCD from disk, reporting failures through the message log.
-    pub fn load(&mut self, path: &str) -> bool {
-        self.msg(format!("Loading {path} ..."));
-        match crate::dump::parse(Path::new(path)) {
-            Ok(out) => {
-                self.apply_parsed(path, out);
-                set_title(path);
-                true
+    /// Start loading a waveform on a background thread; the status line shows
+    /// progress while it runs.
+    pub fn start_load(&mut self, path: &str) {
+        if let Some(job) = &self.load {
+            job.cancel();
+        }
+        // The old dump is about to be replaced: stop any lazy loads for it so
+        // their requests cannot be routed to the new backend.
+        if let Some(wf) = &mut self.wf {
+            for signal in &mut wf.signals {
+                if signal.state != crate::waveform::SigState::Ready {
+                    signal.state = crate::waveform::SigState::Ready;
+                }
             }
-            Err(e) => {
-                self.msg(format!("Error: {e}"));
-                self.dialog = None;
-                false
+        }
+        self.msg(format!("Loading {path} ..."));
+        self.load = Some(LoadJob::start(path, !self.sources_explicit));
+    }
+
+    /// Cancel an in-flight background load.
+    pub fn cancel_load(&mut self) {
+        if let Some(job) = &self.load {
+            if !job.finished {
+                job.cancel();
+                self.msg("Cancelling load ...");
+            }
+        }
+    }
+
+    /// Ask the backend for the value changes of a lazily loaded signal (and
+    /// of the array signals that complete together with it).
+    pub fn request_signal(&mut self, index: usize) {
+        let Some(wf) = self.wf.as_mut() else { return };
+        let Some(signal) = wf.signals.get(index) else {
+            return;
+        };
+        if signal.state != crate::waveform::SigState::Lazy {
+            return;
+        }
+        // An aggregate whose members are all loaded (or an eager dump) is
+        // computed locally; only missing values need the backend.
+        if wf.recompute_aggregate(index) {
+            return;
+        }
+        let sent = self
+            .load
+            .as_ref()
+            .map(|job| job.request(index))
+            .unwrap_or(false);
+        if sent {
+            wf.signals[index].state = crate::waveform::SigState::Loading;
+        } else {
+            self.msg("waveform backend is no longer available for this dump");
+        }
+    }
+
+    /// Message for the status line while a background load is running.
+    pub fn load_progress_text(&self) -> Option<String> {
+        let job = self.load.as_ref().filter(|job| !job.finished)?;
+        let progress = job.progress;
+        let stage = match progress.stage {
+            crate::dump::Stage::Waveform => "signals",
+            crate::dump::Stage::Rtl => "RTL files",
+        };
+        let items = if progress.total > 0 {
+            format!("{} {}/{}", stage, progress.done, progress.total)
+        } else {
+            format!("{stage} ...")
+        };
+        let changes = if progress.changes > 0 {
+            format!(", {} value changes", progress.changes)
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "loading {}: {items}{changes} — Esc cancels",
+            job.path
+        ))
+    }
+
+    /// Drain background loader events; called from the idle tick.
+    pub fn poll_load(&mut self) {
+        loop {
+            let event = match self.load.as_ref().map(LoadJob::try_recv) {
+                Some(Ok(event)) => event,
+                Some(Err(std::sync::mpsc::TryRecvError::Empty)) => break,
+                Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                    self.load = None;
+                    break;
+                }
+                None => break,
+            };
+            match event {
+                LoadEvent::Progress(progress) => {
+                    if let Some(job) = &mut self.load {
+                        job.progress = progress;
+                    }
+                }
+                LoadEvent::Waveform(out) => {
+                    let path = self
+                        .load
+                        .as_ref()
+                        .map(|job| job.path.clone())
+                        .unwrap_or_default();
+                    self.apply_waveform(path.clone(), out.wf, out.warnings);
+                    set_title(&path);
+                }
+                LoadEvent::Rtl(set, db) => {
+                    self.msg(format!(
+                        "RTL parsed: {} module(s) in {} file(s)",
+                        db.modules.len(),
+                        db.files.len()
+                    ));
+                    self.sources = Some(*set);
+                    self.rtl = Some(*db);
+                    self.source_view = None;
+                    self.last_source_trace = None;
+                    self.sync_source();
+                }
+                LoadEvent::Changes(updates, warnings) => {
+                    self.apply_signal_changes(updates);
+                    for warning in warnings {
+                        self.msg(format!("  warn: {warning}"));
+                    }
+                }
+                LoadEvent::Failed(err) => {
+                    self.load = None;
+                    if err == "load cancelled" {
+                        self.msg("Load cancelled");
+                    } else {
+                        self.msg(format!("Error: {err}"));
+                        self.dialog = None;
+                    }
+                    break;
+                }
+                LoadEvent::Done => {
+                    if let Some(job) = &mut self.load {
+                        job.finished = true;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Install value changes that arrived from a lazy backend.
+    fn apply_signal_changes(&mut self, updates: Vec<(usize, Vec<crate::waveform::Change>)>) {
+        let Some(wf) = self.wf.as_mut() else { return };
+        for (index, changes) in updates {
+            if let Some(signal) = wf.signals.get_mut(index) {
+                signal.changes = changes;
+                signal.state = crate::waveform::SigState::Ready;
             }
         }
     }
@@ -359,7 +503,7 @@ impl App {
         self.browser_mode = BrowserMode::Waveform;
         if self.use_gui {
             if let Some(path) = crate::picker::pick_vcd() {
-                self.load(&path.display().to_string());
+                self.start_load(&path.display().to_string());
             }
             return;
         }
@@ -382,7 +526,7 @@ impl App {
     pub(crate) fn browser_load(&mut self, path: &str) {
         match self.browser_mode {
             BrowserMode::Waveform => {
-                self.load(path);
+                self.start_load(path);
             }
             BrowserMode::Filelist => {
                 self.load_filelist(path);
@@ -406,17 +550,44 @@ impl App {
         self.open_dialog(Dialog::Open);
     }
 
-    /// Install a parsed waveform and reset the view state.
+    /// Install a parsed waveform and reset the view state. Array grouping is
+    /// done here; the background loader uses [`App::apply_waveform`] instead.
+    #[cfg(test)]
     pub fn apply_parsed(&mut self, path: impl Into<String>, out: crate::dump::ParseOut) {
         let mut wf = out.wf;
         // Unpacked arrays are dumped element by element; group them under
-        // expandable parent signals.
+        // expandable parent signals. Dump scopes (structs, interfaces) get an
+        // aggregate signal each.
         wf.build_arrays();
+        wf.build_scope_aggregates();
+        self.apply_waveform(path.into(), wf, out.warnings);
+
+        // FSDB dumps that sit next to the Verdi KDB can recover their source
+        // list automatically; an explicit filelist always wins.
+        if !self.sources_explicit {
+            self.sources = self
+                .path
+                .ends_with(".fsdb")
+                .then(|| SourceSet::discover_from_dump(Path::new(&self.path)))
+                .flatten();
+            if let Some(set) = &self.sources {
+                self.msg(format!(
+                    "RTL sources: {} file(s) from {}",
+                    set.files.len(),
+                    set.origin
+                ));
+            }
+            self.rebuild_rtl();
+        }
+    }
+
+    /// Install an already grouped waveform and reset the view state.
+    pub fn apply_waveform(&mut self, path: String, wf: Waveform, warnings: Vec<String>) {
         self.msg(format!("Loaded {}", wf.summary()));
-        for warning in out.warnings {
+        for warning in warnings {
             self.msg(format!("  warn: {warning}"));
         }
-        self.path = path.into();
+        self.path = path;
         self.expanded.clear();
         self.expanded.insert(wf.tree.root);
         self.display.clear();
@@ -452,24 +623,6 @@ impl App {
         self.time_menu = None;
         self.focus = Focus::Tree;
         self.pending_fit = true;
-
-        // FSDB dumps that sit next to the Verdi KDB can recover their source
-        // list automatically; an explicit filelist always wins.
-        if !self.sources_explicit {
-            self.sources = self
-                .path
-                .ends_with(".fsdb")
-                .then(|| SourceSet::discover_from_dump(Path::new(&self.path)))
-                .flatten();
-            if let Some(set) = &self.sources {
-                self.msg(format!(
-                    "RTL sources: {} file(s) from {}",
-                    set.files.len(),
-                    set.origin
-                ));
-            }
-            self.rebuild_rtl();
-        }
     }
 
     /// Parse the current source set into the RTL database.
@@ -955,8 +1108,9 @@ impl App {
             (self.foreign_scope(module)?, Default::default())
         };
         let (path, signal) = rtl.resolve_reference_with(module, chain, name, &bindings)?;
+        let base_scope = base.clone();
         let mut scope = base;
-        scope.extend(path);
+        scope.extend(path.iter().cloned());
         // `arr[i][j]` first, then drop dimensions (`arr[i]`, `arr`) so both
         // whole arrays and their elements can be added.
         let mut candidates: Vec<String> = Vec::new();
@@ -976,7 +1130,29 @@ impl App {
                 return Some(index);
             }
         }
-        self.find_signal_exact(&scope, &signal)
+        if let Some(index) = self.find_signal_exact(&scope, &signal) {
+            return Some(index);
+        }
+        // A whole struct variable, interface or instance is added as the
+        // aggregate of its dump scope (`{member, ...}`, expandable).
+        let mut aggregate_scope = scope.clone();
+        if !signal.is_empty() {
+            aggregate_scope.push(signal.clone());
+        }
+        let aggregate = self
+            .wf
+            .as_ref()
+            .and_then(|wf| wf.scope_aggregate(&aggregate_scope));
+        if aggregate.is_some() {
+            return aggregate;
+        }
+        // `sig.field` of a packed struct dumped as one vector: the head.
+        if path.len() == 1 {
+            if let Some(index) = self.find_signal_exact(&base_scope, &path[0]) {
+                return Some(index);
+            }
+        }
+        None
     }
 
     /// Instance scope of `module` to use when adding a signal from code that
@@ -1197,14 +1373,7 @@ impl App {
             let children: Vec<usize> = self
                 .wf
                 .as_ref()
-                .map(|wf| {
-                    wf.signals
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, signal)| signal.parent == Some(node))
-                        .map(|(index, _)| index)
-                        .collect()
-                })
+                .map(|wf| wf.children(node))
                 .unwrap_or_default();
             stack.extend(children);
         }
@@ -1331,6 +1500,7 @@ pub fn set_title(path: &str) {
 /// no input events arrive (e.g. auto-scrolling a dragged Source selection).
 pub fn tick(app: &mut App) {
     app.tick_source_drag();
+    app.poll_load();
 }
 
 #[cfg(test)]
@@ -1473,5 +1643,72 @@ mod tests {
         }
         assert_eq!(seen.len(), Radix::CYCLE.len());
         assert_eq!(app.radix_for(1), start);
+    }
+
+    #[test]
+    fn adding_a_scope_aggregate_shows_brace_values() {
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $scope module dut $end\n\
+            $var wire 1 ! run $end\n\
+            $var wire 4 \" pc [3:0] $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\nb0101 \"\n";
+        let out = crate::vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(Rect::new(0, 0, 100, 40));
+        let aggregate = app
+            .wf
+            .as_ref()
+            .and_then(|wf| wf.scope_aggregate(&["tb".to_string(), "dut".to_string()]))
+            .expect("scope aggregate");
+        assert_eq!(
+            app.wf.as_ref().unwrap().signals[aggregate].var_type,
+            "aggregate"
+        );
+        app.add_signal(aggregate);
+        let signal = &app.wf.as_ref().unwrap().signals[aggregate];
+        assert_eq!(signal.state, crate::waveform::SigState::Ready);
+        assert!(
+            signal.display_value(0, Radix::Hex).starts_with('{'),
+            "{}",
+            signal.display_value(0, Radix::Hex)
+        );
+        // The members can still be added on their own.
+        app.add_signal(aggregate);
+        let children = app.wf.as_ref().unwrap().children(aggregate);
+        assert_eq!(children.len(), 2);
+    }
+
+    #[test]
+    fn background_load_applies_the_waveform() {
+        let dir = std::env::temp_dir().join(format!("waverdi_app_load_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let vcd = dir.join("wave.vcd");
+        std::fs::write(
+            &vcd,
+            "$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n#0\n0!\n#10\n1!\n",
+        )
+        .unwrap();
+
+        let mut app = App::new();
+        app.start_load(&vcd.display().to_string());
+        assert!(app.load.is_some());
+        for _ in 0..500 {
+            app.poll_load();
+            if app.wf.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let wf = app.wf.as_ref().expect("waveform loaded");
+        assert_eq!(wf.signals.len(), 1);
+        assert_eq!(app.path, vcd.display().to_string());
+        assert!(
+            app.load.as_ref().is_some_and(|job| job.finished),
+            "loader marked finished after Done"
+        );
     }
 }

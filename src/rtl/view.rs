@@ -45,6 +45,29 @@ pub struct SourceView {
     pub sel: Option<((usize, usize), (usize, usize))>,
 }
 
+/// Tab width used when expanding source text for display.
+const TAB_WIDTH: usize = 4;
+
+/// Expand tabs to spaces so every source character occupies exactly one cell.
+fn expand_tabs(line: &str) -> String {
+    if !line.contains('\t') {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len() + 8);
+    let mut col = 0usize;
+    for ch in line.chars() {
+        if ch == '\t' {
+            let spaces = TAB_WIDTH - (col % TAB_WIDTH);
+            out.push_str(&" ".repeat(spaces));
+            col += spaces;
+        } else {
+            out.push(ch);
+            col += 1;
+        }
+    }
+    out
+}
+
 impl SourceView {
     /// Load the module's file and classify its identifiers with the RTL AST:
     /// declared signals and instance-qualified references (`u_dut.count`).
@@ -53,7 +76,10 @@ impl SourceView {
     /// module that owns it, not with the active one.
     pub fn load(def: &ModuleDef, db: &RtlDb) -> Option<SourceView> {
         let text = fs::read_to_string(&def.file).ok()?;
-        let lines: Vec<String> = text.lines().map(str::to_string).collect();
+        // Tabs are expanded for display: a raw tab written into a TUI cell
+        // makes the terminal jump to the next tab stop and shifts the rest of
+        // the line, which looks like garbled/overlapping text.
+        let lines: Vec<String> = text.lines().map(expand_tabs).collect();
         if lines.is_empty() {
             return None;
         }
@@ -630,6 +656,32 @@ mod tests {
         let db = RtlDb::parse_sources(&set);
         let def = db.module("counter").expect("module");
         SourceView::load(def, &db).expect("view")
+    }
+
+    #[test]
+    fn expands_tabs_to_spaces() {
+        assert_eq!(expand_tabs("\tlogic\tx;"), "    logic   x;");
+        assert_eq!(expand_tabs("a\tb\tc"), "a   b   c");
+        assert_eq!(expand_tabs("no tabs"), "no tabs");
+    }
+
+    #[test]
+    fn tabs_in_source_render_as_spaces() {
+        let dir = std::env::temp_dir().join(format!("waverdi_view_tab_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("if.sv");
+        fs::write(
+            &file,
+            "interface lb_if;\n\tlogic\t[7:0] data;\nendinterface\n",
+        )
+        .unwrap();
+        let set = crate::rtl::SourceSet::from_files(vec![file], "test");
+        let db = RtlDb::parse_sources(&set);
+        let def = db.module("lb_if").expect("interface");
+        let view = SourceView::load(def, &db).expect("view");
+        assert_eq!(view.lines[1], "    logic   [7:0] data;");
+        assert!(!view.lines.iter().any(|line| line.contains('\t')));
     }
 
     #[test]

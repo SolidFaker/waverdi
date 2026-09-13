@@ -1,5 +1,5 @@
 ﻿use super::{App, Dialog};
-use crate::waveform::{fmt_bits, fmt_real, format_time, Radix, SigKind, Value};
+use crate::waveform::{fmt_real, format_time, Radix, SigKind, Value};
 
 impl App {
     /// Open the "Find Value" dialog, pre-filled with the last query.
@@ -32,6 +32,21 @@ impl App {
             self.msg("select a signal before searching for a value");
             return;
         };
+        let Some((state, name)) = self
+            .wf
+            .as_ref()
+            .and_then(|wf| wf.signals.get(index))
+            .map(|signal| (signal.state, signal.full_name()))
+        else {
+            return;
+        };
+        if state != crate::waveform::SigState::Ready {
+            self.request_signal(index);
+            self.msg(format!(
+                "{name}: values are being loaded, try again in a moment"
+            ));
+            return;
+        }
         let Some(signal) = self.wf.as_ref().map(|wf| &wf.signals[index]) else {
             return;
         };
@@ -80,7 +95,9 @@ impl App {
 
 fn value_matches(value: &Value, kind: SigKind, radix: Radix, query: &str) -> bool {
     match (kind, value) {
-        (SigKind::Bits, Value::Bits(bits)) => same_value_text(&fmt_bits(bits, radix), query),
+        (SigKind::Bits, Value::Small(..) | Value::Bits(_)) => {
+            same_value_text(&crate::waveform::fmt_value(value, radix), query)
+        }
         (SigKind::Real, Value::Real(real)) => query
             .trim()
             .parse::<f64>()

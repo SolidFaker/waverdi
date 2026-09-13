@@ -21,11 +21,15 @@ typedef void (*wav_var_cb)(void *user, const char *name, long long idcode,
                            unsigned lbit, unsigned rbit, unsigned dtidcode,
                            unsigned var_type, unsigned bytes_per_bit);
 typedef void (*wav_upscope_cb)(void *user);
+typedef void (*wav_group_cb)(void *user, const char *name, unsigned field_count);
+typedef void (*wav_group_end_cb)(void *user);
 
 struct WavCallbacks {
     wav_scope_cb scope;
     wav_var_cb var;
     wav_upscope_cb upscope;
+    wav_group_cb group_begin;
+    wav_group_end_cb group_end;
     void *user;
 };
 
@@ -58,6 +62,25 @@ bool_T tree_cb(fsdbTreeCBType type, void *client, void *data) {
     }
     case FSDB_TREE_CBT_UPSCOPE:
         fsdb->cbs.upscope(fsdb->cbs.user);
+        break;
+    case FSDB_TREE_CBT_STRUCT_BEGIN: {
+        // SV struct/union: its fields are emitted as variables right after.
+        auto *group = static_cast<fsdbTreeCBDataStructBegin *>(data);
+        fsdb->cbs.group_begin(fsdb->cbs.user, safe(group->name),
+                              (unsigned)group->fieldCount);
+        break;
+    }
+    case FSDB_TREE_CBT_STRUCT_END:
+        fsdb->cbs.group_end(fsdb->cbs.user);
+        break;
+    case FSDB_TREE_CBT_RECORD_BEGIN: {
+        auto *group = static_cast<fsdbTreeCBDataRecordBegin *>(data);
+        fsdb->cbs.group_begin(fsdb->cbs.user, safe(group->name),
+                              (unsigned)group->fieldCount);
+        break;
+    }
+    case FSDB_TREE_CBT_RECORD_END:
+        fsdb->cbs.group_end(fsdb->cbs.user);
         break;
     default:
         break;
@@ -101,14 +124,17 @@ int wav_fsdb_is_fsdb(const char *path) {
 }
 
 void *wav_fsdb_open(const char *path, wav_scope_cb scope_cb, wav_var_cb var_cb,
-                    wav_upscope_cb upscope_cb, void *user) {
+                    wav_upscope_cb upscope_cb, wav_group_cb group_begin_cb,
+                    wav_group_end_cb group_end_cb, void *user) {
     waverdi_libnsys_anchor = (void *)&sysBusyOn;
     silence_ffr_messages();
     ffrObject *obj = ffrObject::ffrOpen3((str_T)path);
     if (!obj) {
         return nullptr;
     }
-    WavFsdb *fsdb = new (std::nothrow) WavFsdb{obj, {scope_cb, var_cb, upscope_cb, user}};
+    WavFsdb *fsdb = new (std::nothrow)
+        WavFsdb{obj, {scope_cb, var_cb, upscope_cb, group_begin_cb,
+                      group_end_cb, user}};
     if (!fsdb) {
         obj->ffrClose();
         return nullptr;

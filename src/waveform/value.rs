@@ -1,14 +1,78 @@
 #[derive(Clone, PartialEq, Debug)]
 pub enum Value {
+    /// Signals up to [`SMALL_MAX_BITS`] bits, packed two bits per bit (the
+    /// same 0/1/2/3 coding as [`Value::Bits`]), LSB first. Keeps the common
+    /// narrow signals (clocks, counters, state) free of per-change heap
+    /// allocations.
+    Small(u64, u8),
     Bits(Vec<u8>),
     Real(f64),
     Str(String),
 }
 
+/// Widest signal stored inline in [`Value::Small`].
+pub const SMALL_MAX_BITS: usize = 32;
+
 impl Value {
-    pub fn as_bits(&self) -> Option<&[u8]> {
+    /// Pack `bits` inline when the signal is narrow enough, else keep the
+    /// byte-per-bit vector.
+    pub fn compact(bits: Vec<u8>) -> Value {
+        if bits.len() <= SMALL_MAX_BITS {
+            let mut packed = 0u64;
+            for (i, &b) in bits.iter().enumerate() {
+                packed |= ((b & 3) as u64) << (2 * i);
+            }
+            Value::Small(packed, bits.len() as u8)
+        } else {
+            Value::Bits(bits)
+        }
+    }
+
+    /// Number of bits of a logic value (0 for real/string values).
+    pub fn bits_len(&self) -> usize {
         match self {
-            Value::Bits(bits) => Some(bits),
+            Value::Small(_, width) => *width as usize,
+            Value::Bits(bits) => bits.len(),
+            _ => 0,
+        }
+    }
+
+    /// Bit `i` (LSB first) as a 0/1/2/3 code.
+    pub fn bit(&self, i: usize) -> Option<u8> {
+        match self {
+            Value::Small(packed, width) if i < *width as usize => {
+                Some(((packed >> (2 * i)) & 3) as u8)
+            }
+            Value::Bits(bits) => bits.get(i).copied(),
+            _ => None,
+        }
+    }
+
+    /// True when any bit of a logic value is `x` or `z`.
+    pub fn has_unknown(&self) -> bool {
+        match self {
+            Value::Small(packed, width) => {
+                let mask = if *width as usize >= 32 {
+                    u64::MAX
+                } else {
+                    (1u64 << (2 * *width as usize)) - 1
+                };
+                packed & mask & 0xAAAA_AAAA_AAAA_AAAA != 0
+            }
+            Value::Bits(bits) => bits.iter().any(|&b| b >= 2),
+            _ => false,
+        }
+    }
+
+    /// Byte-per-bit copy of a logic value.
+    pub fn to_bits_vec(&self) -> Option<Vec<u8>> {
+        match self {
+            Value::Small(packed, width) => Some(
+                (0..*width as usize)
+                    .map(|i| ((packed >> (2 * i)) & 3) as u8)
+                    .collect(),
+            ),
+            Value::Bits(bits) => Some(bits.clone()),
             _ => None,
         }
     }
@@ -19,6 +83,50 @@ impl Value {
             _ => None,
         }
     }
+}
+
+/// Format any value; logic values go through `fmt_bits`.
+pub fn fmt_value(value: &Value, radix: Radix) -> String {
+    match value {
+        Value::Small(packed, width) => fmt_packed(*packed, *width as usize, radix),
+        Value::Bits(bits) => fmt_bits(bits, radix),
+        Value::Real(real) => fmt_real(*real),
+        Value::Str(s) => s.clone(),
+    }
+}
+
+/// Decimal value of an all-known logic value (unknowns give `None`).
+pub fn value_number(value: &Value) -> Option<u64> {
+    if value.has_unknown() {
+        return None;
+    }
+    match value {
+        Value::Small(packed, width) => {
+            let mut v = 0u64;
+            for i in (0..*width as usize).rev() {
+                v = (v << 1) | ((packed >> (2 * i)) & 1);
+            }
+            Some(v)
+        }
+        Value::Bits(bits) => {
+            if bits.len() > 64 {
+                return None;
+            }
+            let mut v = 0u64;
+            for &b in bits.iter().rev() {
+                v = (v << 1) | b as u64;
+            }
+            Some(v)
+        }
+        _ => None,
+    }
+}
+
+fn fmt_packed(packed: u64, width: usize, radix: Radix) -> String {
+    let bits: Vec<u8> = (0..width)
+        .map(|i| ((packed >> (2 * i)) & 3) as u8)
+        .collect();
+    fmt_bits(&bits, radix)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -199,5 +307,32 @@ mod tests {
             r = r.next();
         }
         assert_eq!(r, Radix::Bin);
+    }
+
+    #[test]
+    fn compact_values_roundtrip() {
+        let bits = vec![0u8, 1, 2, 3, 1, 0, 1];
+        let value = Value::compact(bits.clone());
+        assert!(matches!(value, Value::Small(..)));
+        assert_eq!(value.to_bits_vec(), Some(bits.clone()));
+        assert_eq!(fmt_value(&value, Radix::Hex), fmt_bits(&bits, Radix::Hex));
+        assert_eq!(fmt_value(&value, Radix::Bin), fmt_bits(&bits, Radix::Bin));
+        assert!(value.has_unknown());
+        assert_eq!(value_number(&value), None);
+
+        let one = Value::compact(vec![1]);
+        assert_eq!(fmt_value(&one, Radix::Bin), "b1");
+        assert_eq!(one.bit(0), Some(1));
+        assert_eq!(one.bits_len(), 1);
+
+        let known = Value::compact(vec![1, 0, 1]);
+        assert_eq!(value_number(&known), Some(5));
+        assert!(!known.has_unknown());
+
+        // Wider than the inline limit stays a byte-per-bit vector.
+        let wide = vec![1u8; SMALL_MAX_BITS + 1];
+        let value = Value::compact(wide.clone());
+        assert!(matches!(value, Value::Bits(_)));
+        assert_eq!(value.to_bits_vec(), Some(wide));
     }
 }

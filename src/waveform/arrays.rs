@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use super::{fmt_bits, fmt_real, Change, Radix, SigKind, Signal, Ticks, Value};
+use super::{fmt_real, fmt_value, Change, Radix, SigKind, SigState, Signal, Ticks, Value};
 
 impl super::Waveform {
     /// Group per-element signals of unpacked arrays and add the synthesized
@@ -88,6 +88,8 @@ impl super::Waveform {
                     min: f64::INFINITY,
                     max: f64::NEG_INFINITY,
                     parent: None,
+                    members: Vec::new(),
+                    state: SigState::Ready,
                 });
                 for &child in &children {
                     self.signals[child].parent = Some(index);
@@ -98,21 +100,197 @@ impl super::Waveform {
         }
     }
 
-    /// Re-format the brace text of every array signal after radix changes.
-    /// An array override applies to the elements it contains; a leaf override
-    /// only affects that element (and the parents that embed it).
-    pub fn rebuild_array_texts(&mut self, radix: &HashMap<usize, Radix>) {
-        let roots: Vec<usize> = self
+    /// Synthesize one aggregate signal per dump scope: adding it to the
+    /// waveform shows `{member, ...}`; expanding reveals the member signals.
+    /// Struct variables and interface/module instances are dumped as scopes,
+    /// so this is what makes them addable as a single aggregate row.
+    pub fn build_scope_aggregates(&mut self) {
+        // Scope path -> direct signals (array parents included, elements not).
+        let mut by_scope: HashMap<Vec<String>, Vec<usize>> = HashMap::new();
+        for (index, signal) in self.signals.iter().enumerate() {
+            if signal.parent.is_none() && signal.var_type != "aggregate" {
+                by_scope
+                    .entry(signal.scope.clone())
+                    .or_default()
+                    .push(index);
+            }
+        }
+        let mut paths: Vec<Vec<String>> = Vec::new();
+        let mut stack = vec![(self.tree.root, Vec::<String>::new())];
+        while let Some((id, path)) = stack.pop() {
+            if !path.is_empty() {
+                paths.push(path.clone());
+            }
+            for &child in &self.tree.nodes[id].children {
+                let mut child_path = path.clone();
+                child_path.push(self.tree.nodes[child].name.clone());
+                stack.push((child, child_path));
+            }
+        }
+        for path in paths {
+            let Some(members) = by_scope.get(&path) else {
+                continue;
+            };
+            if members.is_empty() {
+                continue;
+            }
+            let name = path.last().cloned().unwrap_or_default();
+            let scope = path[..path.len() - 1].to_vec();
+            if self
+                .signals
+                .iter()
+                .any(|s| s.var_type == "aggregate" && s.name == name && s.scope == scope)
+            {
+                continue;
+            }
+            let bits = members
+                .iter()
+                .map(|&m| self.signals[m].bits.max(1))
+                .sum::<u32>()
+                .max(1);
+            self.signals.push(Signal {
+                name,
+                bits,
+                var_type: "aggregate".to_string(),
+                scope,
+                kind: SigKind::Str,
+                changes: Vec::new(),
+                min: f64::INFINITY,
+                max: f64::NEG_INFINITY,
+                parent: None,
+                members: members.clone(),
+                state: SigState::Lazy,
+            });
+        }
+    }
+
+    /// Aggregate signal synthesized for a dump scope path, if any.
+    pub fn scope_aggregate(&self, scope: &[String]) -> Option<usize> {
+        let (name, parent) = scope.split_last()?;
+        self.signals.iter().position(|signal| {
+            signal.var_type == "aggregate" && signal.name == *name && signal.scope == parent
+        })
+    }
+
+    /// Child signal indices for every synthesized array signal.
+    #[cfg_attr(not(fsdb_sdk), allow(dead_code))]
+    pub(crate) fn array_children(&self) -> Vec<Vec<usize>> {
+        let mut children = vec![Vec::new(); self.signals.len()];
+        for (index, signal) in self.signals.iter().enumerate() {
+            if let Some(parent) = signal.parent {
+                children[parent].push(index);
+            }
+            if !signal.members.is_empty() {
+                children[index].extend(signal.members.iter().copied());
+            }
+        }
+        children
+    }
+
+    /// Children shown when a signal row is expanded: array elements, bit
+    /// chunks and scope-aggregate members.
+    pub fn children(&self, index: usize) -> Vec<usize> {
+        let mut out: Vec<usize> = self
             .signals
             .iter()
             .enumerate()
-            .filter(|(_, signal)| signal.var_type == "array" && signal.parent.is_none())
-            .map(|(index, _)| index)
+            .filter(|(_, signal)| signal.parent == Some(index))
+            .map(|(child, _)| child)
+            .collect();
+        if let Some(signal) = self.signals.get(index) {
+            out.extend(signal.members.iter().copied());
+        }
+        out
+    }
+
+    /// Signal indices whose values must be loaded to build `index`: the
+    /// element signals of an array subtree, or the signal itself.
+    #[cfg_attr(not(fsdb_sdk), allow(dead_code))]
+    pub(crate) fn value_leaves(&self, index: usize) -> Vec<usize> {
+        let children = self.array_children();
+        let mut out = Vec::new();
+        let mut stack = vec![index];
+        while let Some(node) = stack.pop() {
+            if children[node].is_empty() {
+                out.push(node);
+            } else {
+                stack.extend(children[node].iter().copied());
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// Recompute one synthesized signal (array or scope aggregate) when all
+    /// of its children are loaded. Returns true when it became `Ready`.
+    pub(crate) fn recompute_aggregate(&mut self, index: usize) -> bool {
+        let children = self.array_children();
+        let Some(list) = children.get(index) else {
+            return false;
+        };
+        if list.is_empty() {
+            return false;
+        }
+        if !list
+            .iter()
+            .all(|&child| self.signals[child].state == SigState::Ready)
+        {
+            return false;
+        }
+        let changes = array_changes(&self.signals, list);
+        self.signals[index].changes = changes;
+        self.signals[index].state = SigState::Ready;
+        true
+    }
+
+    /// Recompute the brace text of every array or aggregate whose element
+    /// values are all present. Used after lazily loading elements. Returns
+    /// the indices that were recomputed.
+    #[cfg_attr(not(fsdb_sdk), allow(dead_code))]
+    pub(crate) fn recompute_ready_arrays(&mut self) -> Vec<usize> {
+        let children = self.array_children();
+        let synthesized: Vec<usize> = (0..self.signals.len())
+            .filter(|&index| matches!(self.signals[index].var_type.as_str(), "array" | "aggregate"))
+            .collect();
+        let mut updated = Vec::new();
+        for index in synthesized {
+            if self.signals[index].state == SigState::Ready {
+                continue;
+            }
+            let ready = children[index]
+                .iter()
+                .all(|&child| self.signals[child].state == SigState::Ready);
+            if !ready {
+                continue;
+            }
+            let changes = array_changes(&self.signals, &children[index]);
+            self.signals[index].changes = changes;
+            self.signals[index].state = SigState::Ready;
+            updated.push(index);
+        }
+        updated
+    }
+
+    /// Re-format the brace text of every array/aggregate signal after radix
+    /// changes. An override applies to the elements it contains; a leaf
+    /// override only affects that element (and the parents that embed it).
+    pub fn rebuild_array_texts(&mut self, radix: &HashMap<usize, Radix>) {
+        let roots: Vec<usize> = (0..self.signals.len())
+            .filter(|&index| {
+                matches!(self.signals[index].var_type.as_str(), "array" | "aggregate")
+                    && self.signals[index].parent.is_none()
+            })
             .collect();
         let mut children: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (index, signal) in self.signals.iter().enumerate() {
             if let Some(parent) = signal.parent {
                 children.entry(parent).or_default().push(index);
+            }
+            if !signal.members.is_empty() {
+                children
+                    .entry(index)
+                    .or_default()
+                    .extend(signal.members.iter().copied());
             }
         }
         for root in roots {
@@ -135,7 +313,7 @@ impl super::Waveform {
             return;
         }
         for &child in &list {
-            if self.signals[child].var_type == "array" {
+            if matches!(self.signals[child].var_type.as_str(), "array" | "aggregate") {
                 self.rebuild_array_node(child, current, radix, children);
             }
         }
@@ -233,13 +411,13 @@ fn array_changes(signals: &[Signal], children: &[usize]) -> Vec<Change> {
 /// braces of a sub-array.
 fn element_text_radix(signal: &Signal, t: Ticks, radix: Option<Radix>) -> String {
     match (signal.kind, signal.value_at(t)) {
-        (SigKind::Bits, Some(Value::Bits(bits))) => {
-            if bits.iter().any(|&bit| bit >= 2) {
+        (SigKind::Bits, Some(value @ (Value::Small(..) | Value::Bits(_)))) => {
+            if value.has_unknown() {
                 "x".to_string()
             } else {
                 // Hex is the default radix for arrays, like for buses.
                 let radix = radix.unwrap_or(Radix::Hex);
-                let text = fmt_bits(bits, radix);
+                let text = fmt_value(value, radix);
                 match radix {
                     // Drop the `b`/`o`/`d`/`h` prefix and pad zeros so braces
                     // stay compact.
@@ -280,11 +458,13 @@ mod tests {
             kind: SigKind::Bits,
             changes: vec![Change {
                 t,
-                v: Value::Bits(bits.to_vec()),
+                v: Value::compact(bits.to_vec()),
             }],
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             parent: None,
+            members: Vec::new(),
+            state: SigState::Ready,
         }
     }
 
@@ -295,6 +475,40 @@ mod tests {
             end: 10,
             signals,
             tree: ScopeTree::new(),
+        }
+    }
+
+    #[test]
+    fn scope_aggregates_group_members_with_brace_values() {
+        let mut wf = waveform(vec![leaf("run", &[1], 0), leaf("pc", &[0, 1, 0, 1], 0)]);
+        let tb = wf
+            .tree
+            .add_scope(wf.tree.root, "tb".to_string(), "m".to_string());
+        let fetch = wf
+            .tree
+            .add_scope(tb, "clk_fetch".to_string(), "fetch_t".to_string());
+        wf.tree.nodes[fetch].signals = vec![0, 1];
+        for signal in &mut wf.signals {
+            signal.scope = vec!["tb".to_string(), "clk_fetch".to_string()];
+        }
+        wf.build_scope_aggregates();
+        let aggregate = wf
+            .scope_aggregate(&["tb".to_string(), "clk_fetch".to_string()])
+            .expect("aggregate");
+        assert_eq!(wf.signals[aggregate].var_type, "aggregate");
+        assert_eq!(wf.signals[aggregate].members, vec![0, 1]);
+        // Members must be ready before the aggregate computes.
+        for index in 0..2 {
+            wf.signals[index].state = SigState::Lazy;
+        }
+        assert!(!wf.recompute_aggregate(aggregate));
+        for index in 0..2 {
+            wf.signals[index].state = SigState::Ready;
+        }
+        assert!(wf.recompute_aggregate(aggregate));
+        match wf.signals[aggregate].changes.last().map(|c| &c.v) {
+            Some(Value::Str(text)) => assert!(text.starts_with('{'), "{text}"),
+            other => panic!("expected brace value, got {other:?}"),
         }
     }
 

@@ -6,13 +6,14 @@
 //! `VERDI_HOME` points at an installation shipping `share/FsdbReader`.
 
 use crate::dump::ParseOut;
-use crate::waveform::{Change, ScopeTree, SigKind, Signal, TimeScale, Value, Waveform};
+use crate::waveform::{Change, ScopeTree, SigKind, SigState, Signal, TimeScale, Value, Waveform};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::Path;
 
 type ScopeCb = extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char, u32);
 type VarCb = extern "C" fn(*mut c_void, *const c_char, i64, u32, u32, u32, u32, u32);
 type UpscopeCb = extern "C" fn(*mut c_void);
+type GroupBeginCb = extern "C" fn(*mut c_void, *const c_char, u32);
 
 extern "C" {
     fn wav_fsdb_is_fsdb(path: *const c_char) -> i32;
@@ -21,6 +22,8 @@ extern "C" {
         scope: ScopeCb,
         var: VarCb,
         upscope: UpscopeCb,
+        group_begin: GroupBeginCb,
+        group_end: UpscopeCb,
         user: *mut c_void,
     ) -> *mut c_void;
     fn wav_fsdb_read_tree(handle: *mut c_void) -> i32;
@@ -96,11 +99,134 @@ impl Drop for StderrSilencer {
     }
 }
 
+/// Non-Unix builds do not need the fd dance; the bridge only ships on Linux.
+#[cfg(not(unix))]
+struct StderrSilencer;
+
+#[cfg(not(unix))]
+impl StderrSilencer {
+    fn new() -> Self {
+        Self
+    }
+}
+
 /// FFR keeps process-global state (active object, message hooks), so all
 /// access is serialized even when parsing from multiple threads.
 static FFR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Value changes kept per signal; longer recordings are decimated evenly.
+pub const MAX_CHANGES_PER_SIGNAL: usize = 2_000_000;
+/// Hard stop while reading one signal (the slice is decimated afterwards).
+const MAX_CHANGES_READ_PER_SIGNAL: usize = 16_000_000;
+/// Total kept value changes across all signals; once reached, the remaining
+/// signals load without values so memory stays bounded.
+pub const MAX_TOTAL_CHANGES: u64 = 32_000_000;
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_fsdb(path: &Path) -> Result<ParseOut, String> {
+    parse_fsdb_with(path, &mut |_| true)
+}
+
+pub fn parse_fsdb_with(path: &Path, progress: crate::dump::Progress) -> Result<ParseOut, String> {
+    let mut input = open_input(path, true)?;
+    let mut budget = MAX_TOTAL_CHANGES;
+    let result = assemble(
+        &mut input,
+        &mut |handle, var, warnings, budget| read_changes(handle, var, warnings, budget),
+        &mut budget,
+        progress,
+    );
+    unsafe { wav_fsdb_close(input.handle) };
+    result
+}
+
+/// Lazy variant used by the background loader: only the hierarchy is read
+/// eagerly; value changes are fetched per signal through [`FsdbSession`].
+pub fn parse_fsdb_lazy(
+    path: &Path,
+    progress: crate::dump::Progress,
+) -> Result<(ParseOut, FsdbSession), String> {
+    let mut input = open_input(path, false)?;
+    let mut budget = MAX_TOTAL_CHANGES;
+    let mut out = match assemble(
+        &mut input,
+        &mut |_, _, _, _| Vec::new(),
+        &mut budget,
+        progress,
+    ) {
+        Ok(out) => out,
+        Err(err) => {
+            unsafe { wav_fsdb_close(input.handle) };
+            return Err(err);
+        }
+    };
+    // Signalled below by the loader: no values were materialized.
+    for signal in &mut out.wf.signals {
+        signal.state = SigState::Lazy;
+    }
+    let vars = std::mem::take(&mut input.collector.vars);
+    Ok((
+        out,
+        FsdbSession {
+            handle: input.handle,
+            vars,
+            budget,
+        },
+    ))
+}
+
+/// An open FSDB file that can serve value changes on demand. Lives on the
+/// loader thread; [`Drop`] closes the FFR handle there.
+pub struct FsdbSession {
+    handle: *mut c_void,
+    vars: Vec<VarMeta>,
+    budget: u64,
+}
+
+impl FsdbSession {
+    pub fn var_count(&self) -> usize {
+        self.vars.len()
+    }
+
+    /// Read the value changes of one dump variable.
+    pub fn read_signal(&mut self, index: usize) -> (Vec<Change>, Vec<String>) {
+        let Some(var) = self.vars.get(index) else {
+            return (Vec::new(), Vec::new());
+        };
+        let _lock = FFR_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _silence = StderrSilencer::new();
+        let mut warnings = Vec::new();
+        // Values are loaded into the FFR cache only for the signal that is
+        // actually requested.
+        unsafe { wav_fsdb_add_signal(self.handle, var.idcode) };
+        if unsafe { wav_fsdb_load_signals(self.handle) } != 0 {
+            warnings.push(format!("{}: failed to load signal values", var.name));
+            return (Vec::new(), warnings);
+        }
+        let changes = read_changes(self.handle, var, &mut warnings, &mut self.budget);
+        (changes, warnings)
+    }
+}
+
+impl Drop for FsdbSession {
+    fn drop(&mut self) {
+        let _lock = FFR_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        unsafe { wav_fsdb_close(self.handle) };
+    }
+}
+
+/// An opened dump: FFR handle plus the collected hierarchy.
+struct Input {
+    handle: *mut c_void,
+    collector: Collector,
+    ts: TimeScale,
+    min_time: u64,
+    max_time: u64,
+    have_range: bool,
+    warnings: Vec<String>,
+}
+
+fn open_input(path: &Path, load_values: bool) -> Result<Input, String> {
     let display = path.display().to_string();
     let cpath =
         CString::new(display.clone()).map_err(|_| format!("{display}: path contains NUL"))?;
@@ -118,6 +244,8 @@ pub fn parse_fsdb(path: &Path) -> Result<ParseOut, String> {
             on_scope,
             on_var,
             on_upscope,
+            on_group_begin,
+            on_upscope,
             &mut collector as *mut Collector as *mut c_void,
         )
     };
@@ -125,26 +253,20 @@ pub fn parse_fsdb(path: &Path) -> Result<ParseOut, String> {
         return Err(format!("{display}: failed to open FSDB file (FFR)"));
     }
 
-    let result = parse_open(handle, &display, &mut collector);
-    unsafe { wav_fsdb_close(handle) };
-    result
-}
-
-fn parse_open(
-    handle: *mut c_void,
-    display: &str,
-    collector: &mut Collector,
-) -> Result<ParseOut, String> {
+    // The callbacks write through a raw pointer to `collector`, so it must
+    // not move until the tree has been read.
     if unsafe { wav_fsdb_read_tree(handle) } != 0 {
+        unsafe { wav_fsdb_close(handle) };
         return Err(format!("{display}: failed to read the FSDB hierarchy"));
     }
-
-    let mut warnings = std::mem::take(&mut collector.warnings);
-    for var in &collector.vars {
-        unsafe { wav_fsdb_add_signal(handle, var.idcode) };
-    }
-    if unsafe { wav_fsdb_load_signals(handle) } != 0 {
-        return Err(format!("{display}: failed to load signal values"));
+    if load_values {
+        for var in &collector.vars {
+            unsafe { wav_fsdb_add_signal(handle, var.idcode) };
+        }
+        if unsafe { wav_fsdb_load_signals(handle) } != 0 {
+            unsafe { wav_fsdb_close(handle) };
+            return Err(format!("{display}: failed to load signal values"));
+        }
     }
 
     let mut min_time = 0u64;
@@ -162,14 +284,37 @@ fn parse_open(
     } else {
         String::new()
     };
+    let mut warnings = std::mem::take(&mut collector.warnings);
     let ts = parse_timescale(&scale_unit, collector.time_unit.as_deref(), &mut warnings);
 
-    let mut tree = collector.tree.take().unwrap_or_default();
-    let mut signals = Vec::with_capacity(collector.vars.len());
+    Ok(Input {
+        handle,
+        collector,
+        ts,
+        min_time,
+        max_time,
+        have_range,
+        warnings,
+    })
+}
+
+/// Build the signal list from the collected variables, calling `read` for
+/// each variable's value changes.
+fn assemble(
+    input: &mut Input,
+    read: &mut dyn FnMut(*mut c_void, &VarMeta, &mut Vec<String>, &mut u64) -> Vec<Change>,
+    budget: &mut u64,
+    progress: crate::dump::Progress,
+) -> Result<ParseOut, String> {
+    let mut warnings = std::mem::take(&mut input.warnings);
+    let mut tree = input.collector.tree.take().unwrap_or_default();
+    tree.remove_scopes_named(&["$attribute_root", "$interconnect_root"]);
+    let mut signals = Vec::with_capacity(input.collector.vars.len());
     let mut start = u64::MAX;
     let mut end = 0u64;
-    for var in &collector.vars {
-        let changes = read_changes(handle, var, &mut warnings);
+    let total_vars = input.collector.vars.len();
+    for (index, var) in input.collector.vars.iter().enumerate() {
+        let changes = read(input.handle, var, &mut warnings, budget);
         for change in &changes {
             start = start.min(change.t);
             end = end.max(change.t);
@@ -194,22 +339,35 @@ fn parse_open(
             min,
             max,
             parent: None,
+            members: Vec::new(),
+            state: SigState::Ready,
         };
-        let index = signals.len();
+        let signal_index = signals.len();
         signals.push(signal);
-        tree.nodes[var.tree_node].signals.push(index);
+        tree.nodes[var.tree_node].signals.push(signal_index);
+        if index % 64 == 0 || index + 1 == total_vars {
+            let done = index + 1;
+            if !progress(crate::dump::LoadProgress {
+                stage: crate::dump::Stage::Waveform,
+                done,
+                total: total_vars,
+                changes: MAX_TOTAL_CHANGES - *budget,
+            }) {
+                return Err("load cancelled".to_string());
+            }
+        }
     }
     if start == u64::MAX {
-        start = min_time;
+        start = input.min_time;
     }
-    if have_range {
-        start = start.min(min_time);
-        end = end.max(max_time);
+    if input.have_range {
+        start = start.min(input.min_time);
+        end = end.max(input.max_time);
     }
 
     Ok(ParseOut {
         wf: Waveform {
-            ts,
+            ts: input.ts,
             start,
             end,
             signals,
@@ -219,9 +377,17 @@ fn parse_open(
     })
 }
 
-fn read_changes(handle: *mut c_void, var: &VarMeta, warnings: &mut Vec<String>) -> Vec<Change> {
+fn read_changes(
+    handle: *mut c_void,
+    var: &VarMeta,
+    warnings: &mut Vec<String>,
+    budget: &mut u64,
+) -> Vec<Change> {
     if var.var_type == 17 || var.var_type == 18 {
         warnings.push(format!("{}: memory signals are not displayed", var.name));
+        return Vec::new();
+    }
+    if *budget == 0 {
         return Vec::new();
     }
     let vc = unsafe { wav_fsdb_vc_handle(handle, var.idcode) };
@@ -234,19 +400,19 @@ fn read_changes(handle: *mut c_void, var: &VarMeta, warnings: &mut Vec<String>) 
         if unsafe { wav_fsdb_min_time(vc, &mut min_time) } == 0
             && unsafe { wav_fsdb_goto_time(vc, min_time) } == 0
         {
+            let bytes_per_bit = unsafe { wav_fsdb_bytes_per_bit(vc) };
+            let bits = unsafe { wav_fsdb_bit_size(vc) } as usize;
+            let size = if bytes_per_bit == 0 {
+                bits.max(1)
+            } else {
+                1usize << bytes_per_bit.min(3)
+            };
+            let mut buf = vec![0u8; size.max(8)];
             loop {
                 let mut time = 0u64;
                 if unsafe { wav_fsdb_cur_time(vc, &mut time) } != 0 {
                     break;
                 }
-                let bytes_per_bit = unsafe { wav_fsdb_bytes_per_bit(vc) };
-                let bits = unsafe { wav_fsdb_bit_size(vc) } as usize;
-                let size = if bytes_per_bit == 0 {
-                    bits.max(1)
-                } else {
-                    1usize << bytes_per_bit.min(3)
-                };
-                let mut buf = vec![0u8; size.max(8)];
                 let mut out_len = 0u64;
                 if unsafe { wav_fsdb_value(vc, buf.as_mut_ptr(), buf.len() as u64, &mut out_len) }
                     == 0
@@ -258,6 +424,13 @@ fn read_changes(handle: *mut c_void, var: &VarMeta, warnings: &mut Vec<String>) 
                         }
                     }
                 }
+                if changes.len() >= MAX_CHANGES_READ_PER_SIGNAL {
+                    warnings.push(format!(
+                        "{}: value changes truncated at {} while reading",
+                        var.name, MAX_CHANGES_READ_PER_SIGNAL
+                    ));
+                    break;
+                }
                 if unsafe { wav_fsdb_next_vc(vc) } != 0 {
                     break;
                 }
@@ -265,13 +438,49 @@ fn read_changes(handle: *mut c_void, var: &VarMeta, warnings: &mut Vec<String>) 
         }
     }
     unsafe { wav_fsdb_free_handle(vc) };
+
+    if changes.len() > MAX_CHANGES_PER_SIGNAL {
+        let before = changes.len();
+        changes = decimate(changes, MAX_CHANGES_PER_SIGNAL);
+        warnings.push(format!(
+            "{}: {before} value changes decimated to {} for display",
+            var.name,
+            changes.len()
+        ));
+    }
+    changes.shrink_to_fit();
+    *budget = budget.saturating_sub(changes.len() as u64);
+    if *budget == 0 {
+        warnings.push(format!(
+            "value changes are limited to {MAX_TOTAL_CHANGES} in total; remaining signals are loaded without values"
+        ));
+    }
     changes
+}
+
+/// Keep at most `cap` evenly spaced changes, preserving the first and last.
+fn decimate(mut changes: Vec<Change>, cap: usize) -> Vec<Change> {
+    let step = changes.len().div_ceil(cap);
+    if step <= 1 {
+        return changes;
+    }
+    let last = changes.pop();
+    let mut kept = Vec::with_capacity(cap + 1);
+    for (i, change) in changes.into_iter().enumerate() {
+        if i % step == 0 {
+            kept.push(change);
+        }
+    }
+    if let Some(last) = last {
+        kept.push(last);
+    }
+    kept
 }
 
 fn decode_value(bytes_per_bit: u32, bits: usize, bytes: &[u8]) -> Option<Value> {
     match bytes_per_bit {
         // one byte per bit, most significant bit first
-        0 => Some(Value::Bits(
+        0 => Some(Value::compact(
             bytes
                 .iter()
                 .take(bits.max(1))
@@ -409,6 +618,29 @@ extern "C" fn on_upscope(user: *mut c_void) {
     collector.current_node = collector.scope_nodes.last().copied().unwrap_or(0);
 }
 
+/// SV struct/union (or VHDL record) grouping: the fields that follow belong
+/// to a scope named after the variable, so `clk_fetch.run` becomes a member
+/// `run` of the `clk_fetch` scope, like Verdi shows it.
+extern "C" fn on_group_begin(user: *mut c_void, name: *const c_char, _field_count: u32) {
+    let collector = unsafe { &mut *(user as *mut Collector) };
+    let name = unsafe { CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned();
+    let tree = collector.tree.get_or_insert_with(ScopeTree::new);
+    if name.is_empty() {
+        // Keep the scope stack balanced for the matching group end.
+        let current = collector.current_node;
+        collector.scope_names.push(String::new());
+        collector.scope_nodes.push(current);
+        return;
+    }
+    let parent = collector.scope_nodes.last().copied().unwrap_or(tree.root);
+    let id = tree.add_scope(parent, name.clone(), String::new());
+    collector.scope_names.push(name);
+    collector.scope_nodes.push(id);
+    collector.current_node = id;
+}
+
 extern "C" fn on_var(
     user: *mut c_void,
     name: *const c_char,
@@ -444,6 +676,21 @@ mod tests {
         let home = std::env::var_os("VERDI_HOME")?;
         let path = PathBuf::from(home).join("demo/dumper/modelsim_link_third_party/sample.fsdb");
         path.is_file().then_some(path)
+    }
+
+    #[test]
+    #[cfg(fsdb_sdk)]
+    fn decimates_long_change_lists() {
+        let changes: Vec<Change> = (0..1000)
+            .map(|i| Change {
+                t: i,
+                v: Value::Real(i as f64),
+            })
+            .collect();
+        let kept = decimate(changes, 10);
+        assert_eq!(kept.len(), 11);
+        assert_eq!(kept.first().unwrap().t, 0);
+        assert_eq!(kept.last().unwrap().t, 999);
     }
 
     #[test]

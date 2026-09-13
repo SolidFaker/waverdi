@@ -200,6 +200,15 @@ fn draw_signal_row(
     row_bg: Color,
     y: u16,
 ) {
+    if sig.state != crate::waveform::SigState::Ready {
+        let label = if sig.state == crate::waveform::SigState::Loading {
+            "… loading"
+        } else {
+            "…"
+        };
+        text::put(buf, l.rows.x + 1, y, label, Style::new().fg(app.theme.dim));
+        return;
+    }
     if let Some(&(min, max)) = app.analog.get(&idx) {
         draw_analog_row(buf, l, app, sig, row_bg, y, (min, max));
         return;
@@ -223,17 +232,13 @@ fn draw_bit_row(buf: &mut Buffer, l: &Layout, app: &App, sig: &Signal, row_bg: C
     // sits exactly under the cursor line at the same time.
     let cut = t0 - 0.5 * scale;
     let mut i = changes.partition_point(|c| (c.t as f64) < cut);
-    let mut value: Option<&[u8]> = if i > 0 {
-        changes[i - 1].v.as_bits()
-    } else {
-        None
-    };
+    let mut value: Option<&Value> = if i > 0 { Some(&changes[i - 1].v) } else { None };
 
     for col in 0..l.cols {
         let col_end = t0 + (col as f64 + 0.5) * scale;
         let mut transitions = 0u32;
         while i < n && (changes[i].t as f64) < col_end {
-            value = changes[i].v.as_bits();
+            value = Some(&changes[i].v);
             transitions += 1;
             i += 1;
         }
@@ -244,9 +249,9 @@ fn draw_bit_row(buf: &mut Buffer, l: &Layout, app: &App, sig: &Signal, row_bg: C
                 2 => (BUS_LINE, t.xcol),
                 _ => (BUS_LINE, t.zcol),
             },
-            1 => match value {
-                Some(bits) if bits.first() == Some(&1) => (EDGE_RISE, t.high),
-                Some(bits) if bits.first() == Some(&0) => (EDGE_FALL, t.low),
+            1 => match value.and_then(|v| v.bit(0)) {
+                Some(1) => (EDGE_RISE, t.high),
+                Some(0) => (EDGE_FALL, t.low),
                 _ => (VLINE, rail_color(t, value)),
             },
             _ => (VLINE, rail_color(t, value)),
@@ -378,35 +383,28 @@ fn numeric_value(value: &Value) -> Option<f64> {
     if let Some(real) = value.as_real() {
         return Some(real);
     }
-    match value {
-        Value::Bits(bits) => {
-            if bits.len() > 64 || bits.iter().any(|&b| b >= 2) {
-                return None;
-            }
-            let mut v: u64 = 0;
-            for &b in bits.iter().rev() {
-                v = (v << 1) | b as u64;
-            }
-            Some(v as f64)
-        }
-        _ => None,
-    }
+    waveform::value_number(value).map(|v| v as f64)
 }
 
-fn summarize(value: Option<&[u8]>) -> u8 {
-    let Some(bits) = value else { return 2 };
-    if bits.contains(&2) {
-        2
-    } else if bits.contains(&3) {
-        3
-    } else if bits.iter().all(|&b| b == 0) {
+fn summarize(value: Option<&Value>) -> u8 {
+    let Some(value) = value else { return 2 };
+    let mut zero = true;
+    for i in 0..value.bits_len() {
+        match value.bit(i) {
+            Some(0) => {}
+            Some(1) => zero = false,
+            Some(2) => return 2,
+            _ => return 3,
+        }
+    }
+    if zero {
         0
     } else {
         1
     }
 }
 
-fn rail_color(t: &Theme, value: Option<&[u8]>) -> Color {
+fn rail_color(t: &Theme, value: Option<&Value>) -> Color {
     match summarize(value) {
         1 => t.high,
         0 => t.low,
@@ -416,11 +414,7 @@ fn rail_color(t: &Theme, value: Option<&[u8]>) -> Color {
 }
 
 fn segment_text(value: &Value, radix: waveform::Radix) -> String {
-    match value {
-        Value::Bits(bits) => waveform::fmt_bits(bits, radix),
-        Value::Real(real) => waveform::fmt_real(*real),
-        Value::Str(s) => s.clone(),
-    }
+    waveform::fmt_value(value, radix)
 }
 
 fn draw_range(buf: &mut Buffer, l: &Layout, app: &App) {

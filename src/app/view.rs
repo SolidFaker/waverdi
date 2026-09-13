@@ -127,7 +127,7 @@ fn edge_time(sig: &Signal, cursor: Ticks, forward: bool, polarity: Option<u8>) -
     let one_bit = sig.kind == SigKind::Bits && sig.bits <= 1;
     let want = if one_bit { polarity } else { None };
     let matches = |value: &Value| match want {
-        Some(level) => value.as_bits().and_then(|bits| bits.first().copied()) == Some(level),
+        Some(level) => value.bit(0) == Some(level),
         None => true,
     };
     if forward {

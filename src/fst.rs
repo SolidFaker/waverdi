@@ -1,5 +1,5 @@
-﻿use crate::dump::ParseOut;
-use crate::waveform::{Change, ScopeTree, SigKind, Signal, TimeScale, Value, Waveform};
+use crate::dump::ParseOut;
+use crate::waveform::{Change, ScopeTree, SigKind, SigState, Signal, TimeScale, Value, Waveform};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use wellen::simple::Waveform as WellenWaveform;
@@ -130,6 +130,8 @@ fn visit_item(
                 min,
                 max,
                 parent: None,
+                members: Vec::new(),
+                state: SigState::Ready,
             };
             let index = signals.len();
             signals.push(signal);
@@ -162,7 +164,7 @@ fn materialize(source: &WellenWaveform, signal_ref: SignalRef) -> Vec<Change> {
 fn convert_value(value: SignalValueRef<'_>) -> Option<Value> {
     match value {
         SignalValueRef::Event => None,
-        SignalValueRef::BitVec(bits) => Some(Value::Bits(
+        SignalValueRef::BitVec(bits) => Some(Value::compact(
             bits.iter_lsb_to_msb()
                 .map(|bit| match bit.as_ascii() {
                     '0' | 'l' => 0u8,
