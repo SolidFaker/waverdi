@@ -96,6 +96,13 @@ impl App {
 fn value_matches(value: &Value, kind: SigKind, radix: Radix, query: &str) -> bool {
     match (kind, value) {
         (SigKind::Bits, Value::Small(..) | Value::Bits(_)) => {
+            // Numeric fast path: avoids formatting every value while
+            // searching through millions of changes.
+            if let Some(number) = query_number(query, radix) {
+                if let Some(found) = crate::waveform::value_number(value) {
+                    return found == number;
+                }
+            }
             same_value_text(&crate::waveform::fmt_value(value, radix), query)
         }
         (SigKind::Real, Value::Real(real)) => query
@@ -106,6 +113,31 @@ fn value_matches(value: &Value, kind: SigKind, radix: Radix, query: &str) -> boo
         (SigKind::Str, Value::Str(text)) => text.contains(query.trim()),
         _ => false,
     }
+}
+
+/// Numeric value of a search query, honouring an optional `h`/`b`/`o`/`d`
+/// prefix and otherwise the row's radix.
+fn query_number(query: &str, radix: Radix) -> Option<u64> {
+    let text = query.trim().replace('_', "");
+    let (base, digits) = match text.as_bytes().first()? {
+        b'h' | b'H' => (16, &text[1..]),
+        b'b' | b'B' => (2, &text[1..]),
+        b'o' | b'O' => (8, &text[1..]),
+        b'd' | b'D' => (10, &text[1..]),
+        _ => (
+            match radix {
+                Radix::Hex => 16,
+                Radix::Oct => 8,
+                Radix::Bin => 2,
+                _ => 10,
+            },
+            text.as_str(),
+        ),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(digits, base).ok()
 }
 
 /// Compare formatted values, allowing the radix prefix to be omitted.
@@ -125,6 +157,7 @@ fn same_value_text(formatted: &str, query: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::query_number;
     use crate::app::tests::app_with;
     use crate::waveform::Radix;
 
@@ -160,6 +193,33 @@ mod tests {
         app.sel_row = Some(1);
         app.radix.insert(0, Radix::Hex);
         app.value_query = Some("ff".to_string());
+        app.search_value(true);
+        assert_eq!(app.cursor, 20);
+    }
+
+    #[test]
+    fn query_numbers_honour_prefix_and_radix() {
+        assert_eq!(query_number("haa", Radix::Bin), Some(0xaa));
+        assert_eq!(query_number("b1010", Radix::Hex), Some(10));
+        assert_eq!(query_number("d255", Radix::Hex), Some(255));
+        assert_eq!(query_number("255", Radix::Hex), Some(0x255));
+        assert_eq!(query_number("255", Radix::Dec), Some(255));
+        // Unknown digits fall back to the formatted comparison.
+        assert_eq!(query_number("hxx", Radix::Hex), None);
+        assert_eq!(query_number("", Radix::Hex), None);
+    }
+
+    #[test]
+    fn search_matches_numeric_values() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0]);
+        app.sel_row = Some(1);
+        app.radix.insert(0, Radix::Dec);
+        // VCD values: 0x00, 0xaa, 0xff, 0xaa at t = 0, 10, 20, 30.
+        app.value_query = Some("d170".to_string());
+        app.search_value(true);
+        assert_eq!(app.cursor, 10);
+        app.value_query = Some("d255".to_string());
         app.search_value(true);
         assert_eq!(app.cursor, 20);
     }

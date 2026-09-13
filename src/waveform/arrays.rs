@@ -274,7 +274,8 @@ impl super::Waveform {
     /// Re-format the brace text of every array/aggregate signal after radix
     /// changes. An override applies to the elements it contains; a leaf
     /// override only affects that element (and the parents that embed it).
-    pub fn rebuild_array_texts(&mut self, radix: &HashMap<usize, Radix>) {
+    /// Returns the synthesized signals whose text actually changed.
+    pub fn rebuild_array_texts(&mut self, radix: &HashMap<usize, Radix>) -> Vec<usize> {
         let roots: Vec<usize> = (0..self.signals.len())
             .filter(|&index| {
                 matches!(self.signals[index].var_type.as_str(), "array" | "aggregate")
@@ -293,9 +294,11 @@ impl super::Waveform {
                     .extend(signal.members.iter().copied());
             }
         }
+        let mut updated = Vec::new();
         for root in roots {
-            self.rebuild_array_node(root, None, radix, &children);
+            self.rebuild_array_node(root, None, radix, &children, &mut updated);
         }
+        updated
     }
 
     fn rebuild_array_node(
@@ -304,6 +307,7 @@ impl super::Waveform {
         inherited: Option<Radix>,
         radix: &HashMap<usize, Radix>,
         children: &BTreeMap<usize, Vec<usize>>,
+        updated: &mut Vec<usize>,
     ) {
         let current = radix.get(&index).copied().or(inherited);
         let Some(list) = children.get(&index).cloned() else {
@@ -314,7 +318,7 @@ impl super::Waveform {
         }
         for &child in &list {
             if matches!(self.signals[child].var_type.as_str(), "array" | "aggregate") {
-                self.rebuild_array_node(child, current, radix, children);
+                self.rebuild_array_node(child, current, radix, children, updated);
             }
         }
         let mut times: BTreeSet<Ticks> = BTreeSet::new();
@@ -342,7 +346,10 @@ impl super::Waveform {
             }
             changes.push(Change { t, v: value });
         }
-        self.signals[index].changes = changes;
+        if self.signals[index].changes != changes {
+            self.signals[index].changes = changes;
+            updated.push(index);
+        }
     }
 }
 

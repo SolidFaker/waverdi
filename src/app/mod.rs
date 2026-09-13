@@ -363,11 +363,8 @@ impl App {
         if signal.state != crate::waveform::SigState::Lazy {
             return;
         }
-        // An aggregate whose members are all loaded (or an eager dump) is
-        // computed locally; only missing values need the backend.
-        if wf.recompute_aggregate(index) {
-            return;
-        }
+        // With a live backend the load and the follow-up aggregate math run
+        // off the UI thread; eager dumps have no backend and compute here.
         let sent = self
             .load
             .as_ref()
@@ -375,6 +372,8 @@ impl App {
             .unwrap_or(false);
         if sent {
             wf.signals[index].state = crate::waveform::SigState::Loading;
+        } else if wf.recompute_aggregate(index) {
+            // Aggregates of eager dumps whose members are already loaded.
         } else {
             self.msg("waveform backend is no longer available for this dump");
         }
@@ -441,6 +440,7 @@ impl App {
                     self.rtl = Some(*db);
                     self.source_view = None;
                     self.last_source_trace = None;
+                    self.merge_generate_scopes();
                     self.sync_source();
                 }
                 LoadEvent::Changes(updates, warnings) => {
@@ -623,6 +623,17 @@ impl App {
         self.time_menu = None;
         self.focus = Focus::Tree;
         self.pending_fit = true;
+        // A filelist may already be loaded (CLI `-f`, or a previous file).
+        self.merge_generate_scopes();
+    }
+
+    /// Add RTL generate scopes that the dump does not record to the Instance
+    /// pane, so the hierarchy matches what Verdi shows.
+    fn merge_generate_scopes(&mut self) {
+        if let (Some(wf), Some(db)) = (self.wf.as_mut(), self.rtl.as_ref()) {
+            db.merge_generate_scopes(wf);
+        }
+        self.clamp_tree_scroll();
     }
 
     /// Parse the current source set into the RTL database.
@@ -639,7 +650,37 @@ impl App {
         }
         self.source_view = None;
         self.last_source_trace = None;
+        self.merge_generate_scopes();
         self.sync_source();
+    }
+
+    /// Move the Source pane to the line of the selected generate block, so
+    /// double-clicking a generated hierarchy node shows where it comes from.
+    pub fn locate_scope_in_source(&mut self) {
+        let steps = self.selected_scope_steps();
+        if steps.is_empty() {
+            return;
+        }
+        let (is_block, line) = {
+            let Some(db) = self.rtl.as_ref() else { return };
+            let Some(found) = db.scope_info(&steps) else {
+                return;
+            };
+            (found.instance_scope.len() != steps.len(), found.line)
+        };
+        if !is_block {
+            return;
+        }
+        let Some(line) = line else { return };
+        self.sync_source();
+        let col = self
+            .source_view
+            .as_ref()
+            .and_then(|view| view.lines.get(line.saturating_sub(1)))
+            .map(|text| text.chars().take_while(|c| c.is_whitespace()).count())
+            .unwrap_or(0);
+        self.set_source_cursor(line.saturating_sub(1), col);
+        self.focus = Focus::Source;
     }
 
     /// Reload the Source pane when the selected instance changed.
@@ -1146,6 +1187,27 @@ impl App {
         if aggregate.is_some() {
             return aggregate;
         }
+        // Interface ports are recorded as references to the connected
+        // interface instance (`module = dp_tst/.dprx_if/.lb_in`, no signals);
+        // resolve the add against that scope instead.
+        for port_scope in [&scope, &aggregate_scope] {
+            let Some(target) = self.referenced_scope(port_scope) else {
+                continue;
+            };
+            if let Some(index) = self.find_signal_exact(&target, &signal) {
+                return Some(index);
+            }
+            if let Some(index) = self.wf.as_ref().and_then(|wf| wf.scope_aggregate(&target)) {
+                return Some(index);
+            }
+            let mut nested = target;
+            if !signal.is_empty() {
+                nested.push(signal.clone());
+            }
+            if let Some(index) = self.wf.as_ref().and_then(|wf| wf.scope_aggregate(&nested)) {
+                return Some(index);
+            }
+        }
         // `sig.field` of a packed struct dumped as one vector: the head.
         if path.len() == 1 {
             if let Some(index) = self.find_signal_exact(&base_scope, &path[0]) {
@@ -1153,6 +1215,44 @@ impl App {
             }
         }
         None
+    }
+
+    /// Scope of the interface/module instance a reference scope points at.
+    /// Ports of interfaces are dumped as an empty scope whose recorded module
+    /// is the hierarchical path of the connected instance, e.g.
+    /// `dp_tst/.dprx_if/.lb_in`.
+    fn referenced_scope(&self, steps: &[String]) -> Option<Vec<String>> {
+        let wf = self.wf.as_ref()?;
+        let mut node = wf.tree.root;
+        for step in steps {
+            let child = *wf.tree.nodes[node]
+                .children
+                .iter()
+                .find(|&&child| wf.tree.nodes[child].name == *step)?;
+            node = child;
+        }
+        if !wf.tree.nodes[node].signals.is_empty() {
+            return None;
+        }
+        let module = wf.tree.module_of(node);
+        if !module.contains("/.") {
+            return None;
+        }
+        let mut node = wf.tree.root;
+        let mut target = Vec::new();
+        for step in module.split("/.") {
+            let Some(child) = wf.tree.nodes[node]
+                .children
+                .iter()
+                .copied()
+                .find(|&child| wf.tree.nodes[child].name == step)
+            else {
+                break;
+            };
+            node = child;
+            target.push(step.to_string());
+        }
+        (!target.is_empty() && target != steps).then_some(target)
     }
 
     /// Instance scope of `module` to use when adding a signal from code that
@@ -1383,8 +1483,16 @@ impl App {
     /// Re-format the brace values of array signals with the current radixes.
     fn refresh_arrays(&mut self) {
         let radix = std::mem::take(&mut self.radix);
-        if let Some(wf) = self.wf.as_mut() {
-            wf.rebuild_array_texts(&radix);
+        // With a live backend the whole rebuild runs off the UI thread.
+        let sent = self
+            .load
+            .as_ref()
+            .map(|job| job.request_rebuild(radix.clone()))
+            .unwrap_or(false);
+        if !sent {
+            if let Some(wf) = self.wf.as_mut() {
+                wf.rebuild_array_texts(&radix);
+            }
         }
         self.radix = radix;
     }
@@ -1643,6 +1751,98 @@ mod tests {
         }
         assert_eq!(seen.len(), Radix::CYCLE.len());
         assert_eq!(app.radix_for(1), start);
+    }
+
+    #[test]
+    fn interface_port_references_resolve_to_the_connected_scope() {
+        use crate::waveform::{Change, ScopeTree, SigKind, SigState, Signal, TimeScale, Value};
+        // RTL: `dut` takes an interface port; the connected instance lives in
+        // the testbench and is the only place with real signals.
+        let dir = std::env::temp_dir().join(format!("waverdi_if_ref_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("dut.sv");
+        std::fs::write(
+            &file,
+            "module dut;\n    prt_dp_lb_if.lb_in HOST_IF;\nendmodule\n",
+        )
+        .unwrap();
+
+        let mut wf = crate::waveform::Waveform {
+            ts: TimeScale::default(),
+            start: 0,
+            end: 10,
+            signals: vec![],
+            tree: ScopeTree::new(),
+        };
+        let tb = wf
+            .tree
+            .add_scope(wf.tree.root, "tb".to_string(), String::new());
+        let dprx_if = wf
+            .tree
+            .add_scope(tb, "dprx_if".to_string(), "prt_dp_lb_if".to_string());
+        let u_dut = wf
+            .tree
+            .add_scope(tb, "u_dut".to_string(), "dut".to_string());
+        // VCS records interface ports as a reference to the connected instance.
+        let host_if = wf.tree.add_scope(
+            u_dut,
+            "HOST_IF".to_string(),
+            "tb/.dprx_if/.lb_in".to_string(),
+        );
+        let adr = Signal {
+            name: "adr".to_string(),
+            bits: 18,
+            var_type: "wire".to_string(),
+            scope: vec!["tb".to_string(), "dprx_if".to_string()],
+            kind: SigKind::Bits,
+            changes: vec![Change {
+                t: 0,
+                v: Value::compact(vec![0]),
+            }],
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            parent: None,
+            members: Vec::new(),
+            state: SigState::Ready,
+        };
+        wf.signals.push(adr);
+        wf.tree.nodes[dprx_if].signals.push(0);
+
+        let mut app = App::new();
+        app.sources = Some(crate::rtl::SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf = Some(wf);
+        app.wf.as_mut().unwrap().build_scope_aggregates();
+        app.expanded.insert(app.wf.as_ref().unwrap().tree.root);
+        app.expanded.insert(tb);
+        app.tree_sel = app
+            .tree_visible()
+            .iter()
+            .position(|row| matches!(row, TreeNode::Scope { id, .. } if *id == u_dut))
+            .unwrap();
+        app.sync_source();
+        assert_eq!(app.selected_scope_steps(), vec!["tb", "u_dut"]);
+
+        // The whole interface port resolves to the connected scope's aggregate.
+        let whole = app
+            .resolve_source_signal("dut", &[], "HOST_IF", &[])
+            .expect("interface port aggregate");
+        assert_eq!(
+            app.wf.as_ref().unwrap().signals[whole].var_type,
+            "aggregate"
+        );
+        assert!(app.wf.as_ref().unwrap().signals[whole].scope == vec!["tb".to_string()]);
+        assert_eq!(app.wf.as_ref().unwrap().signals[whole].name, "dprx_if");
+        // Members resolve to the signals of the connected instance.
+        let member = app
+            .resolve_source_signal("dut", &["HOST_IF".to_string()], "adr", &[])
+            .expect("interface member");
+        assert_eq!(member, 0);
+        // The empty reference scope itself stays untouched.
+        assert!(app.wf.as_ref().unwrap().tree.nodes[host_if]
+            .signals
+            .is_empty());
     }
 
     #[test]

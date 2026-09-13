@@ -357,6 +357,7 @@ fn mouse_down(
             if is_double {
                 let TreeNode::Scope { id, .. } = node;
                 app.toggle_scope(id);
+                app.locate_scope_in_source();
             }
         }
         return false;

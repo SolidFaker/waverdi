@@ -375,6 +375,18 @@ impl App {
             ));
             return None;
         }
+        // Splitting duplicates the value changes per chunk; refuse when that
+        // would stall the UI thread or allocate gigabytes.
+        let workload = source.changes.len().saturating_mul(source.bits as usize);
+        if source.bits > 4096 || workload > 4_000_000 {
+            self.msg(format!(
+                "bus: {} ({} bit, {} changes) is too large to split",
+                source.name,
+                source.bits,
+                source.changes.len()
+            ));
+            return None;
+        }
         let mut created = Vec::new();
         let mut offset = 0u32;
         while offset < source.bits {
@@ -815,6 +827,19 @@ mod tests {
         // wide = 0b10101010 -> [7:6] = 0b10
         let top = wf.signals[7].value_at(10).unwrap().to_bits_vec().unwrap();
         assert_eq!(top, &[0, 1]);
+    }
+
+    #[test]
+    fn split_bus_refuses_signals_that_would_stall_the_ui() {
+        let mut app = app_with(VCD);
+        let before = app.wf.as_ref().unwrap().signals.len();
+        app.wf.as_mut().unwrap().signals[4].bits = 5000;
+        assert!(app.append_bit_chunks(4, 1).is_none());
+        assert_eq!(app.wf.as_ref().unwrap().signals.len(), before);
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.contains("too large to split")));
     }
 
     #[test]

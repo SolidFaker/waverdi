@@ -128,6 +128,12 @@ pub fn parse_fsdb(path: &Path) -> Result<ParseOut, String> {
 }
 
 pub fn parse_fsdb_with(path: &Path, progress: crate::dump::Progress) -> Result<ParseOut, String> {
+    // FFR keeps process-global state: the lock must span the whole eager
+    // parse, including the value reads in `assemble`. Two loads (e.g. the
+    // user opening a second dump while the first is still parsing) would
+    // otherwise race inside FFR and crash.
+    let _lock = FFR_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let _silence = StderrSilencer::new();
     let mut input = open_input(path, true)?;
     let mut budget = MAX_TOTAL_CHANGES;
     let result = assemble(
@@ -146,7 +152,11 @@ pub fn parse_fsdb_lazy(
     path: &Path,
     progress: crate::dump::Progress,
 ) -> Result<(ParseOut, FsdbSession), String> {
-    let mut input = open_input(path, false)?;
+    let mut input = {
+        let _lock = FFR_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _silence = StderrSilencer::new();
+        open_input(path, false)?
+    };
     let mut budget = MAX_TOTAL_CHANGES;
     let mut out = match assemble(
         &mut input,
@@ -226,13 +236,14 @@ struct Input {
     warnings: Vec<String>,
 }
 
+/// Open the dump and collect its hierarchy. Callers must hold [`FFR_LOCK`]
+/// and a [`StderrSilencer`]; [`read_signal`](FsdbSession::read_signal) and
+/// the session teardown take them per call.
 fn open_input(path: &Path, load_values: bool) -> Result<Input, String> {
     let display = path.display().to_string();
     let cpath =
         CString::new(display.clone()).map_err(|_| format!("{display}: path contains NUL"))?;
 
-    let _lock = FFR_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-    let _silence = StderrSilencer::new();
     if unsafe { wav_fsdb_is_fsdb(cpath.as_ptr()) } == 0 {
         return Err(format!("{display}: not an FSDB file"));
     }

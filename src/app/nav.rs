@@ -992,6 +992,7 @@ impl App {
         let nodes = self.tree_visible();
         if let Some(TreeNode::Scope { id, .. }) = nodes.get(self.tree_sel) {
             self.toggle_scope(*id);
+            self.locate_scope_in_source();
         }
     }
 

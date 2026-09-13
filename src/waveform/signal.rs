@@ -19,7 +19,7 @@ pub enum SigState {
     Loading,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Change {
     pub t: Ticks,
     pub v: Value,

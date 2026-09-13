@@ -5,6 +5,12 @@
 //! App drains from its idle tick. For FSDB the worker keeps the reader alive
 //! after parsing and loads signal values on demand, so only signals that are
 //! actually added to the waveform materialize their value changes.
+//!
+//! The session worker is split in two: one thread owns the FSDB reader (FFR
+//! is process-global, so reads stay serialized) and forwards everything that
+//! does not need FFR - aggregate/array recomputation, radix re-formatting -
+//! to a small compute pool. That keeps the UI thread free and lets heavy
+//! value math run in parallel with the next value read.
 
 use crate::dump::{self, LoadProgress, ParseOut, Stage};
 use crate::rtl::{RtlDb, SourceSet};
@@ -17,10 +23,13 @@ use std::sync::Arc;
 
 /// Requests sent from the App to the loader worker.
 pub enum LoadRequest {
-    #[cfg_attr(not(fsdb_sdk), allow(dead_code))]
     /// Materialize the value changes of `wf.signals[index]` (and of the array
-    /// signals that become complete once its elements are loaded).
+    /// or aggregate signals that become complete once its members are loaded).
+    #[cfg_attr(not(fsdb_sdk), allow(dead_code))]
     Signal(usize),
+    /// Re-format array/aggregate brace texts with the given radix overrides.
+    #[cfg_attr(not(fsdb_sdk), allow(dead_code))]
+    RebuildArrays(std::collections::HashMap<usize, crate::waveform::Radix>),
     Shutdown,
 }
 
@@ -84,13 +93,13 @@ impl LoadJob {
                                 signal.state = crate::waveform::SigState::Lazy;
                             }
                         }
-                        let mut meta = out.wf.clone();
+                        let meta = Arc::new(std::sync::Mutex::new(out.wf.clone()));
                         let _ = tx.send(LoadEvent::Waveform(Box::new(out)));
                         if discover_sources {
                             parse_rtl_sources(&path_owned, &tx, &flag);
                         }
                         let _ = tx.send(LoadEvent::Done);
-                        serve_requests(&mut meta, &mut session, &req_rx, &tx);
+                        serve_session(meta, &mut session, &req_rx, &tx);
                         return;
                     }
                     Err(err) => {
@@ -154,6 +163,18 @@ impl LoadJob {
             .unwrap_or(false)
     }
 
+    /// Ask the worker to re-format array/aggregate brace texts off the UI
+    /// thread. Returns false when no lazy backend is alive.
+    pub fn request_rebuild(
+        &self,
+        radix: std::collections::HashMap<usize, crate::waveform::Radix>,
+    ) -> bool {
+        self.requests
+            .as_ref()
+            .map(|tx| tx.send(LoadRequest::RebuildArrays(radix)).is_ok())
+            .unwrap_or(false)
+    }
+
     /// Non-blocking poll of the worker.
     pub fn try_recv(&self) -> Result<LoadEvent, TryRecvError> {
         self.rx.try_recv()
@@ -196,58 +217,115 @@ fn parse_rtl_sources(path: &str, tx: &Sender<LoadEvent>, flag: &AtomicBool) {
     }
 }
 
+/// Work that needs no FFR access and can run on the compute pool.
+#[cfg(fsdb_sdk)]
+enum ComputeTask {
+    Recompute,
+    Rebuild(std::collections::HashMap<usize, crate::waveform::Radix>),
+}
+
+#[cfg(fsdb_sdk)]
+fn pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().clamp(1, 4))
+        .unwrap_or(2)
+}
+
 /// Serve on-demand value requests for an open FSDB session until the App
 /// drops the job (the request channel closes) or asks for shutdown.
+///
+/// Value reads happen on this thread (FFR is process-global); everything else
+/// is handed to the compute pool so reads are not delayed by value math.
 #[cfg(fsdb_sdk)]
-fn serve_requests(
-    meta: &mut Waveform,
+fn serve_session(
+    meta: Arc<std::sync::Mutex<Waveform>>,
     session: &mut crate::fsdb::FsdbSession,
     req_rx: &Receiver<LoadRequest>,
     tx: &Sender<LoadEvent>,
 ) {
+    let (task_tx, task_rx) = mpsc::channel::<ComputeTask>();
+    let task_rx = Arc::new(std::sync::Mutex::new(task_rx));
+    for _ in 0..pool_size() {
+        let rx = Arc::clone(&task_rx);
+        let meta = Arc::clone(&meta);
+        let tx = tx.clone();
+        std::thread::spawn(move || loop {
+            let task = rx.lock().unwrap_or_else(|err| err.into_inner()).recv();
+            let Ok(task) = task else {
+                break;
+            };
+            match task {
+                ComputeTask::Recompute => {
+                    let updates = {
+                        let mut wf = meta.lock().unwrap_or_else(|err| err.into_inner());
+                        wf.recompute_ready_arrays()
+                            .into_iter()
+                            .map(|index| (index, wf.signals[index].changes.clone()))
+                            .collect::<Vec<_>>()
+                    };
+                    if !updates.is_empty() {
+                        let _ = tx.send(LoadEvent::Changes(updates, Vec::new()));
+                    }
+                }
+                ComputeTask::Rebuild(radix) => {
+                    let updates = {
+                        let mut wf = meta.lock().unwrap_or_else(|err| err.into_inner());
+                        wf.rebuild_array_texts(&radix)
+                            .into_iter()
+                            .map(|index| (index, wf.signals[index].changes.clone()))
+                            .collect::<Vec<_>>()
+                    };
+                    if !updates.is_empty() {
+                        let _ = tx.send(LoadEvent::Changes(updates, Vec::new()));
+                    }
+                }
+            }
+        });
+    }
+    drop(task_rx);
+
     while let Ok(request) = req_rx.recv() {
         match request {
             LoadRequest::Signal(index) => {
-                if let Some((updates, warnings)) = load_signal(meta, session, index) {
+                let leaves = {
+                    let wf = meta.lock().unwrap_or_else(|err| err.into_inner());
+                    if index >= wf.signals.len() {
+                        continue;
+                    }
+                    wf.value_leaves(index)
+                };
+                let var_count = session.var_count();
+                let mut updates = Vec::new();
+                let mut warnings = Vec::new();
+                for leaf in leaves {
+                    let needs_load = {
+                        let wf = meta.lock().unwrap_or_else(|err| err.into_inner());
+                        leaf < var_count
+                            && wf.signals[leaf].state == crate::waveform::SigState::Lazy
+                    };
+                    if !needs_load {
+                        continue;
+                    }
+                    let (changes, warns) = session.read_signal(leaf);
+                    let installed = {
+                        let mut wf = meta.lock().unwrap_or_else(|err| err.into_inner());
+                        wf.signals[leaf].changes = changes;
+                        wf.signals[leaf].state = crate::waveform::SigState::Ready;
+                        wf.signals[leaf].changes.clone()
+                    };
+                    updates.push((leaf, installed));
+                    warnings.extend(warns);
+                }
+                if !updates.is_empty() || !warnings.is_empty() {
                     let _ = tx.send(LoadEvent::Changes(updates, warnings));
                 }
+                let _ = task_tx.send(ComputeTask::Recompute);
+            }
+            LoadRequest::RebuildArrays(radix) => {
+                let _ = task_tx.send(ComputeTask::Rebuild(radix));
             }
             LoadRequest::Shutdown => break,
         }
     }
-}
-
-/// Load `index`'s element values and recompute the array signals that become
-/// complete. Returns the updates to send to the App.
-#[cfg(fsdb_sdk)]
-fn load_signal(
-    meta: &mut Waveform,
-    session: &mut crate::fsdb::FsdbSession,
-    index: usize,
-) -> Option<(Vec<(usize, Vec<crate::waveform::Change>)>, Vec<String>)> {
-    use crate::waveform::SigState;
-    if index >= meta.signals.len() {
-        return None;
-    }
-    let var_count = session.var_count();
-    let mut updates = Vec::new();
-    let mut warnings = Vec::new();
-    for leaf in meta.value_leaves(index) {
-        if leaf >= var_count || meta.signals[leaf].state != SigState::Lazy {
-            continue;
-        }
-        let (changes, warns) = session.read_signal(leaf);
-        meta.signals[leaf].changes = changes;
-        meta.signals[leaf].state = SigState::Ready;
-        warnings.extend(warns);
-        updates.push((leaf, meta.signals[leaf].changes.clone()));
-    }
-    for array in meta.recompute_ready_arrays() {
-        updates.push((array, meta.signals[array].changes.clone()));
-    }
-    if updates.is_empty() && warnings.is_empty() {
-        None
-    } else {
-        Some((updates, warnings))
-    }
+    drop(task_tx);
 }

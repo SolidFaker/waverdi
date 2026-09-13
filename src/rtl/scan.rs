@@ -2,7 +2,7 @@
 //!
 //! This is intentionally not a full parser: it recognises modules, signal
 //! declarations, continuous assignments, `always`/`initial` blocks and module
-//! instantiations together with their source lines — enough to browse RTL and
+//! instantiations together with their source lines �?enough to browse RTL and
 //! to trace a signal to its declaration, drivers and loads.
 
 use std::collections::{BTreeMap, HashSet};
@@ -10,6 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::SourceSet;
+use crate::waveform::Waveform;
 
 /// File + line reference into the parsed sources.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -140,6 +141,41 @@ pub enum Body {
     If(GenIf),
 }
 
+/// Bounded search state for the "plain names inside generate blocks" fallback
+/// of [`RtlDb::walk_chain`]. Without it, nested generate loops are re-walked
+/// for every iteration and every unresolved identifier, which is exponential.
+struct GenSearch {
+    visited: HashSet<usize>,
+    budget: usize,
+}
+
+impl GenSearch {
+    const BUDGET: usize = 200_000;
+
+    fn new() -> Self {
+        Self {
+            visited: HashSet::new(),
+            budget: Self::BUDGET,
+        }
+    }
+
+    fn tick(&mut self) -> bool {
+        if self.budget == 0 {
+            return false;
+        }
+        self.budget -= 1;
+        true
+    }
+
+    /// Enter the generate fallback for one body group once per search.
+    fn enter_group(&mut self, items: &[Body]) -> bool {
+        if !self.tick() {
+            return false;
+        }
+        self.visited.insert(items.as_ptr() as usize)
+    }
+}
+
 /// Where a dump scope path lands in the elaborated design.
 pub(crate) struct ScopeMatch<'a> {
     pub module: &'a ModuleDef,
@@ -148,6 +184,9 @@ pub(crate) struct ScopeMatch<'a> {
     /// Dump scope of the instance that owns the module's signals, without
     /// generate-block segments (`tb.u_proc.genblk1[1]` -> `tb.u_proc`).
     pub instance_scope: Vec<String>,
+    /// Source line of the deepest generate block in the path, if the path
+    /// does not end at an instance boundary.
+    pub line: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -331,6 +370,29 @@ fn block_dump_name(label: Option<&str>, number: Option<usize>, index: Option<i64
     }
 }
 
+/// Existing child with this scope name, or a new empty node. Returns `None`
+/// when an unindexed sibling with the same base name already exists, because
+/// VCS sometimes drops the iteration index (`gen_x` instead of `gen_x[0]`).
+fn ensure_tree_child(wf: &mut Waveform, parent: usize, name: &str) -> Option<usize> {
+    if let Some(&child) = wf.tree.nodes[parent]
+        .children
+        .iter()
+        .find(|&&child| wf.tree.nodes[child].name == name)
+    {
+        return Some(child);
+    }
+    let base = name.split('[').next().unwrap_or(name);
+    if base != name
+        && wf.tree.nodes[parent].children.iter().any(|&child| {
+            let other = wf.tree.nodes[child].name.as_str();
+            !other.contains('[') && other == base
+        })
+    {
+        return None;
+    }
+    Some(wf.tree.add_scope(parent, name.to_string(), String::new()))
+}
+
 /// Does the dump scope name `step` name this generate block? Returns the loop
 /// index written in the name (`None` when the name has no index).
 fn block_step_matches(
@@ -442,6 +504,87 @@ impl RtlDb {
         self.modules.get(name)
     }
 
+    /// Fill in labeled generate scopes that the RTL knows about but the dump
+    /// does not record (VCS only stores generate blocks that contain dumped
+    /// objects). Verdi lists them; this does the same for the Instance pane.
+    pub fn merge_generate_scopes(&self, wf: &mut Waveform) {
+        let mut steps = Vec::new();
+        self.merge_existing_scopes(wf, wf.tree.root, &mut steps);
+    }
+
+    fn merge_existing_scopes(&self, wf: &mut Waveform, node: usize, steps: &mut Vec<String>) {
+        let children = wf.tree.nodes[node].children.clone();
+        for child in children {
+            steps.push(wf.tree.nodes[child].name.clone());
+            self.merge_existing_scopes(wf, child, steps);
+            steps.pop();
+        }
+        if steps.is_empty() {
+            return;
+        }
+        let Some(found) = self.scope_info(steps) else {
+            return;
+        };
+        // Only instance boundaries own the module body; generate-block nodes
+        // are merged through their parent.
+        if found.instance_scope.len() != steps.len() {
+            return;
+        }
+        let def = found.module;
+        let env = found.env.clone();
+        self.merge_generate_items(wf, node, &env, &def.body);
+    }
+
+    /// Walk one body and add the labeled generate scopes it declares.
+    fn merge_generate_items(&self, wf: &mut Waveform, node: usize, env: &ParamEnv, items: &[Body]) {
+        for item in items {
+            match item {
+                Body::For(gen) => {
+                    if gen.label.is_some() {
+                        for value in gen_values(gen, env) {
+                            let name = block_dump_name(gen.label.as_deref(), None, Some(value));
+                            let Some(child) = ensure_tree_child(wf, node, &name) else {
+                                continue;
+                            };
+                            let mut env = env.clone();
+                            env.insert(gen.var.clone(), value);
+                            self.merge_generate_items(wf, child, &env, &gen.items);
+                        }
+                    } else if let Some(value) = gen_values(gen, env).into_iter().next() {
+                        // Unlabeled loops carry no scope of their own; look
+                        // for named blocks inside.
+                        let mut env = env.clone();
+                        env.insert(gen.var.clone(), value);
+                        self.merge_generate_items(wf, node, &env, &gen.items);
+                    }
+                }
+                Body::If(gen_if) => {
+                    for (_, block) in &gen_if.branches {
+                        if block.label.is_some() {
+                            let name = block_dump_name(block.label.as_deref(), None, None);
+                            if let Some(child) = ensure_tree_child(wf, node, &name) {
+                                self.merge_generate_items(wf, child, env, &block.items);
+                            }
+                        } else {
+                            self.merge_generate_items(wf, node, env, &block.items);
+                        }
+                    }
+                }
+                Body::Block(block) => {
+                    if block.label.is_some() {
+                        let name = block_dump_name(block.label.as_deref(), None, None);
+                        if let Some(child) = ensure_tree_child(wf, node, &name) {
+                            self.merge_generate_items(wf, child, env, &block.items);
+                        }
+                    } else {
+                        self.merge_generate_items(wf, node, env, &block.items);
+                    }
+                }
+                Body::Instance(_) => {}
+            }
+        }
+    }
+
     /// Modules that no other parsed module instantiates: the roots of the
     /// elaborated design hierarchy.
     pub fn top_modules(&self) -> Vec<String> {
@@ -544,6 +687,7 @@ impl RtlDb {
                 module: def,
                 env: env.clone(),
                 instance_scope: instance_scope.to_vec(),
+                line: None,
             });
         }
         let step = &steps[0];
@@ -584,9 +728,10 @@ impl RtlDb {
                         env.insert(gen.var.clone(), value);
                         let mut path = path.to_vec();
                         path.push(block_dump_name(gen.label.as_deref(), number, Some(value)));
-                        if let Some(found) =
+                        if let Some(mut found) =
                             self.walk_scope(def, &env, &gen.items, &path, instance_scope, rest)
                         {
+                            found.line = found.line.or(Some(gen.line));
                             return Some(found);
                         }
                     }
@@ -607,9 +752,10 @@ impl RtlDb {
                         }
                         let mut path = path.to_vec();
                         path.push(block_dump_name(block.label.as_deref(), number, None));
-                        if let Some(found) =
+                        if let Some(mut found) =
                             self.walk_scope(def, env, &block.items, &path, instance_scope, rest)
                         {
+                            found.line = found.line.or(Some(block.line));
                             return Some(found);
                         }
                     }
@@ -629,9 +775,10 @@ impl RtlDb {
                     }
                     let mut path = path.to_vec();
                     path.push(block_dump_name(block.label.as_deref(), number, None));
-                    if let Some(found) =
+                    if let Some(mut found) =
                         self.walk_scope(def, env, &block.items, &path, instance_scope, rest)
                     {
+                        found.line = found.line.or(Some(block.line));
                         return Some(found);
                     }
                 }
@@ -691,7 +838,8 @@ impl RtlDb {
                 return Some((path, name.to_string()));
             }
         }
-        let (path, target) = self.walk_chain(def, &env, &def.body, chain)?;
+        let mut search = GenSearch::new();
+        let (path, target) = self.walk_chain(def, &env, &def.body, chain, &mut search)?;
         if target.declares(name) {
             let signal = target
                 .signals
@@ -718,6 +866,7 @@ impl RtlDb {
         env: &ParamEnv,
         items: &'a [Body],
         chain: &[String],
+        search: &mut GenSearch,
     ) -> Option<(Vec<String>, &'a ModuleDef)> {
         if chain.is_empty() {
             return Some((Vec::new(), def));
@@ -730,7 +879,8 @@ impl RtlDb {
                 Body::Instance(instance) if instance.name == *step => {
                     let child = self.modules.get(&instance.module)?;
                     let env = self.instance_env(instance, child, env);
-                    let (rest, target) = self.walk_chain(child, &env, &child.body, &chain[1..])?;
+                    let (rest, target) =
+                        self.walk_chain(child, &env, &child.body, &chain[1..], search)?;
                     let mut path = vec![instance.name.clone()];
                     path.extend(rest);
                     return Some((path, target));
@@ -751,7 +901,7 @@ impl RtlDb {
                         let mut env = env.clone();
                         env.insert(gen.var.clone(), value);
                         if let Some((rest, target)) =
-                            self.walk_chain(def, &env, &gen.items, &chain[1..])
+                            self.walk_chain(def, &env, &gen.items, &chain[1..], search)
                         {
                             let mut path =
                                 vec![block_dump_name(gen.label.as_deref(), number, Some(value))];
@@ -775,7 +925,7 @@ impl RtlDb {
                             continue;
                         }
                         if let Some((rest, target)) =
-                            self.walk_chain(def, env, &block.items, &chain[1..])
+                            self.walk_chain(def, env, &block.items, &chain[1..], search)
                         {
                             let mut path =
                                 vec![block_dump_name(block.label.as_deref(), number, None)];
@@ -798,7 +948,7 @@ impl RtlDb {
                         continue;
                     }
                     if let Some((rest, target)) =
-                        self.walk_chain(def, env, &block.items, &chain[1..])
+                        self.walk_chain(def, env, &block.items, &chain[1..], search)
                     {
                         let mut path = vec![block_dump_name(block.label.as_deref(), number, None)];
                         path.extend(rest);
@@ -809,6 +959,12 @@ impl RtlDb {
             }
         }
         // Plain names inside generate blocks: search the generated scopes.
+        // Each body group is visited once and the search is bounded, otherwise
+        // nested generate loops are re-walked exponentially for identifiers
+        // that do not resolve (comments, ports of other modules, ...).
+        if !search.enter_group(items) {
+            return None;
+        }
         let mut unnamed = 0usize;
         for item in items {
             match item {
@@ -824,9 +980,13 @@ impl RtlDb {
                         if bound.is_some_and(|wanted| wanted != value) {
                             continue;
                         }
+                        if !search.tick() {
+                            return None;
+                        }
                         let mut env = env.clone();
                         env.insert(gen.var.clone(), value);
-                        if let Some((rest, target)) = self.walk_chain(def, &env, &gen.items, chain)
+                        if let Some((rest, target)) =
+                            self.walk_chain(def, &env, &gen.items, chain, search)
                         {
                             let mut path =
                                 vec![block_dump_name(gen.label.as_deref(), number, Some(value))];
@@ -842,7 +1002,11 @@ impl RtlDb {
                         } else {
                             None
                         };
-                        if let Some((rest, target)) = self.walk_chain(def, env, &block.items, chain)
+                        if !search.tick() {
+                            return None;
+                        }
+                        if let Some((rest, target)) =
+                            self.walk_chain(def, env, &block.items, chain, search)
                         {
                             let mut path =
                                 vec![block_dump_name(block.label.as_deref(), number, None)];
@@ -857,7 +1021,12 @@ impl RtlDb {
                     } else {
                         None
                     };
-                    if let Some((rest, target)) = self.walk_chain(def, env, &block.items, chain) {
+                    if !search.tick() {
+                        return None;
+                    }
+                    if let Some((rest, target)) =
+                        self.walk_chain(def, env, &block.items, chain, search)
+                    {
                         let mut path = vec![block_dump_name(block.label.as_deref(), number, None)];
                         path.extend(rest);
                         return Some((path, target));
@@ -1112,6 +1281,19 @@ fn lex(text: &str) -> Vec<Token> {
                 while i < chars.len()
                     && (chars[i].is_alphanumeric() || matches!(chars[i], '_' | '\'' | '.' | '?'))
                 {
+                    i += 1;
+                }
+                let text: String = chars[start..i].iter().collect();
+                out.push(Token {
+                    tok: Tok::Num(text),
+                    line,
+                });
+            }
+            '\'' => {
+                // Unsized/sized literal without width: 'd125, 'h0, '0, 'x.
+                let start = i;
+                i += 1;
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
                 let text: String = chars[start..i].iter().collect();
@@ -1660,7 +1842,8 @@ fn parse_param_decls(parser: &mut Parser, module: &mut ModuleDef) {
             }
         }
         let Some((name, _)) = parser.take_ident() else {
-            parser.skip_statement();
+            // Malformed entry: stop the list instead of skipping ahead into
+            // the port list.
             return;
         };
         let mut value = None;
@@ -1965,12 +2148,26 @@ fn parse_declarations(parser: &mut Parser, module: &mut ModuleDef, header: bool)
                             parser.next();
                         }
                         _ => {
-                            // User-defined type: `state_t`, `pkg::t`,
-                            // `if_t.master`, `type_t [3:0]`. Only before the
-                            // declared name is reached.
-                            if kind.is_some() || direction.is_some() {
+                            // A new type starts only when the identifier is
+                            // qualified (`pkg::t`, `if_t.master`) or followed
+                            // by another identifier; otherwise it is the
+                            // declared name of the previous type.
+                            let qualified = matches!(
+                                parser.peek_at(1),
+                                Some(Tok::Punct('.')) | Some(Tok::Punct(':'))
+                            );
+                            let two_idents = matches!(
+                                parser.peek_at(1),
+                                Some(Tok::Ident(next)) if !is_keyword(next)
+                            );
+                            if !qualified && !two_idents {
                                 break;
                             }
+                            // `input wire a, if_t.master b` starts a fresh
+                            // declaration with its own type.
+                            direction = None;
+                            kind = None;
+                            range = None;
                             let mut type_name = word.clone();
                             parser.next();
                             if parser.peek() == Some(&Tok::Punct(':'))
@@ -2255,7 +2452,7 @@ fn parse_anonymous_type(parser: &mut Parser, module: &ModuleDef) -> Option<u32> 
     Some(if is_union { widest } else { total })
 }
 
-/// `typedef ... name;` — stores the type with its packed width when known.
+/// `typedef ... name;` �?stores the type with its packed width when known.
 fn parse_typedef(parser: &mut Parser, module: &mut ModuleDef) {
     parser.eat_ident("typedef");
     loop {
@@ -2287,7 +2484,7 @@ fn parse_typedef(parser: &mut Parser, module: &mut ModuleDef) {
     parser.eat_punct(';');
 }
 
-/// `import pkg::*;` / `import pkg::name;` — records the package names.
+/// `import pkg::*;` / `import pkg::name;` �?records the package names.
 fn parse_import(parser: &mut Parser, module: &mut ModuleDef) {
     parser.next(); // import / export
     loop {
@@ -3008,6 +3205,251 @@ endinterface
         let (path, signal) = db.resolve_reference("top", &[], "vif").expect("instance");
         assert!(path.is_empty());
         assert_eq!(signal, "vif");
+    }
+
+    #[test]
+    fn nested_generate_fallback_is_bounded() {
+        let mut text = String::from("module top;\n    generate\n");
+        for (var, label) in [("i", "a"), ("j", "b"), ("k", "c")] {
+            text.push_str(&format!(
+                "        for (genvar {var} = 0; {var} < 128; {var}++) begin : {label}\n"
+            ));
+        }
+        text.push_str("            leaf u_leaf();\n");
+        for _ in 0..3 {
+            text.push_str("        end\n");
+        }
+        text.push_str("    endgenerate\nendmodule\n\nmodule leaf;\n    logic y;\nendmodule\n");
+        let dir = std::env::temp_dir().join(format!("waverdi_gen_bound_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("gen.sv");
+        fs::write(&file, text).unwrap();
+        let set = SourceSet::from_files(vec![file], "test");
+        let db = RtlDb::parse_sources(&set);
+        // An unresolved identifier inside nested loops must terminate quickly.
+        assert!(db
+            .resolve_reference("top", &["missing".to_string()], "x")
+            .is_none());
+        // A real instance inside the loops still resolves to its first path.
+        let (path, signal) = db
+            .resolve_reference("top", &["u_leaf".to_string()], "y")
+            .expect("nested instance");
+        assert_eq!(
+            path,
+            vec![
+                "a[0]".to_string(),
+                "b[0]".to_string(),
+                "c[0]".to_string(),
+                "u_leaf".to_string()
+            ]
+        );
+        assert_eq!(signal, "y");
+    }
+
+    #[test]
+    fn real_world_header_with_params_and_interface_ports() {
+        let text = r#"`default_nettype none
+
+module prt_dp_pm_top
+#
+(
+    parameter                           P_VENDOR        = "none",    // Vendor - "AMD", "ALTERA" or "LSC" 
+    parameter                           P_BEAT          = 'd125,     // Beat value
+    parameter                           P_HW_VER_MAJOR  = 1,         // Hardware version major
+    parameter                           P_HW_VER_MINOR  = 0,         // Hardware version minor
+    parameter                           P_CFG           = "tx",      // Configuration TX / RX
+    parameter                           P_SIM           = 0,
+    parameter                           P_ROM_INIT_FILE = "none",
+    parameter                           P_RAM_INIT_FILE = "none",
+    parameter                           P_PIO_IN_WIDTH  = 8,
+    parameter                           P_PIO_OUT_WIDTH = 8,
+    parameter                           P_SPL = 2,                   // Symbols per lane
+    parameter                           P_MST = 0                    // MST
+)
+(
+    // Reset and clock
+    input wire                          RST_IN,
+    input wire                          CLK_IN,
+
+    // Interrupt
+    input wire [1:0]                    IRQ_IN,
+
+    // PIO
+    input wire [P_PIO_IN_WIDTH-1:0]     PIO_IN,
+    output wire [P_PIO_OUT_WIDTH-1:0]   PIO_OUT,
+
+    // Host
+    prt_dp_lb_if.lb_in                  HOST_IF,
+    output wire                         HOST_IRQ_OUT, 
+
+    // HPD
+    input wire                          HPD_IN,
+    output wire                         HPD_OUT,
+
+    // AUX
+    output wire                         AUX_EN_OUT,
+    output wire                         AUX_TX_OUT,
+    input wire                          AUX_RX_IN,
+
+    // Message 
+    prt_dp_msg_if.src                   MSG_SRC_IF,
+    prt_dp_msg_if.snk                   MSG_SNK_IF
+);
+endmodule
+"#;
+        let modules = parse_module_text(text, Path::new("prt_dp_pm_top.sv"));
+        assert_eq!(modules.len(), 1);
+        let m = &modules[0];
+        assert_eq!(m.params.len(), 12);
+        let ports: Vec<&str> = m.ports.iter().map(|decl| decl.name.as_str()).collect();
+        assert_eq!(
+            ports,
+            vec![
+                "RST_IN",
+                "CLK_IN",
+                "IRQ_IN",
+                "PIO_IN",
+                "PIO_OUT",
+                "HOST_IF",
+                "HOST_IRQ_OUT",
+                "HPD_IN",
+                "HPD_OUT",
+                "AUX_EN_OUT",
+                "AUX_TX_OUT",
+                "AUX_RX_IN",
+                "MSG_SRC_IF",
+                "MSG_SNK_IF"
+            ]
+        );
+    }
+
+    #[test]
+    fn header_ports_with_interface_types() {
+        let text = r#"
+module prt_dp_pm_top
+#
+(
+    parameter P_VENDOR = "none",
+    parameter P_CFG = "tx",
+    parameter P_PIO_IN_WIDTH = 8,
+    parameter P_MST = 0
+)
+(
+    input wire RST_IN,
+    input wire [1:0] IRQ_IN,
+    input wire [P_PIO_IN_WIDTH-1:0] PIO_IN,
+    prt_dp_lb_if.lb_in HOST_IF,
+    output wire HOST_IRQ_OUT,
+    prt_dp_msg_if.src MSG_SRC_IF
+);
+endmodule
+"#;
+        let modules = parse_module_text(text, Path::new("t.sv"));
+        let m = &modules[0];
+        let ports: Vec<&str> = m.ports.iter().map(|decl| decl.name.as_str()).collect();
+        assert_eq!(
+            ports,
+            vec![
+                "RST_IN",
+                "IRQ_IN",
+                "PIO_IN",
+                "HOST_IF",
+                "HOST_IRQ_OUT",
+                "MSG_SRC_IF"
+            ]
+        );
+    }
+
+    #[test]
+    fn scope_info_reports_generate_block_lines() {
+        let text = r#"
+module top;
+    generate
+        for (genvar i = 0; i < 2; i++) begin : gen_a
+            child u_child();
+        end
+    endgenerate
+    if (1) begin : gen_b
+        child u_b();
+    end
+endmodule
+
+module child;
+endmodule
+"#;
+        let dir = std::env::temp_dir().join(format!("waverdi_gen_line_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("top.sv");
+        fs::write(&file, text).unwrap();
+        let set = SourceSet::from_files(vec![file], "test");
+        let db = RtlDb::parse_sources(&set);
+        // `begin : gen_a` is on line 4 of the file.
+        let found = db
+            .scope_info(&["top".to_string(), "gen_a[1]".to_string()])
+            .expect("generate block");
+        assert_eq!(found.line, Some(4));
+        // Nested if-block: deepest block line wins.
+        let found = db
+            .scope_info(&["top".to_string(), "gen_b".to_string()])
+            .expect("if block");
+        assert_eq!(found.line, Some(8));
+        // Paths that end at an instance report the instance boundary instead.
+        let found = db
+            .scope_info(&[
+                "top".to_string(),
+                "gen_a[0]".to_string(),
+                "u_child".to_string(),
+            ])
+            .expect("instance inside generate");
+        assert_eq!(found.instance_scope.len(), 3);
+    }
+
+    #[test]
+    fn missing_generate_scopes_are_merged_into_the_tree() {
+        let text = r#"
+module top #(parameter int N = 3) (input logic clk);
+    generate
+        for (genvar i = 0; i < N; i++) begin : gen_x
+            logic flag;
+        end
+    endgenerate
+    generate
+        if (N > 1) begin : gen_y
+            logic y;
+        end
+    endgenerate
+endmodule
+"#;
+        let dir = std::env::temp_dir().join(format!("waverdi_gen_merge_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("top.sv");
+        fs::write(&file, text).unwrap();
+        let set = SourceSet::from_files(vec![file], "test");
+        let db = RtlDb::parse_sources(&set);
+        let mut wf = Waveform {
+            ts: crate::waveform::TimeScale::default(),
+            start: 0,
+            end: 0,
+            signals: vec![],
+            tree: crate::waveform::ScopeTree::new(),
+        };
+        let top = wf
+            .tree
+            .add_scope(wf.tree.root, "top".to_string(), "top".to_string());
+        // One iteration already exists in the dump; it must be reused.
+        wf.tree
+            .add_scope(top, "gen_x[1]".to_string(), String::new());
+        db.merge_generate_scopes(&mut wf);
+        let names: Vec<&str> = wf.tree.nodes[top]
+            .children
+            .iter()
+            .map(|&child| wf.tree.nodes[child].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["gen_x[1]", "gen_x[0]", "gen_x[2]", "gen_y"]);
+        assert_eq!(names.iter().filter(|name| **name == "gen_x[1]").count(), 1);
     }
 
     #[test]
