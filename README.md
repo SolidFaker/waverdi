@@ -406,3 +406,21 @@ cargo test --no-default-features # pure TUI build
 cargo clippy --all-targets
 cargo fmt --check
 ```
+
+## Todo
+
+Planned waveform formats — explored, not implemented yet:
+
+- **Cadence SHM** (`xrun` / SimVision `waves.shm`): convert to VCD with the
+  `simvisdbutil` tool shipped with Xcelium
+  (`simvisdbutil waves.trn -vcd -reginput -output out.vcd -overwrite -nolog`),
+  then load the result through the existing VCD parser. Caveats: Xcelium must be
+  installed; the VCD can be far larger than the SHM database; struct,
+  interface and analog (PSF) data does not survive the conversion.
+- **ModelSim / Questa WLF** (`vsim.wlf`): convert with the bundled `wlf2vcd`
+  (`wlf2vcd -o out.vcd file.wlf`) and load the VCD, the same way GTKWave reads
+  WLF today. A later option is a native bridge over the `libwlf.a` /
+  `wlf_api.h` that ship with Questa, mirroring the FSDB/FFR integration.
+
+Both share one "external converter → VCD" pipeline; large converted VCDs also
+need the change budget/decimation that FSDB parsing already has.

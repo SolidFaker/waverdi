@@ -363,3 +363,21 @@ cargo test --no-default-features # 纯 TUI 构建
 cargo clippy --all-targets
 cargo fmt --check
 ```
+
+## 待办
+
+计划支持的波形格式（已探索，尚未实现）：
+
+- **Cadence SHM**（`xrun` / SimVision 的 `waves.shm`）：用 Xcelium 自带的
+  `simvisdbutil` 转成 VCD
+  （`simvisdbutil waves.trn -vcd -reginput -output out.vcd -overwrite -nolog`），
+  再用现有 VCD 解析器加载。注意：需要安装 Xcelium；转换出的 VCD 可能远大于
+  SHM 数据库；struct/interface 和模拟（PSF）数据无法保留。
+- **ModelSim / Questa WLF**（`vsim.wlf`）：用自带的 `wlf2vcd`
+  （`wlf2vcd -o out.vcd file.wlf`）转成 VCD 后加载，与 GTKWave 现有做法一致。
+  后续可做原生桥接（链接 Questa 自带的 `libwlf.a` / `wlf_api.h`，
+  类似 FSDB/FFR 的集成方式）。
+
+两者共用同一条“外部转换器 → VCD”管线；转换出的大 VCD 还需要补上 FSDB
+已有的变化量预算/抽稀。
+
