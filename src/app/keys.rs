@@ -447,11 +447,14 @@ fn page(app: &mut App, down: bool) {
     } else if down {
         app.row_scroll += rows_h;
         if let Some(row) = app.sel_row {
-            app.sel_row = Some((row + rows_h).min(app.display.len().saturating_sub(1)));
+            app.sel_row = Some((row + rows_h).min(app.rows_len().saturating_sub(1)));
         }
         app.scroll_to_sel();
     } else {
         app.row_scroll = app.row_scroll.saturating_sub(rows_h);
+        if let Some(row) = app.sel_row {
+            app.sel_row = Some(row.saturating_sub(rows_h));
+        }
         app.scroll_to_sel();
     }
 }
@@ -541,77 +544,51 @@ enum BrowserCmd {
     Load(String),
 }
 
-/// Keys of the "Create Bus" ordering window.
+/// Keys of the "Add Signals" picker: pane focus, navigation, filter and the
+/// Apply / OK / Cancel actions.
 fn add_signals_key(app: &mut App, key: KeyEvent) {
+    use crate::app::{AddAction, AddFocus};
+
     let focus = app
         .add_signals
         .as_ref()
         .map(|add| add.focus)
-        .unwrap_or(crate::app::AddFocus::Tree);
-    match key.code {
-        KeyCode::Esc => app.close_add_signals(),
-        KeyCode::Tab => {
-            if let Some(add) = app.add_signals.as_mut() {
-                add.focus = add.focus.next();
-            }
+        .unwrap_or(AddFocus::Tree);
+    let cursor_node = |app: &App| {
+        app.add_signals
+            .as_ref()
+            .and_then(|add| app.add_tree_rows().get(add.tree_sel).map(|&(node, _)| node))
+    };
+    let action = match key.code {
+        KeyCode::Esc => Some(AddAction::Close),
+        KeyCode::Tab => Some(AddAction::CycleFocus(1)),
+        KeyCode::BackTab => Some(AddAction::CycleFocus(-1)),
+        KeyCode::Up | KeyCode::Char('k') => Some(AddAction::Move(-1)),
+        KeyCode::Down | KeyCode::Char('j') => Some(AddAction::Move(1)),
+        KeyCode::Home => Some(AddAction::Move(-1000)),
+        KeyCode::End => Some(AddAction::Move(1000)),
+        KeyCode::Right | KeyCode::Left if focus == AddFocus::Tree => {
+            cursor_node(app).map(AddAction::ToggleNode)
         }
-        KeyCode::BackTab => {
-            if let Some(add) = app.add_signals.as_mut() {
-                add.focus = match add.focus {
-                    crate::app::AddFocus::Tree => crate::app::AddFocus::Signals,
-                    crate::app::AddFocus::Instances => crate::app::AddFocus::Tree,
-                    crate::app::AddFocus::Signals => crate::app::AddFocus::Instances,
-                };
-            }
-        }
-        KeyCode::Up | KeyCode::Char('k') => app.add_move(-1),
-        KeyCode::Down | KeyCode::Char('j') => app.add_move(1),
-        KeyCode::Home => app.add_move(-1000),
-        KeyCode::End => app.add_move(1000),
-        KeyCode::Right if focus == crate::app::AddFocus::Tree => app.add_toggle_expand(),
-        KeyCode::Left if focus == crate::app::AddFocus::Tree => app.add_toggle_expand(),
-        KeyCode::Right => {
-            if let Some(add) = app.add_signals.as_mut() {
-                add.focus = add.focus.next();
-            }
-        }
-        KeyCode::Left => {
-            if let Some(add) = app.add_signals.as_mut() {
-                add.focus = match add.focus {
-                    crate::app::AddFocus::Tree => crate::app::AddFocus::Signals,
-                    crate::app::AddFocus::Instances => crate::app::AddFocus::Tree,
-                    crate::app::AddFocus::Signals => crate::app::AddFocus::Instances,
-                };
-            }
-        }
-        KeyCode::Char(' ') if focus == crate::app::AddFocus::Tree => {
-            let node = app
-                .add_tree_rows()
-                .get(
-                    app.add_signals
-                        .as_ref()
-                        .map(|add| add.tree_sel)
-                        .unwrap_or(0),
-                )
-                .map(|&(node, _)| node);
-            if let Some(node) = node {
-                app.add_navigate(node);
-            }
-        }
-        KeyCode::Char(' ') if focus == crate::app::AddFocus::Signals => app.add_toggle_signal(),
-        KeyCode::Enter if focus == crate::app::AddFocus::Instances => {
-            let picked = app
+        KeyCode::Right => Some(AddAction::CycleFocus(1)),
+        KeyCode::Left => Some(AddAction::CycleFocus(-1)),
+        KeyCode::Char(' ') if focus == AddFocus::Tree => cursor_node(app).map(AddAction::OpenScope),
+        KeyCode::Char(' ') if focus == AddFocus::Signals => Some(AddAction::ToggleCursorSignal),
+        KeyCode::Enter if focus == AddFocus::Instances => {
+            let index = app
                 .add_signals
                 .as_ref()
-                .and_then(|add| app.add_instances().get(add.instance_sel).copied());
-            if let Some(node) = picked {
-                app.add_navigate(node);
-            }
+                .map(|add| add.instance_sel)
+                .unwrap_or(0);
+            Some(AddAction::OpenInstance(index))
         }
-        KeyCode::Enter => app.apply_add_signals(true),
-        KeyCode::Char('a') => app.apply_add_signals(false),
-        KeyCode::Char('f') => app.add_cycle_filter(),
-        _ => {}
+        KeyCode::Enter => Some(AddAction::Apply { close: true }),
+        KeyCode::Char('a') => Some(AddAction::Apply { close: false }),
+        KeyCode::Char('f') => Some(AddAction::CycleFilter),
+        _ => None,
+    };
+    if let Some(action) = action {
+        app.add_action(action);
     }
 }
 
@@ -954,6 +931,46 @@ mod tests {
         assert!(!app.visual);
         handle_key(&mut app, key(KeyCode::Char('p')));
         assert_eq!(app.display, vec![0, 1]);
+    }
+
+    /// VCD with `count` one-bit signals named `s00..`.
+    fn wide_vcd(count: usize) -> String {
+        let mut vcd = String::from("$timescale 1ns $end\n");
+        for i in 0..count {
+            vcd.push_str(&format!(
+                "$var wire 1 {} s{:02} $end\n",
+                (33 + i) as u8 as char,
+                i
+            ));
+        }
+        vcd.push_str("$enddefinitions $end\n#0\n0!\n");
+        vcd
+    }
+
+    #[test]
+    fn page_down_reaches_the_last_row_with_group_headers() {
+        let mut app = app_with(&wide_vcd(40));
+        app.set_display((0..40).collect());
+        app.focus = Focus::List;
+        app.sel_row = Some(0);
+        for _ in 0..10 {
+            handle_key(&mut app, key(KeyCode::PageDown));
+        }
+        // The clamp must count the group header rows too.
+        assert_eq!(app.sel_row, Some(app.rows_len() - 1));
+    }
+
+    #[test]
+    fn page_up_moves_the_selection_towards_the_top() {
+        let mut app = app_with(&wide_vcd(40));
+        app.set_display((0..40).collect());
+        app.focus = Focus::List;
+        let rows_h = app.rows_h().max(1);
+        app.sel_row = Some(rows_h + 5);
+        app.row_scroll = rows_h;
+        handle_key(&mut app, key(KeyCode::PageUp));
+        assert_eq!(app.sel_row, Some(5));
+        assert_eq!(app.row_scroll, 0);
     }
 
     #[test]

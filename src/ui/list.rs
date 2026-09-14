@@ -1,5 +1,6 @@
 use crate::app::{App, Focus, ListRow};
 use crate::ui::layout::Layout;
+use crate::ui::scrollbar;
 use crate::ui::text;
 use crate::waveform::Waveform;
 use ratatui::buffer::Buffer;
@@ -208,7 +209,7 @@ fn draw_h_scrollbar(buf: &mut Buffer, l: &Layout, app: &App) {
     let y = l.list.bottom().saturating_sub(1);
     let name_content = app.list_content_width();
     let name_max = name_content.saturating_sub(name_w);
-    text::h_scrollbar(
+    scrollbar::h_scrollbar(
         buf,
         l.list.x,
         grip,
@@ -221,7 +222,7 @@ fn draw_h_scrollbar(buf: &mut Buffer, l: &Layout, app: &App) {
     );
     let value_content = app.value_content_width();
     let value_max = value_content.saturating_sub(value_w);
-    text::h_scrollbar(
+    scrollbar::h_scrollbar(
         buf,
         grip + 1,
         l.list.right().saturating_sub(1).max(grip + 2),

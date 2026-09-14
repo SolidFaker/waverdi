@@ -407,26 +407,29 @@ fn draw_scrollbar(
     visible: usize,
     t: &crate::theme::Theme,
 ) {
-    let track = rect.height as usize;
-    if track == 0 || rect.width == 0 || visible == 0 || len <= visible {
+    if rect.width == 0 {
         return;
     }
-    let x = rect.right().saturating_sub(1);
-    let thumb = ((track * visible) / len).max(1).min(track);
-    let span = track - thumb;
-    let max_start = len - visible;
-    let pos = (start.min(max_start) * span)
-        .checked_div(max_start)
-        .unwrap_or(0);
-    for row in 0..track {
-        let is_thumb = row >= pos && row < pos + thumb;
-        let (symbol, style) = if is_thumb {
-            ("█", Style::new().fg(t.accent))
-        } else {
-            ("│", Style::new().fg(t.dim))
-        };
-        text::put(buf, x, rect.y + row as u16, symbol, style);
+    let track = rect.height as usize;
+    let Some((pos, thumb)) =
+        crate::ui::scrollbar::track_geometry(track, len, visible, start, false)
+    else {
+        return;
+    };
+    crate::ui::scrollbar::Bar {
+        orientation: crate::ui::scrollbar::Orientation::Vertical,
+        x: rect.right().saturating_sub(1),
+        y: rect.y,
+        span: track,
+        start: pos,
+        len: thumb,
+        thumb: "█",
+        track: "│",
+        thumb_fg: t.accent,
+        track_fg: t.dim,
+        bg: t.popup_bg,
     }
+    .draw(buf);
 }
 
 fn button(buf: &mut Buffer, rect: Rect, label: &str, app: &App) {

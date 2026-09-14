@@ -30,8 +30,9 @@ fn entries_width(entries: &[CtxEntry]) -> u16 {
         + 4
 }
 
-pub fn root_rect(l: &Layout, app: &App) -> Rect {
-    let menu = app.ctx_menu.as_ref().expect("context menu open");
+/// Area of the root context menu, or `None` when no menu is open.
+pub fn root_rect(l: &Layout, app: &App) -> Option<Rect> {
+    let menu = app.ctx_menu.as_ref()?;
     let entries = app.ctx_root();
     let width = entries_width(entries);
     let height = entries.len() as u16 + 2;
@@ -43,12 +44,12 @@ pub fn root_rect(l: &Layout, app: &App) -> Rect {
         .y
         .min(l.area.bottom().saturating_sub(height))
         .max(l.area.y);
-    Rect {
+    Some(Rect {
         x,
         y,
         width,
         height,
-    }
+    })
 }
 
 pub fn sub_rect(l: &Layout, app: &App, root: Rect, index: usize) -> Option<Rect> {
@@ -90,7 +91,7 @@ fn hit(area: Rect, col: u16, row: u16, count: usize) -> Option<usize> {
 pub fn item_at(app: &App, col: u16, row: u16) -> Option<CtxHit> {
     let menu = app.ctx_menu.as_ref()?;
     let l = app.layout();
-    let root = root_rect(&l, app);
+    let root = root_rect(&l, app)?;
     if let Some(index) = menu.submenu {
         if let Some(area) = sub_rect(&l, app, root, index) {
             let entries = app.ctx_level();
@@ -140,7 +141,9 @@ fn draw_popup(buf: &mut Buffer, area: Rect, entries: &[CtxEntry], sel: usize, t:
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
     let t = &app.theme;
     let Some(menu) = &app.ctx_menu else { return };
-    let root = root_rect(l, app);
+    let Some(root) = root_rect(l, app) else {
+        return;
+    };
     draw_popup(
         buf,
         root,

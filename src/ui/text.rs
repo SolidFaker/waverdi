@@ -3,6 +3,9 @@ use ratatui::style::{Color, Style};
 
 /// Truncate to `width` terminal cells, adding an ellipsis when clipped.
 pub fn trunc(s: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
     if s.chars().count() <= width {
         s.to_string()
     } else {
@@ -90,37 +93,6 @@ pub fn scroll_slice(s: &str, offset: usize, width: usize) -> String {
     out
 }
 
-/// Draw a horizontal scrollbar track from `x0` to `x1` (exclusive) on `y`.
-#[allow(clippy::too_many_arguments)]
-pub fn h_scrollbar(
-    buf: &mut Buffer,
-    x0: u16,
-    x1: u16,
-    y: u16,
-    content: usize,
-    view: usize,
-    offset: usize,
-    fg: Color,
-    bg: Color,
-) {
-    if content <= view || x1 <= x0 || y >= buf.area().bottom() {
-        return;
-    }
-    let span = (x1 - x0) as usize;
-    let max = content - view;
-    let offset = offset.min(max);
-    let thumb = ((view as f64 / content as f64) * span as f64).max(1.0) as usize;
-    let top = ((offset as f64 / max as f64) * span.saturating_sub(thumb) as f64) as usize;
-    for cell in 0..span {
-        let symbol = if cell >= top && cell < top + thumb {
-            "█"
-        } else {
-            "─"
-        };
-        set_cell(buf, x0 + cell as u16, y, symbol, fg, bg);
-    }
-}
-
 /// Draw a string, clipped to the buffer's right edge.
 pub fn put(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style) {
     let area = *buf.area();
@@ -161,6 +133,11 @@ mod tests {
         assert_eq!(trunc_left("abcdef", 1), "…");
         assert_eq!(trunc_left("abcdef", 0), "");
         assert_eq!(trunc_left("wave.fsdb", 9), "wave.fsdb");
+    }
+
+    #[test]
+    fn truncation_at_zero_width_is_empty() {
+        assert_eq!(trunc("abc", 0), "");
     }
 
     #[test]

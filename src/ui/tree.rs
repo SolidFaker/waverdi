@@ -1,6 +1,7 @@
 use crate::app::{App, Focus, TreeNode};
 use crate::theme::Theme;
 use crate::ui::layout::{tree_inner, Layout};
+use crate::ui::scrollbar;
 use crate::ui::text;
 use crate::waveform::Waveform;
 use ratatui::buffer::Buffer;
@@ -137,7 +138,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
 
     // Bottom row: one horizontal scrollbar per column.
     let bar_y = inner.bottom().saturating_sub(1);
-    text::h_scrollbar(
+    scrollbar::h_scrollbar(
         buf,
         inner.x,
         sep_x,
@@ -148,7 +149,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         t.dim,
         t.bg,
     );
-    text::h_scrollbar(
+    scrollbar::h_scrollbar(
         buf,
         module_x,
         inner.right().saturating_sub(1),
@@ -169,24 +170,21 @@ fn draw_scrollbar(
     height: usize,
     t: &Theme,
 ) {
-    if total <= height || height == 0 {
+    let Some((start, len)) = scrollbar::proportional_geometry(height, total, height, scroll) else {
         return;
+    };
+    scrollbar::Bar {
+        orientation: scrollbar::Orientation::Vertical,
+        x: inner.right().saturating_sub(1),
+        y: inner.y + 1,
+        span: height,
+        start,
+        len,
+        thumb: "█",
+        track: "│",
+        thumb_fg: t.dim,
+        track_fg: t.dim,
+        bg: t.bg,
     }
-    let thumb = ((height as f64 / total as f64) * height as f64).max(1.0) as usize;
-    let top = ((scroll as f64 / total as f64) * height as f64) as usize;
-    for row in 0..height {
-        let symbol = if row >= top && row < top + thumb {
-            "█"
-        } else {
-            "│"
-        };
-        text::set_cell(
-            buf,
-            inner.right().saturating_sub(1),
-            inner.y + 1 + row as u16,
-            symbol,
-            t.dim,
-            t.bg,
-        );
-    }
+    .draw(buf);
 }

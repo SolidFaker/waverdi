@@ -131,21 +131,24 @@ fn draw_scrollbar(
     total: usize,
     t: &Theme,
 ) {
-    if rows == 0 || total <= rows {
+    let Some((start, len)) = crate::ui::scrollbar::track_geometry(rows, total, rows, scroll, true)
+    else {
         return;
+    };
+    crate::ui::scrollbar::Bar {
+        orientation: crate::ui::scrollbar::Orientation::Vertical,
+        x,
+        y: top,
+        span: rows,
+        start,
+        len,
+        thumb: "█",
+        track: "│",
+        thumb_fg: t.dim,
+        track_fg: t.dim,
+        bg: t.bg,
     }
-    let thumb = ((rows as f64 / total as f64) * rows as f64).max(1.0) as usize;
-    let track = (total - rows).max(1);
-    let offset = ((scroll.min(track) as f64 / track as f64) * (rows.saturating_sub(thumb)) as f64)
-        .round() as usize;
-    for row in 0..rows {
-        let symbol = if row >= offset && row < offset + thumb {
-            "█"
-        } else {
-            "│"
-        };
-        text::set_cell(buf, x, top + row as u16, symbol, t.dim, t.bg);
-    }
+    .draw(buf);
 }
 
 /// Scrollbar geometry of a scrollable dialog, used for drawing and clicking.

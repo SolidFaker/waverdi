@@ -92,6 +92,50 @@ impl AddFocus {
             AddFocus::Signals => AddFocus::Tree,
         }
     }
+
+    pub fn prev(self) -> Self {
+        match self {
+            AddFocus::Tree => AddFocus::Signals,
+            AddFocus::Instances => AddFocus::Tree,
+            AddFocus::Signals => AddFocus::Instances,
+        }
+    }
+}
+
+/// One semantic step of the Add Signals picker. The key and mouse handlers
+/// both map their events onto this list and run it through
+/// [`App::add_action`], so the picker behaviour cannot drift between them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AddAction {
+    Close,
+    /// Move the focus through the panes; positive steps go forward.
+    CycleFocus(i8),
+    /// Move the focused pane's cursor.
+    Move(i64),
+    /// Put the tree cursor on a node and expand or collapse it.
+    ToggleNode(usize),
+    /// Put the tree cursor on a node and make it the current level.
+    OpenScope(usize),
+    /// Open the instance at that position of the Instances pane.
+    OpenInstance(usize),
+    /// Toggle one signal (waveform index).
+    ToggleSignal(usize),
+    /// Toggle the signal under the Signals-pane cursor.
+    ToggleCursorSignal,
+    Apply {
+        close: bool,
+    },
+    CycleFilter,
+    /// Wheel over one pane.
+    Scroll {
+        pane: AddFocus,
+        rows: i64,
+    },
+    /// Drag one pane's scrollbar to a screen row.
+    ScrollTo {
+        pane: AddFocus,
+        row: u16,
+    },
 }
 
 pub struct AddSignals {
@@ -426,22 +470,6 @@ impl App {
         }
     }
 
-    /// Expand/collapse the selected tree row.
-    pub fn add_toggle_expand(&mut self) {
-        let Some((node, _)) = self
-            .add_signals
-            .as_ref()
-            .and_then(|add| self.add_tree_rows().get(add.tree_sel).copied())
-        else {
-            return;
-        };
-        if let Some(add) = &mut self.add_signals {
-            if !add.expanded.remove(&node) {
-                add.expanded.insert(node);
-            }
-        }
-    }
-
     pub fn add_cycle_filter(&mut self) {
         if let Some(add) = &mut self.add_signals {
             add.filter = add.filter.next();
@@ -459,18 +487,95 @@ impl App {
         else {
             return;
         };
+        self.add_toggle_signal_at(index);
+    }
+
+    /// Toggle one signal and leave the Signals-pane cursor on it.
+    pub fn add_toggle_signal_at(&mut self, index: usize) {
+        let position = self
+            .add_signal_list()
+            .iter()
+            .position(|&signal| signal == index);
         if let Some(add) = &mut self.add_signals {
+            add.focus = AddFocus::Signals;
+            if let Some(position) = position {
+                add.signal_sel = position;
+            }
             if !add.selected.remove(&index) {
                 add.selected.insert(index);
             }
         }
     }
 
-    pub fn add_toggle_signal_at(&mut self, index: usize) {
+    /// Move the picker focus one pane forward (`step >= 0`) or backward.
+    fn add_cycle_focus(&mut self, step: i8) {
         if let Some(add) = &mut self.add_signals {
-            if !add.selected.remove(&index) {
-                add.selected.insert(index);
+            add.focus = if step >= 0 {
+                add.focus.next()
+            } else {
+                add.focus.prev()
+            };
+        }
+    }
+
+    /// Put the tree cursor on `node` and expand or collapse it.
+    pub fn add_toggle_node(&mut self, node: usize) {
+        let position = self.add_tree_rows().iter().position(|(id, _)| *id == node);
+        if let Some(add) = &mut self.add_signals {
+            add.focus = AddFocus::Tree;
+            if let Some(position) = position {
+                add.tree_sel = position;
             }
+            if !add.expanded.remove(&node) {
+                add.expanded.insert(node);
+            }
+        }
+    }
+
+    /// Put the tree cursor on `node` and make it the current level.
+    pub fn add_open_scope(&mut self, node: usize) {
+        let position = self.add_tree_rows().iter().position(|(id, _)| *id == node);
+        if let Some(add) = &mut self.add_signals {
+            add.focus = AddFocus::Tree;
+            if let Some(position) = position {
+                add.tree_sel = position;
+            }
+        }
+        self.add_navigate(node);
+    }
+
+    /// Open the instance at `index` of the Instances pane.
+    pub fn add_open_instance(&mut self, index: usize) {
+        let node = self.add_instances().get(index).copied();
+        if let Some(add) = &mut self.add_signals {
+            add.focus = AddFocus::Instances;
+            add.instance_sel = index;
+        }
+        if let Some(node) = node {
+            self.add_navigate(node);
+            // Navigating resets the pane cursors; keep the picked row.
+            if let Some(add) = &mut self.add_signals {
+                add.instance_sel = index;
+            }
+        }
+    }
+
+    /// Run one picker step. The key and mouse handlers map their events onto
+    /// [`AddAction`] and go through here, so the two surfaces cannot drift.
+    pub fn add_action(&mut self, action: AddAction) {
+        match action {
+            AddAction::Close => self.close_add_signals(),
+            AddAction::CycleFocus(step) => self.add_cycle_focus(step),
+            AddAction::Move(delta) => self.add_move(delta),
+            AddAction::ToggleNode(node) => self.add_toggle_node(node),
+            AddAction::OpenScope(node) => self.add_open_scope(node),
+            AddAction::OpenInstance(index) => self.add_open_instance(index),
+            AddAction::ToggleSignal(signal) => self.add_toggle_signal_at(signal),
+            AddAction::ToggleCursorSignal => self.add_toggle_signal(),
+            AddAction::Apply { close } => self.apply_add_signals(close),
+            AddAction::CycleFilter => self.add_cycle_filter(),
+            AddAction::Scroll { pane, rows } => self.add_scroll_rows(pane, rows),
+            AddAction::ScrollTo { pane, row } => self.add_scroll_to_row(pane, row),
         }
     }
 

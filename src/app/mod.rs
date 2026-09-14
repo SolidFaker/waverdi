@@ -12,7 +12,7 @@ mod value;
 mod view;
 
 pub use action::Action;
-pub use add::{AddFocus, AddSignals};
+pub use add::{AddAction, AddFocus, AddSignals};
 pub(crate) use browser::is_waveform;
 pub use browser::{EntryKind, FileBrowser};
 pub use context::{BusBuilder, ContextMenu, CtxEntry, CtxTarget};
@@ -97,6 +97,8 @@ pub(crate) enum DragMode {
 #[derive(Clone, Copy)]
 pub(crate) struct Drag {
     pub mode: DragMode,
+    /// Pointer column at drag start; for `DragMode::SplitTop` this holds the
+    /// grabbed row instead, because that split is horizontal.
     pub start_x: u16,
     pub start_pct: f64,
     /// Row being dragged for `DragMode::Reorder`.
@@ -528,14 +530,17 @@ impl App {
 
     /// Open the same file dialog as `Open Waveform`, but load a filelist.
     pub fn open_filelist_dialog(&mut self) {
-        self.browser_mode = BrowserMode::Filelist;
         if self.use_gui {
+            self.browser_mode = BrowserMode::Filelist;
             if let Some(path) = crate::picker::pick_filelist() {
                 self.load_filelist(&path.display().to_string());
             }
             return;
         }
+        // The browser resets the mode to Waveform; the filelist purpose is set
+        // after opening it so that cancelling the dialog leaves no stale mode.
         self.open_tui_browser();
+        self.browser_mode = BrowserMode::Filelist;
     }
 
     /// Finish a file-dialog / browser pick according to its purpose.
@@ -554,6 +559,9 @@ impl App {
 
     /// Open the built-in terminal file browser (used over SSH / headless).
     pub fn open_tui_browser(&mut self) {
+        // A pick from the browser loads a waveform unless the caller overrides
+        // the mode right after (Load Filelist does).
+        self.browser_mode = BrowserMode::Waveform;
         let start = if self.path.is_empty() {
             std::env::current_dir().unwrap_or_default()
         } else {
@@ -634,6 +642,7 @@ impl App {
         self.renaming_group = None;
         self.bus_builder = None;
         self.find_sel = 0;
+        self.value_query = None;
         self.cursor = wf.start;
         self.wf = Some(wf);
         self.dialog = None;
@@ -675,21 +684,25 @@ impl App {
 
     /// Move the Source pane to the line of the selected generate block, so
     /// double-clicking a generated hierarchy node shows where it comes from.
+    /// Struct/interface scopes are values, not hierarchy: they jump to the
+    /// declaration of the variable instead.
     pub fn locate_scope_in_source(&mut self) {
         let steps = self.selected_scope_steps();
         if steps.is_empty() {
             return;
         }
-        let (is_block, line) = {
+        let line = {
             let Some(db) = self.rtl.as_ref() else { return };
-            let Some(found) = db.scope_info(&steps) else {
-                return;
-            };
-            (found.instance_scope.len() != steps.len(), found.line)
+            match db.scope_info(&steps) {
+                Some(found) => {
+                    if found.instance_scope.len() == steps.len() {
+                        return;
+                    }
+                    found.line
+                }
+                None => db.scope_declaration_line(&steps),
+            }
         };
-        if !is_block {
-            return;
-        }
         let Some(line) = line else { return };
         self.sync_source();
         let col = self
@@ -792,7 +805,8 @@ impl App {
             }
         }
         let steps = self.selected_scope_steps();
-        rtl?.module_at_scope(&steps).map(|def| def.name.clone())
+        let rtl = rtl?;
+        rtl.module_of_scope(&steps).map(|def| def.name.clone())
     }
 
     fn source_rows(&self) -> usize {
@@ -1819,6 +1833,78 @@ mod tests {
     }
 
     #[test]
+    fn apply_waveform_clears_the_value_search() {
+        let mut app =
+            app_with("$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n#0\n0!\n");
+        app.value_query = Some("h5".to_string());
+        let out = crate::vcd::parse_bytes(
+            b"$timescale 1ns $end\n$var wire 1 ! a $end\n$enddefinitions $end\n#0\n1!\n",
+        )
+        .unwrap();
+        app.apply_waveform("<test>".to_string(), out.wf, out.warnings);
+        assert!(app.value_query.is_none());
+    }
+
+    #[test]
+    fn locating_a_struct_scope_jumps_to_its_declaration() {
+        use crate::rtl::{RtlDb, SourceSet};
+        use crate::waveform::{ScopeTree, TimeScale, Waveform};
+
+        let dir =
+            std::env::temp_dir().join(format!("waverdi_struct_locate_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = r#"module tb;
+    dp_tst u_dp_tst();
+endmodule
+
+module dp_tst;
+    typedef struct { logic run; } clk_fetch_t;
+    clk_fetch_t clk_fetch;
+endmodule
+"#;
+        let file = dir.join("structs.sv");
+        std::fs::write(&file, text).unwrap();
+
+        let mut app = App::new();
+        let mut wf = Waveform {
+            ts: TimeScale::default(),
+            start: 0,
+            end: 10,
+            signals: Vec::new(),
+            tree: ScopeTree::new(),
+        };
+        let root = wf.tree.root;
+        let tb = wf.tree.add_scope(root, "tb".to_string(), "tb".to_string());
+        let dut = wf
+            .tree
+            .add_scope(tb, "u_dp_tst".to_string(), "dp_tst".to_string());
+        let fetch = wf
+            .tree
+            .add_scope(dut, "clk_fetch".to_string(), String::new());
+        wf.tree.nodes[fetch].group = true;
+        app.wf = Some(wf);
+        app.expanded.extend([root, tb, dut]);
+        let set = SourceSet::from_files(vec![file], "test");
+        app.rtl = Some(RtlDb::parse_sources(&set));
+        app.tree_sel = app
+            .tree_visible()
+            .iter()
+            .position(|node| matches!(node, TreeNode::Scope { id, .. } if *id == fetch))
+            .expect("struct row");
+
+        app.locate_scope_in_source();
+        assert_eq!(app.focus, Focus::Source);
+        let view = app.source_view.as_ref().expect("source view");
+        assert_eq!(view.module, "dp_tst");
+        let decl_line = text
+            .lines()
+            .position(|line| line.contains("clk_fetch_t clk_fetch"))
+            .expect("declaration");
+        assert_eq!(view.line, decl_line);
+    }
+
+    #[test]
     fn filelist_loading_and_fsdb_source_discovery() {
         let dir = std::env::temp_dir().join(format!("waverdi_app_fl_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1871,6 +1957,27 @@ mod tests {
         assert_eq!(app.sources.as_ref().unwrap().files, vec![src]);
         // The mode was reset: the next pick loads a waveform again.
         assert!(matches!(app.browser_mode, BrowserMode::Waveform));
+    }
+
+    #[test]
+    fn cancelling_the_filelist_dialog_restores_waveform_mode() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = App::new();
+        app.use_gui = false;
+        Action::LoadFilelist.run(&mut app);
+        assert!(matches!(app.browser_mode, BrowserMode::Filelist));
+        // Esc closes the dialog; the stale filelist purpose must not survive.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.dialog, None);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('O'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.dialog, Some(Dialog::Open));
+        app.browser_load("x.vcd");
+        assert!(app.load.is_some(), "the pick must start a waveform load");
+        assert!(!app.sources_explicit);
     }
 
     #[test]

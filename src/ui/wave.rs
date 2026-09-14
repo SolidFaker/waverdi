@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::theme::Theme;
 use crate::ui::layout::Layout;
+use crate::ui::scrollbar;
 use crate::ui::text;
 use crate::waveform::{self, Signal, Value, Waveform};
 use ratatui::buffer::Buffer;
@@ -502,28 +503,25 @@ fn draw_cursor(buf: &mut Buffer, l: &Layout, app: &App) {
 
 fn draw_vscroll(buf: &mut Buffer, l: &Layout, app: &App) {
     let t = &app.theme;
-    let total = app.rows_len();
-    let visible = l.rows_h;
-    if total <= visible {
+    let Some((start, len)) =
+        scrollbar::proportional_geometry(l.rows_h, app.rows_len(), l.rows_h, app.row_scroll)
+    else {
         return;
+    };
+    scrollbar::Bar {
+        orientation: scrollbar::Orientation::Vertical,
+        x: l.vscroll_x,
+        y: l.rows.y,
+        span: l.rows_h,
+        start,
+        len,
+        thumb: SCROLL_THUMB,
+        track: VLINE,
+        thumb_fg: t.accent,
+        track_fg: t.wave_dim,
+        bg: t.wave_bg,
     }
-    let thumb = ((visible as f64 / total as f64) * visible as f64).max(1.0) as usize;
-    let top = ((app.row_scroll as f64 / total as f64) * visible as f64) as usize;
-    for row in 0..visible {
-        let (symbol, fg) = if row >= top && row < top + thumb {
-            (SCROLL_THUMB, t.accent)
-        } else {
-            (VLINE, t.wave_dim)
-        };
-        text::set_cell(
-            buf,
-            l.vscroll_x,
-            l.rows.y + row as u16,
-            symbol,
-            fg,
-            t.wave_bg,
-        );
-    }
+    .draw(buf);
 }
 
 /// Thumb position and width (in columns) of the time scrollbar.
@@ -564,22 +562,20 @@ fn draw_hscroll(buf: &mut Buffer, l: &Layout, app: &App) {
         // The whole range is visible: leave the bar plain.
         return;
     }
-    for col in 0..l.cols {
-        let on_thumb = col >= thumb_x && col < thumb_x + thumb_w;
-        let (symbol, fg) = if on_thumb {
-            (SCROLL_THUMB, t.accent)
-        } else {
-            (SCROLL_TRACK, t.wave_dim)
-        };
-        text::set_cell(
-            buf,
-            l.wave.x + col as u16,
-            l.hscroll.y,
-            symbol,
-            fg,
-            t.wave_bg,
-        );
+    scrollbar::Bar {
+        orientation: scrollbar::Orientation::Horizontal,
+        x: l.wave.x,
+        y: l.hscroll.y,
+        span: l.cols,
+        start: thumb_x,
+        len: thumb_w,
+        thumb: SCROLL_THUMB,
+        track: SCROLL_TRACK,
+        thumb_fg: t.accent,
+        track_fg: t.wave_dim,
+        bg: t.wave_bg,
     }
+    .draw(buf);
 }
 
 /// Redraw the scrollbars (used after overlays such as the focused frame).

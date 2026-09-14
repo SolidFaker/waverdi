@@ -2,7 +2,7 @@
 //!
 //! This is intentionally not a full parser: it recognises modules, signal
 //! declarations, continuous assignments, `always`/`initial` blocks and module
-//! instantiations together with their source lines �?enough to browse RTL and
+//! instantiations together with their source lines — enough to browse RTL and
 //! to trace a signal to its declaration, drivers and loads.
 
 use std::collections::{BTreeMap, HashSet};
@@ -23,12 +23,12 @@ pub struct Location {
 pub struct SignalDecl {
     pub name: String,
     /// `wire`, `reg`, `logic`, ... (kept for the signal tooltip/bus slicing).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub kind: String,
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub direction: Option<String>,
     /// Raw range text as written, e.g. `7:0` (kept for bus slicing).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub range: Option<String>,
     pub line: usize,
 }
@@ -56,11 +56,11 @@ pub struct AlwaysBlock {
 #[derive(Clone, Debug)]
 pub struct Instance {
     /// Instantiated module type (kept for "jump to instantiation").
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub module: String,
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub name: String,
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub line: usize,
     /// `#(.NAME(expr))` parameter overrides, in source order.
     pub overrides: Vec<(String, Expr)>,
@@ -110,7 +110,7 @@ pub struct GenFor {
     pub step: Expr,
     pub items: Vec<Body>,
     /// Kept for jump-to-generate.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub line: usize,
 }
 
@@ -119,8 +119,10 @@ pub struct GenFor {
 pub struct GenBlock {
     pub label: Option<String>,
     pub items: Vec<Body>,
-    #[allow(dead_code)]
     pub line: usize,
+    /// Line just after the block's last token; an inactive block dims
+    /// `line..end` in the Source pane.
+    pub end: usize,
 }
 
 /// `generate if` / `else if` / `else`, one entry per branch.
@@ -128,7 +130,7 @@ pub struct GenBlock {
 pub struct GenIf {
     /// `(condition, block)`; the condition is `None` for the final `else`.
     pub branches: Vec<(Option<Expr>, GenBlock)>,
-    #[allow(dead_code)]
+    /// Line of the `if` keyword; an inactive first branch dims from here.
     pub line: usize,
 }
 
@@ -141,9 +143,9 @@ pub enum Body {
     If(GenIf),
 }
 
-/// Bounded search state for the "plain names inside generate blocks" fallback
-/// of [`RtlDb::walk_chain`]. Without it, nested generate loops are re-walked
-/// for every iteration and every unresolved identifier, which is exponential.
+/// Bounded search state for the generate fallbacks of `walk_chain` and
+/// `walk_scope`. Without it, nested generate loops are re-walked for every
+/// iteration and every unresolved identifier, which is exponential.
 struct GenSearch {
     visited: HashSet<usize>,
     budget: usize,
@@ -245,6 +247,14 @@ impl ModuleDef {
     }
 }
 
+/// Declaration of `name` in a module (signal or port), matched by base name.
+fn module_declaration<'a>(def: &'a ModuleDef, name: &str) -> Option<&'a SignalDecl> {
+    def.signals
+        .iter()
+        .chain(def.ports.iter())
+        .find(|decl| decl.name == name || base_name(&decl.name) == base_name(name))
+}
+
 /// Identifier without a packed range: `count[7:0]` -> `count`.
 fn base_name(text: &str) -> &str {
     text.split('[').next().unwrap_or(text)
@@ -327,6 +337,32 @@ fn taken_branches<'a>(gen_if: &'a GenIf, env: &ParamEnv) -> Vec<&'a GenBlock> {
     taken
 }
 
+/// Line ranges of generate branches whose condition is known false. Loop
+/// bodies are walked once with the enclosing bindings: a condition that
+/// depends on a genvar stays unknown and is never marked inactive, so the
+/// marking cannot hide active code.
+fn collect_inactive(items: &[Body], env: &ParamEnv, out: &mut Vec<std::ops::Range<usize>>) {
+    for item in items {
+        match item {
+            Body::If(gen_if) => {
+                let taken = taken_branches(gen_if, env);
+                for (index, (_, block)) in gen_if.branches.iter().enumerate() {
+                    if !taken.iter().any(|taken| std::ptr::eq(*taken, block)) {
+                        // The first branch's header is the `if` line itself;
+                        // later branches start at their own `begin` line.
+                        let start = if index == 0 { gen_if.line } else { block.line };
+                        out.push(start..block.end);
+                    }
+                    collect_inactive(&block.items, env, out);
+                }
+            }
+            Body::For(gen) => collect_inactive(&gen.items, env, out),
+            Body::Block(block) => collect_inactive(&block.items, env, out),
+            Body::Instance(_) => {}
+        }
+    }
+}
+
 /// Scope names that cannot be produced by the source AST: unnamed generate
 /// blocks (`genblk1[0]`), tool-generated scopes (`unnamed$$_0`) and FSDB
 /// pseudo scopes (`$attribute_root`).
@@ -355,6 +391,18 @@ fn genblk_step(step: &str) -> Option<(usize, Option<i64>)> {
 fn unnamed_ordinal(unnamed: &mut usize) -> usize {
     *unnamed += 1;
     *unnamed
+}
+
+/// Ordinal of an unnamed generate construct for [`block_dump_name`], or
+/// `None` when it carries a label. The named/unnamed decision and the
+/// ordinal numbering must stay in one place: the counter advances per
+/// unnamed construct in source order.
+fn unnamed_number(label: Option<&str>, unnamed: &mut usize) -> Option<usize> {
+    if label.is_none() {
+        Some(unnamed_ordinal(unnamed))
+    } else {
+        None
+    }
 }
 
 /// Dump scope name of a generate block: the label or the tool-assigned
@@ -522,6 +570,9 @@ impl RtlDb {
         if steps.is_empty() {
             return;
         }
+        // Each node gets its own budget (`scope_info` starts a fresh search),
+        // so one pathological level cannot exhaust the lookup for the nodes
+        // merged after it.
         let Some(found) = self.scope_info(steps) else {
             return;
         };
@@ -541,11 +592,7 @@ impl RtlDb {
         for item in items {
             match item {
                 Body::For(gen) => {
-                    let number = if gen.label.is_none() {
-                        Some(unnamed_ordinal(&mut unnamed))
-                    } else {
-                        None
-                    };
+                    let number = unnamed_number(gen.label.as_deref(), &mut unnamed);
                     for value in gen_values(gen, env) {
                         let name = block_dump_name(gen.label.as_deref(), number, Some(value));
                         let Some(child) = ensure_tree_child(wf, node, &name) else {
@@ -558,11 +605,7 @@ impl RtlDb {
                 }
                 Body::If(gen_if) => {
                     for block in taken_branches(gen_if, env) {
-                        let number = if block.label.is_none() {
-                            Some(unnamed_ordinal(&mut unnamed))
-                        } else {
-                            None
-                        };
+                        let number = unnamed_number(block.label.as_deref(), &mut unnamed);
                         let name = block_dump_name(block.label.as_deref(), number, None);
                         if let Some(child) = ensure_tree_child(wf, node, &name) {
                             self.merge_generate_items(wf, child, env, &block.items);
@@ -570,11 +613,7 @@ impl RtlDb {
                     }
                 }
                 Body::Block(block) => {
-                    let number = if block.label.is_none() {
-                        Some(unnamed_ordinal(&mut unnamed))
-                    } else {
-                        None
-                    };
+                    let number = unnamed_number(block.label.as_deref(), &mut unnamed);
                     let name = block_dump_name(block.label.as_deref(), number, None);
                     if let Some(child) = ensure_tree_child(wf, node, &name) {
                         self.merge_generate_items(wf, child, env, &block.items);
@@ -645,6 +684,55 @@ impl RtlDb {
         self.scope_info(steps).map(|found| found.module)
     }
 
+    /// Like [`module_at_scope`](Self::module_at_scope) but also resolves
+    /// scopes that are values rather than hierarchy: a struct variable or an
+    /// interface port (`tb.u_dut.clk_fetch`) reports the module that declares
+    /// `clk_fetch`, so its source can be shown.
+    pub fn module_of_scope(&self, steps: &[String]) -> Option<&ModuleDef> {
+        if let Some(def) = self.module_at_scope(steps) {
+            return Some(def);
+        }
+        for k in (1..steps.len()).rev() {
+            if let Some(def) = self.module_at_scope(&steps[..k]) {
+                if module_declaration(def, &steps[k]).is_some() {
+                    return Some(def);
+                }
+            }
+        }
+        None
+    }
+
+    /// Line of the declaration that a value scope names, e.g. the `clk_fetch`
+    /// struct variable in the module reached by the path prefix. `None` for
+    /// plain hierarchy paths and unknown names.
+    pub(crate) fn scope_declaration_line(&self, steps: &[String]) -> Option<usize> {
+        if self.module_at_scope(steps).is_some() {
+            return None;
+        }
+        for k in (1..steps.len()).rev() {
+            if let Some(def) = self.module_at_scope(&steps[..k]) {
+                if let Some(decl) = module_declaration(def, &steps[k]) {
+                    return Some(decl.line);
+                }
+            }
+        }
+        None
+    }
+
+    /// Line ranges (start inclusive, end exclusive) of generate branches that
+    /// are known not to be instantiated, e.g. `generate if (0) ...`; the
+    /// Source pane dims them.
+    pub fn inactive_lines(&self, module: &str) -> Vec<std::ops::Range<usize>> {
+        let Some(def) = self.modules.get(module) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        collect_inactive(&def.body, &self.default_env(def), &mut out);
+        out.sort_by_key(|range| range.start);
+        out.dedup();
+        out
+    }
+
     /// Like [`module_at_scope`](Self::module_at_scope) but also reports the
     /// parameter/genvar bindings along the path and the dump scope of the
     /// instance that owns the module's signals (trailing generate-block
@@ -654,6 +742,10 @@ impl RtlDb {
         if steps.is_empty() {
             return None;
         }
+        // One budget per lookup: callers like `merge_existing_scopes` run a
+        // lookup per hierarchy node, so the budget must restart here instead
+        // of accumulating across nodes.
+        let mut search = GenSearch::new();
         for top in self.top_modules() {
             let Some(def) = self.modules.get(&top) else {
                 continue;
@@ -663,15 +755,30 @@ impl RtlDb {
             };
             let env = self.default_env(def);
             let base = vec![top.clone()];
-            if let Some(found) =
-                self.walk_scope(def, &env, &def.body, &base, &base, &steps[start + 1..])
-            {
+            if let Some(found) = self.walk_scope(
+                def,
+                &env,
+                &def.body,
+                &base,
+                &base,
+                &steps[start + 1..],
+                &mut search,
+            ) {
                 return Some(found);
             }
         }
         None
     }
 
+    /// Walk a dump scope path through a module body (instances, generate
+    /// loops, named and unnamed blocks) and return the module that owns it.
+    ///
+    /// The search is budgeted like `walk_chain`: a `for` block whose dump
+    /// name carries no index recurses into every value and every nesting
+    /// level, so a path whose tail does not match would otherwise explore
+    /// `4096^depth` combinations - once for every hierarchy node, because
+    /// `merge_existing_scopes` calls this for each node. When the budget runs
+    /// out the path is reported as unresolved.
     #[allow(clippy::too_many_arguments)]
     fn walk_scope<'a>(
         &'a self,
@@ -681,7 +788,11 @@ impl RtlDb {
         path: &[String],
         instance_scope: &[String],
         steps: &[String],
+        search: &mut GenSearch,
     ) -> Option<ScopeMatch<'a>> {
+        if !search.tick() {
+            return None;
+        }
         if steps.is_empty() {
             return Some(ScopeMatch {
                 module: def,
@@ -706,21 +817,20 @@ impl RtlDb {
                     let mut path = path.to_vec();
                     path.push(instance.name.clone());
                     if let Some(found) =
-                        self.walk_scope(child, &env, &child.body, &path, &path, rest)
+                        self.walk_scope(child, &env, &child.body, &path, &path, rest, search)
                     {
                         return Some(found);
                     }
                 }
                 Body::For(gen) => {
-                    let number = if gen.label.is_none() {
-                        Some(unnamed_ordinal(&mut unnamed))
-                    } else {
-                        None
-                    };
+                    let number = unnamed_number(gen.label.as_deref(), &mut unnamed);
                     let Some(index) = block_step_matches(step, gen.label.as_deref(), number) else {
                         continue;
                     };
                     for value in gen_values(gen, env) {
+                        if !search.tick() {
+                            return None;
+                        }
                         if index.is_some_and(|wanted| wanted != value) {
                             continue;
                         }
@@ -728,9 +838,15 @@ impl RtlDb {
                         env.insert(gen.var.clone(), value);
                         let mut path = path.to_vec();
                         path.push(block_dump_name(gen.label.as_deref(), number, Some(value)));
-                        if let Some(mut found) =
-                            self.walk_scope(def, &env, &gen.items, &path, instance_scope, rest)
-                        {
+                        if let Some(mut found) = self.walk_scope(
+                            def,
+                            &env,
+                            &gen.items,
+                            &path,
+                            instance_scope,
+                            rest,
+                            search,
+                        ) {
                             found.line = found.line.or(Some(gen.line));
                             return Some(found);
                         }
@@ -738,11 +854,7 @@ impl RtlDb {
                 }
                 Body::If(gen_if) => {
                     for block in taken_branches(gen_if, env) {
-                        let number = if block.label.is_none() {
-                            Some(unnamed_ordinal(&mut unnamed))
-                        } else {
-                            None
-                        };
+                        let number = unnamed_number(block.label.as_deref(), &mut unnamed);
                         let Some(index) = block_step_matches(step, block.label.as_deref(), number)
                         else {
                             continue;
@@ -752,20 +864,22 @@ impl RtlDb {
                         }
                         let mut path = path.to_vec();
                         path.push(block_dump_name(block.label.as_deref(), number, None));
-                        if let Some(mut found) =
-                            self.walk_scope(def, env, &block.items, &path, instance_scope, rest)
-                        {
+                        if let Some(mut found) = self.walk_scope(
+                            def,
+                            env,
+                            &block.items,
+                            &path,
+                            instance_scope,
+                            rest,
+                            search,
+                        ) {
                             found.line = found.line.or(Some(block.line));
                             return Some(found);
                         }
                     }
                 }
                 Body::Block(block) => {
-                    let number = if block.label.is_none() {
-                        Some(unnamed_ordinal(&mut unnamed))
-                    } else {
-                        None
-                    };
+                    let number = unnamed_number(block.label.as_deref(), &mut unnamed);
                     let Some(index) = block_step_matches(step, block.label.as_deref(), number)
                     else {
                         continue;
@@ -776,7 +890,7 @@ impl RtlDb {
                     let mut path = path.to_vec();
                     path.push(block_dump_name(block.label.as_deref(), number, None));
                     if let Some(mut found) =
-                        self.walk_scope(def, env, &block.items, &path, instance_scope, rest)
+                        self.walk_scope(def, env, &block.items, &path, instance_scope, rest, search)
                     {
                         found.line = found.line.or(Some(block.line));
                         return Some(found);
@@ -789,7 +903,7 @@ impl RtlDb {
         if generated_scope_name(step) {
             let mut path = path.to_vec();
             path.push(step.clone());
-            return self.walk_scope(def, env, items, &path, instance_scope, rest);
+            return self.walk_scope(def, env, items, &path, instance_scope, rest, search);
         }
         None
     }
@@ -886,11 +1000,7 @@ impl RtlDb {
                     return Some((path, target));
                 }
                 Body::For(gen) => {
-                    let number = if gen.label.is_none() {
-                        Some(unnamed_ordinal(&mut unnamed))
-                    } else {
-                        None
-                    };
+                    let number = unnamed_number(gen.label.as_deref(), &mut unnamed);
                     let Some(index) = block_step_matches(step, gen.label.as_deref(), number) else {
                         continue;
                     };
@@ -912,11 +1022,7 @@ impl RtlDb {
                 }
                 Body::If(gen_if) => {
                     for block in taken_branches(gen_if, env) {
-                        let number = if block.label.is_none() {
-                            Some(unnamed_ordinal(&mut unnamed))
-                        } else {
-                            None
-                        };
+                        let number = unnamed_number(block.label.as_deref(), &mut unnamed);
                         let Some(index) = block_step_matches(step, block.label.as_deref(), number)
                         else {
                             continue;
@@ -935,11 +1041,7 @@ impl RtlDb {
                     }
                 }
                 Body::Block(block) => {
-                    let number = if block.label.is_none() {
-                        Some(unnamed_ordinal(&mut unnamed))
-                    } else {
-                        None
-                    };
+                    let number = unnamed_number(block.label.as_deref(), &mut unnamed);
                     let Some(index) = block_step_matches(step, block.label.as_deref(), number)
                     else {
                         continue;
@@ -969,11 +1071,7 @@ impl RtlDb {
         for item in items {
             match item {
                 Body::For(gen) => {
-                    let number = if gen.label.is_none() {
-                        Some(unnamed_ordinal(&mut unnamed))
-                    } else {
-                        None
-                    };
+                    let number = unnamed_number(gen.label.as_deref(), &mut unnamed);
                     // A genvar bound by the selected scope pins the iteration.
                     let bound = env.get(&gen.var).copied();
                     for value in gen_values(gen, env) {
@@ -997,11 +1095,7 @@ impl RtlDb {
                 }
                 Body::If(gen_if) => {
                     for block in taken_branches(gen_if, env) {
-                        let number = if block.label.is_none() {
-                            Some(unnamed_ordinal(&mut unnamed))
-                        } else {
-                            None
-                        };
+                        let number = unnamed_number(block.label.as_deref(), &mut unnamed);
                         if !search.tick() {
                             return None;
                         }
@@ -1016,11 +1110,7 @@ impl RtlDb {
                     }
                 }
                 Body::Block(block) => {
-                    let number = if block.label.is_none() {
-                        Some(unnamed_ordinal(&mut unnamed))
-                    } else {
-                        None
-                    };
+                    let number = unnamed_number(block.label.as_deref(), &mut unnamed);
                     if !search.tick() {
                         return None;
                     }
@@ -1082,11 +1172,7 @@ impl RtlDb {
                     path.pop();
                 }
                 Body::For(gen) => {
-                    let number = if gen.label.is_none() {
-                        Some(unnamed_ordinal(&mut unnamed))
-                    } else {
-                        None
-                    };
+                    let number = unnamed_number(gen.label.as_deref(), &mut unnamed);
                     for value in gen_values(gen, env) {
                         let mut env = env.clone();
                         env.insert(gen.var.clone(), value);
@@ -1097,22 +1183,14 @@ impl RtlDb {
                 }
                 Body::If(gen_if) => {
                     for block in taken_branches(gen_if, env) {
-                        let number = if block.label.is_none() {
-                            Some(unnamed_ordinal(&mut unnamed))
-                        } else {
-                            None
-                        };
+                        let number = unnamed_number(block.label.as_deref(), &mut unnamed);
                         path.push(block_dump_name(block.label.as_deref(), number, None));
                         self.walk_body_placements(env, &block.items, path, out, stack);
                         path.pop();
                     }
                 }
                 Body::Block(block) => {
-                    let number = if block.label.is_none() {
-                        Some(unnamed_ordinal(&mut unnamed))
-                    } else {
-                        None
-                    };
+                    let number = unnamed_number(block.label.as_deref(), &mut unnamed);
                     path.push(block_dump_name(block.label.as_deref(), number, None));
                     self.walk_body_placements(env, &block.items, path, out, stack);
                     path.pop();
@@ -1768,13 +1846,21 @@ fn parse_gen_block(parser: &mut Parser, module: &mut ModuleDef) -> GenBlock {
         };
         let items = parse_body(parser, module);
         parser.eat_ident("end");
-        GenBlock { label, items, line }
+        let end = parser.line();
+        GenBlock {
+            label,
+            items,
+            line,
+            end,
+        }
     } else {
         let items = parse_body_item(parser, module).into_iter().collect();
+        let end = parser.line();
         GenBlock {
             label: None,
             items,
             line,
+            end,
         }
     }
 }
@@ -2062,7 +2148,7 @@ pub(crate) fn eval(expr: &Expr, env: &ParamEnv) -> Option<i64> {
                     BinOp::Gt => i64::from(x > y),
                     BinOp::Ge => i64::from(x >= y),
                     BinOp::LAnd | BinOp::LOr | BinOp::And | BinOp::Or | BinOp::Xor => {
-                        unreachable!()
+                        return None;
                     }
                 }
             }
@@ -2277,10 +2363,12 @@ fn width_range(width: u32) -> String {
 /// Width of a packed range like `7:0` or `WIDTH-1:0`.
 fn range_width(range: &str, module: &ModuleDef) -> Option<u32> {
     let (hi, lo) = range.split_once(':')?;
-    if lo.contains('+') || lo.contains('-') && range.contains("+:") {
-        return None;
-    }
     let env = module_env(module);
+    // `base +: W` / `base -: W`: the part after the colon is the width, while
+    // the part before it is an offset rather than a bound.
+    if range.contains("+:") || range.contains("-:") {
+        return eval(&parse_expr_text(lo.trim())?, &env).map(|width| width.unsigned_abs() as u32);
+    }
     let hi = eval(&parse_expr_text(hi.trim())?, &env)?;
     let lo = eval(&parse_expr_text(lo.trim())?, &env)?;
     Some((hi - lo).unsigned_abs() as u32 + 1)
@@ -2452,7 +2540,7 @@ fn parse_anonymous_type(parser: &mut Parser, module: &ModuleDef) -> Option<u32> 
     Some(if is_union { widest } else { total })
 }
 
-/// `typedef ... name;` �?stores the type with its packed width when known.
+/// `typedef ... name;` — stores the type with its packed width when known.
 fn parse_typedef(parser: &mut Parser, module: &mut ModuleDef) {
     parser.eat_ident("typedef");
     loop {
@@ -2484,7 +2572,7 @@ fn parse_typedef(parser: &mut Parser, module: &mut ModuleDef) {
     parser.eat_punct(';');
 }
 
-/// `import pkg::*;` / `import pkg::name;` �?records the package names.
+/// `import pkg::*;` / `import pkg::name;` — records the package names.
 fn parse_import(parser: &mut Parser, module: &mut ModuleDef) {
     parser.next(); // import / export
     loop {
@@ -3133,6 +3221,163 @@ endmodule
             .ports
             .iter()
             .any(|(name, line)| name == "carry" && *line == 10));
+    }
+
+    #[test]
+    fn part_select_ranges_report_the_width_after_the_colon() {
+        let module = parse_module_text("module m; endmodule\n", Path::new("m.sv"))
+            .into_iter()
+            .next()
+            .expect("module");
+        assert_eq!(range_width("4+:3", &module), Some(3));
+        assert_eq!(range_width("4-:3", &module), Some(3));
+        // Plain ranges keep their inclusive width.
+        assert_eq!(range_width("7:0", &module), Some(8));
+    }
+
+    #[test]
+    fn walk_scope_budget_bounds_nested_indexless_loops() {
+        // Both loops are described by dump steps without an index, so the
+        // search recurses into every value of every level: the missing tail
+        // step would explore `4096 * 4096` paths without a budget.
+        let text = r#"
+module top;
+    generate
+        for (genvar i = 0; i < 4096; i++) begin : a
+            for (genvar j = 0; j < 4096; j++) begin : b
+                leaf u_leaf();
+            end
+        end
+    endgenerate
+endmodule
+
+module leaf;
+    logic y;
+endmodule
+"#;
+        let dir = std::env::temp_dir().join(format!("waverdi_walk_budget_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("gen.sv");
+        fs::write(&file, text).unwrap();
+        let set = SourceSet::from_files(vec![file], "test");
+        let db = RtlDb::parse_sources(&set);
+        let steps = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        // The unresolvable tail must terminate through the budget, not spin
+        // through the loop product.
+        let start = std::time::Instant::now();
+        assert!(db
+            .module_at_scope(&steps(&["top", "a", "b", "missing"]))
+            .is_none());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "bounded search must return quickly"
+        );
+        // A matching path inside the same loops still resolves.
+        assert_eq!(
+            db.module_at_scope(&steps(&["top", "a", "b", "u_leaf"]))
+                .unwrap()
+                .name,
+            "leaf"
+        );
+    }
+
+    #[test]
+    fn walk_scope_budget_keeps_shallow_matches() {
+        let text = r#"
+module top;
+    generate
+        for (genvar i = 0; i < 512; i++) begin : a
+            leaf u_leaf();
+        end
+    endgenerate
+endmodule
+
+module leaf;
+    logic y;
+endmodule
+"#;
+        let dir = std::env::temp_dir().join(format!("waverdi_walk_shallow_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("gen.sv");
+        fs::write(&file, text).unwrap();
+        let set = SourceSet::from_files(vec![file], "test");
+        let db = RtlDb::parse_sources(&set);
+        let steps = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        let found = db
+            .scope_info(&steps(&["top", "a", "u_leaf"]))
+            .expect("loop instance inside an index-less generate block");
+        assert_eq!(found.module.name, "leaf");
+        assert_eq!(found.instance_scope, steps(&["top", "a[0]", "u_leaf"]));
+    }
+
+    #[test]
+    fn inactive_generate_branches_report_their_lines() {
+        let text = "\
+module top;
+    generate
+        if (0) begin : off
+            assign a = b;
+        end else begin : on
+            assign c = d;
+        end
+    endgenerate
+endmodule
+
+module pick;
+    generate
+        if (1) begin : on
+            assign e = f;
+        end else begin : off
+            assign g = h;
+        end
+    endgenerate
+endmodule
+
+module unknown;
+    generate
+        if (MAYBE) begin : a
+            assign i = j;
+        end else begin : b
+            assign k = l;
+        end
+    endgenerate
+endmodule
+
+module alone;
+    generate
+        if (0) begin : dead
+            assign m = n;
+        end
+    endgenerate
+endmodule
+";
+        let dir = std::env::temp_dir().join(format!("waverdi_inactive_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("gen.sv");
+        fs::write(&file, text).unwrap();
+        let set = SourceSet::from_files(vec![file], "test");
+        let db = RtlDb::parse_sources(&set);
+        // `if (0)`: the first branch is dead, the `else` is instantiated.
+        assert_eq!(db.inactive_lines("top"), vec![3..5]);
+        // `if (1)`: the `else` branch is dead.
+        assert_eq!(db.inactive_lines("pick"), vec![15..18]);
+        // An unknown condition cannot rule either branch out.
+        assert!(db.inactive_lines("unknown").is_empty());
+        // A dead branch without an `else` is the whole construct.
+        assert_eq!(db.inactive_lines("alone"), vec![33..36]);
     }
 
     #[test]
@@ -3886,5 +4131,90 @@ endmodule
                 "missing g[{index}].u_sub in {paths:?}"
             );
         }
+    }
+
+    /// Malformed inputs must terminate and keep whatever parsed before the
+    /// damage; the assertions pin the current partial-result behavior.
+    #[test]
+    fn malformed_modules_terminate_with_partial_results() {
+        let path = Path::new("broken.sv");
+        // Empty input and `endmodule` without a module: nothing to report.
+        assert!(parse_module_text("", path).is_empty());
+        assert!(parse_module_text("endmodule\n", path).is_empty());
+        // A module truncated at EOF keeps its name and declarations.
+        let mods = parse_module_text("module top;\n  logic a;\n", path);
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].name, "top");
+        assert!(mods[0].signal("a").is_some());
+        // `begin` without a matching `end` still yields the always block.
+        let mods = parse_module_text("module top;\n  always @(*) begin\n    a = b;\n", path);
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].name, "top");
+        assert_eq!(mods[0].always.len(), 1);
+        // An unbalanced `(` does not lose the assignment.
+        let mods = parse_module_text("module top;\n  assign y = (a + (b;\nendmodule\n", path);
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].assigns.len(), 1);
+        assert_eq!(mods[0].assigns[0].lhs, "y");
+    }
+
+    #[test]
+    fn lexical_hazards_do_not_panic() {
+        let path = Path::new("hazard.sv");
+        // Garbage before a valid module is skipped by the lexer.
+        let mods = parse_module_text("%%%\u{0}\u{ff}\u{1} module m(); endmodule\n", path);
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].name, "m");
+        // An unclosed block comment swallows the rest of the file, but not
+        // the module header seen before it.
+        let mods = parse_module_text("module top;\n  /* never closed\n  logic a;\n", path);
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].name, "top");
+        assert!(mods[0].signals.is_empty());
+        // An unclosed string runs to EOF; the module still parses.
+        let mods = parse_module_text("module top;\n  initial $display(\"abc\n", path);
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].name, "top");
+    }
+
+    #[test]
+    fn lexer_literals_and_escaped_identifiers() {
+        assert_eq!(parse_int("8'hFF"), 255);
+        assert_eq!(parse_int("'d125"), 125);
+        // `'x` is an unsized all-x literal; without a width to expand it to,
+        // the scanner falls back to 0.
+        assert_eq!(parse_int("'x"), 0);
+        // One `z` digit makes the whole literal unparsable, so it falls back
+        // to 0 as well.
+        assert_eq!(parse_int("10'b1z0"), 0);
+        // An escaped identifier is one token; the leading backslash stays in
+        // the name (the parser strips it where it matters).
+        let tokens = lex("\\bus+clk ");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].tok, Tok::Ident("\\bus+clk".to_string()));
+    }
+
+    #[test]
+    fn eval_edge_cases() {
+        let env = ParamEnv::new();
+        let eval_text = |text: &str| parse_expr_text(text).and_then(|expr| eval(&expr, &env));
+
+        // Division and modulo by zero are guarded to 0 instead of failing or
+        // panicking.
+        assert_eq!(eval_text("1/0"), Some(0));
+        assert_eq!(eval_text("1%0"), Some(0));
+        // Checked arithmetic: overflow refuses to wrap.
+        assert_eq!(eval_text("9223372036854775807 + 1"), None);
+        assert_eq!(eval_text("3037000500 * 3037000500"), None);
+        // Ternary, shifts (an out-of-range shift is rejected), unary minus.
+        assert_eq!(eval_text("5 ? 7 : 9"), Some(7));
+        assert_eq!(eval_text("0 ? 7 : 9"), Some(9));
+        assert_eq!(eval_text("1 << 3"), Some(8));
+        assert_eq!(eval_text("8 >> 1"), Some(4));
+        assert_eq!(eval_text("1 << 64"), None);
+        assert_eq!(eval_text("-5"), Some(-5));
+        // Unknown names evaluate to None.
+        assert_eq!(eval_text("unknown_name"), None);
+        assert_eq!(eval_text("unknown_name + 1"), None);
     }
 }

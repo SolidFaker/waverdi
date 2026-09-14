@@ -4,6 +4,7 @@ pub mod dialog;
 pub mod layout;
 pub mod list;
 pub mod menubar;
+pub mod scrollbar;
 pub mod source;
 pub mod status;
 pub mod text;
@@ -1073,7 +1074,7 @@ mod tests {
         terminal.draw(|f| super::render(f, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
         let l = app.layout();
-        let root = super::context::root_rect(&l, &app);
+        let root = super::context::root_rect(&l, &app).expect("context menu open");
         // The selected (first) entry fills the inner width.
         let y = root.y + 1;
         let left = buffer.cell((root.x + 1, y)).unwrap();
@@ -1188,6 +1189,64 @@ mod tests {
         assert!(bar.contains('█'), "{bar}");
         // The last column of code is kept free for the bar.
         assert_eq!(col, code.right() - 1);
+    }
+
+    #[test]
+    fn inactive_generate_branches_render_dimmed() {
+        use crate::rtl::{RtlDb, SourceSet};
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        let dir = std::env::temp_dir().join(format!("waverdi_inactive_ui_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = r#"module gen_top(input logic clk);
+    generate
+        if (0) begin : off
+            assign dead = clk;
+        end else begin : on
+            assign live = clk;
+        end
+    endgenerate
+endmodule
+"#;
+        let path = dir.join("gen_top.sv");
+        std::fs::write(&path, text).unwrap();
+        app.sources = Some(SourceSet::from_files(vec![path], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "gen_top".to_string();
+        app.tree_sel = 1;
+        app.sync_source();
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        let code = super::source::code_rect(&l);
+        let view = app.source_view.as_ref().unwrap();
+        let dead = view
+            .lines
+            .iter()
+            .position(|line| line.contains("assign dead"))
+            .unwrap();
+        let live = view
+            .lines
+            .iter()
+            .position(|line| line.contains("assign live"))
+            .unwrap();
+        let line_fg = |line: usize| {
+            let y = code.y + (line - view.scroll) as u16;
+            let x = code.x + super::source::gutter_width(view);
+            buffer.cell((x, y)).unwrap().fg
+        };
+        assert_eq!(line_fg(dead), crate::theme::Theme::DARK.dim);
+        assert_ne!(line_fg(live), crate::theme::Theme::DARK.dim);
     }
 
     #[test]

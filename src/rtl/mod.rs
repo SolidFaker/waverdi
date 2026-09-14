@@ -1,4 +1,4 @@
-﻿//! RTL source management: filelists and FSDB side-channel discovery.
+//! RTL source management: filelists and FSDB side-channel discovery.
 //!
 //! Verdi shows RTL sources from its KDB (`simv.daidir`), which stores a plain
 //! text list of the compiled sources at `debug_dump/src_files_verilog`. When

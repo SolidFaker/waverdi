@@ -36,6 +36,9 @@ pub struct SourceView {
     /// Module that owns each line; the active module outside module regions.
     pub line_modules: Vec<String>,
     pub spans: Vec<Vec<Span>>,
+    /// Lines that belong to generate branches which are not instantiated
+    /// (`generate if (0) ...`); the Source pane dims them.
+    pub inactive: Vec<bool>,
     pub scroll: usize,
     pub line: usize,
     pub col: usize,
@@ -102,12 +105,21 @@ impl SourceView {
             ));
         }
         let line = def.start.saturating_sub(1).min(lines.len() - 1);
+        let mut inactive = vec![false; lines.len()];
+        for range in db.inactive_lines(&def.name) {
+            for number in range {
+                if let Some(flag) = inactive.get_mut(number.saturating_sub(1)) {
+                    *flag = true;
+                }
+            }
+        }
         Some(SourceView {
             module: def.name.clone(),
             file: def.file.clone(),
             lines,
             line_modules,
             spans,
+            inactive,
             scroll: line,
             line,
             col: 0,

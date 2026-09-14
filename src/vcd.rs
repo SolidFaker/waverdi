@@ -130,7 +130,11 @@ fn parse_group(d: &[u8], grp: usize) -> Vec<u8> {
     bits
 }
 
-fn parse_dec(d: &[u8]) -> Vec<u8> {
+/// Parse a decimal value. `None` reports a malformed value (a sign or any
+/// character other than the decimal digits and `x`/`z`), which the caller
+/// warns about; an empty vector means all-`x` digits, padded once the signal
+/// width is known.
+fn parse_dec(d: &[u8]) -> Option<Vec<u8>> {
     let mut v: u128 = 0;
     let mut ok = true;
     for &c in d {
@@ -148,18 +152,18 @@ fn parse_dec(d: &[u8]) -> Vec<u8> {
                 ok = false;
                 break;
             }
-            _ => {}
+            _ => return None,
         }
     }
     if !ok {
-        return Vec::new(); // padded to all-x later
+        return Some(Vec::new()); // padded to all-x later
     }
     let mut bits = Vec::new();
     while v > 0 {
         bits.push((v & 1) as u8);
         v >>= 1;
     }
-    bits
+    Some(bits)
 }
 
 struct Parser {
@@ -189,6 +193,14 @@ impl Parser {
         }
     }
 
+    /// Record a warning with the 1-based source line, so malformed input can
+    /// be located in multi-gigabyte dumps.
+    fn warn(&mut self, line: usize, message: impl Into<String>) {
+        let message = message.into();
+        self.warnings
+            .push(format!("line {}: {}", line + 1, message));
+    }
+
     fn directive(
         &mut self,
         kw: &[u8],
@@ -201,9 +213,7 @@ impl Parser {
             b"timescale" => {
                 match parse_timescale(&split_ws(rest)) {
                     Some(ts) => self.wf.ts = ts,
-                    None => self
-                        .warnings
-                        .push(format!("bad $timescale: {:?}", str(rest))),
+                    None => self.warn(i, format!("bad $timescale: {:?}", str(rest))),
                 }
                 Ok((skip_to_end(lines, i)).min(lines.len()).saturating_add(1))
             }
@@ -224,8 +234,7 @@ impl Parser {
             b"var" => {
                 let toks = split_ws(rest);
                 if toks.len() < 4 {
-                    self.warnings
-                        .push(format!("bad $var line: {:?}", str(rest)));
+                    self.warn(i, format!("bad $var line: {:?}", str(rest)));
                     return Ok((skip_to_end(lines, i)).min(lines.len()).saturating_add(1));
                 }
                 let var_type = str(toks[0]).to_string();
@@ -242,8 +251,7 @@ impl Parser {
                 let parent = *self.stack.last().unwrap_or(&self.wf.tree.root);
                 let idx = self.wf.signals.len();
                 if self.idmap.contains_key(&id) {
-                    self.warnings
-                        .push(format!("duplicate id code '{id}' ignored"));
+                    self.warn(i, format!("duplicate id code '{id}' ignored"));
                 } else {
                     let sig = Signal {
                         name,
@@ -271,7 +279,7 @@ impl Parser {
                 while k < lines.len() && !contains_end(lines[k]) {
                     let ln = lines[k];
                     if !ln.is_empty() && ln[0] != b'$' {
-                        self.change(ln);
+                        self.change(ln, k);
                     }
                     k += 1;
                 }
@@ -281,10 +289,10 @@ impl Parser {
         }
     }
 
-    fn push_change(&mut self, id: &str, v: Value) {
+    fn push_change(&mut self, id: &str, v: Value, line: usize) {
         let Some(&idx) = self.idmap.get(id) else {
             if !id.is_empty() {
-                self.warnings.push(format!("unknown id code '{id}'"));
+                self.warn(line, format!("unknown id code '{id}'"));
             }
             return;
         };
@@ -316,7 +324,7 @@ impl Parser {
         });
     }
 
-    fn change(&mut self, ln: &[u8]) {
+    fn change(&mut self, ln: &[u8], line: usize) {
         if ln.is_empty() {
             return;
         }
@@ -330,36 +338,37 @@ impl Parser {
                     _ => 3u8,
                 };
                 let id = str(ln[1..].trim_ascii()).to_string();
-                self.push_change(&id, Value::Bits(vec![v]));
+                self.push_change(&id, Value::Bits(vec![v]), line);
             }
             b'b' | b'B' => {
                 let (digits, id) = split_value_id(&ln[1..]);
                 let id = str(id).to_string();
-                self.push_change(&id, Value::Bits(parse_bin(digits)));
+                self.push_change(&id, Value::Bits(parse_bin(digits)), line);
             }
             b'o' | b'O' => {
                 let (digits, id) = split_value_id(&ln[1..]);
                 let id = str(id).to_string();
-                self.push_change(&id, Value::Bits(parse_group(digits, 3)));
+                self.push_change(&id, Value::Bits(parse_group(digits, 3)), line);
             }
             b'h' | b'H' | b't' | b'T' => {
                 let (digits, id) = split_value_id(&ln[1..]);
                 let id = str(id).to_string();
-                self.push_change(&id, Value::Bits(parse_group(digits, 4)));
+                self.push_change(&id, Value::Bits(parse_group(digits, 4)), line);
             }
             b'd' | b'D' => {
                 let (digits, id) = split_value_id(&ln[1..]);
                 let id = str(id).to_string();
-                self.push_change(&id, Value::Bits(parse_dec(digits)));
+                match parse_dec(digits) {
+                    Some(bits) => self.push_change(&id, Value::Bits(bits), line),
+                    None => self.warn(line, format!("bad decimal value: {:?}", str(digits))),
+                }
             }
             b'r' | b'R' => {
                 let (num, id) = split_real(&ln[1..]);
                 let id = str(id).to_string();
                 match str(num).parse::<f64>() {
-                    Ok(v) => self.push_change(&id, Value::Real(v)),
-                    Err(_) => self
-                        .warnings
-                        .push(format!("bad real value: {:?}", str(num))),
+                    Ok(v) => self.push_change(&id, Value::Real(v), line),
+                    Err(_) => self.warn(line, format!("bad real value: {:?}", str(num))),
                 }
             }
             b's' | b'S' => {
@@ -386,15 +395,16 @@ impl Parser {
                 };
                 let s = String::from_utf8_lossy(&rest[q0 + 1..q1]).into_owned();
                 let id = str(rest[q1 + 1..].trim_ascii()).to_string();
-                self.push_change(&id, Value::Str(s));
+                self.push_change(&id, Value::Str(s), line);
             }
             b'c' | b'C' => {
-                self.warnings
-                    .push("char-based value codes (c/C) not supported".to_string());
+                self.warn(
+                    line,
+                    "char-based value codes (c/C) not supported".to_string(),
+                );
             }
             _ => {
-                self.warnings
-                    .push(format!("unparsed value line: {:?}", str(ln)));
+                self.warn(line, format!("unparsed value line: {:?}", str(ln)));
             }
         }
     }
@@ -414,16 +424,24 @@ pub fn parse_bytes(data: &[u8]) -> Result<ParseOut, String> {
             continue;
         }
         match ln[0] {
-            b'#' => {
-                p.cur_time = parse_u64(&ln[1..]).map_err(|e| format!("bad time marker: {e}"))?;
-                i += 1;
-            }
+            b'#' => match parse_u64(&ln[1..]) {
+                Ok(time) => {
+                    p.cur_time = time;
+                    i += 1;
+                }
+                Err(e) => {
+                    // A viewer is better served by the part that parsed: keep
+                    // the changes seen so far and stop reading value lines.
+                    p.warn(i, format!("bad time marker: {e}"));
+                    break;
+                }
+            },
             b'$' => {
                 let (kw, rest) = split_word(&ln[1..]);
                 i = p.directive(kw, rest, &lines, i)?;
             }
             _ => {
-                p.change(ln);
+                p.change(ln, i);
                 i += 1;
             }
         }
@@ -594,6 +612,28 @@ $end
     }
 
     #[test]
+    fn negative_decimals_are_warned_and_skipped() {
+        let vcd = r#"
+$timescale 1ns $end
+$var reg 8 " d $end
+$enddefinitions $end
+#0
+d3 "
+#5
+d-5 "
+$end
+"#;
+        let (w, warns) = wf(vcd);
+        assert!(
+            warns.iter().any(|w| w.contains("bad decimal value")),
+            "{warns:?}"
+        );
+        // The malformed value is dropped instead of silently becoming 5.
+        let ts: Vec<u64> = w.signals[0].changes.iter().map(|c| c.t).collect();
+        assert_eq!(ts, vec![0]);
+    }
+
+    #[test]
     fn padding_and_truncation() {
         let vcd = r#"
 $timescale 1ns $end
@@ -664,5 +704,91 @@ $end
         let vcd = "$timescale 1ns $end\n$var wire 1 ! a $end\n$enddefinitions $end\n#0\n1?\n";
         let (_, warns) = wf(vcd);
         assert!(!warns.is_empty());
+    }
+
+    #[test]
+    fn empty_input_is_ok_without_signals_or_warnings() {
+        let out = parse_bytes(b"").expect("empty input parses");
+        assert!(out.wf.signals.is_empty());
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+        assert_eq!(out.wf.start, 0);
+        assert_eq!(out.wf.end, 0);
+    }
+
+    #[test]
+    fn bad_time_marker_keeps_the_parsed_prefix() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 ! a $end\n\
+            $enddefinitions $end\n\
+            #0\n1!\n#10\n0!\n#abc\n#20\n1!\n";
+        let (w, warns) = wf(vcd);
+        let line = vcd.lines().position(|l| l == "#abc").unwrap() + 1;
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("bad time marker") && w.contains(&format!("line {line}:"))),
+            "{warns:?}"
+        );
+        // Everything before the malformed marker is kept; the lines after it
+        // are not read at all.
+        let ts: Vec<u64> = w.signals[0].changes.iter().map(|c| c.t).collect();
+        assert_eq!(ts, vec![0, 10]);
+        // The time range follows the kept prefix, not the dropped marker.
+        assert_eq!(w.start, 0);
+        assert_eq!(w.end, 10);
+    }
+
+    #[test]
+    fn octal_values_parse_to_bits() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 3 ! v $end\n\
+            $var wire 5 \" w $end\n\
+            $enddefinitions $end\n\
+            #0\no7 !\no17 \"\n";
+        let (w, warns) = wf(vcd);
+        assert!(warns.is_empty(), "{warns:?}");
+        let value = |bits: &[u8]| {
+            bits.iter()
+                .enumerate()
+                .fold(0u64, |acc, (k, &b)| acc | ((b as u64) << k))
+        };
+        let v = w.signals[0].value_at(0).unwrap().to_bits_vec().unwrap();
+        assert_eq!(value(&v), 7);
+        let wide = w.signals[1].value_at(0).unwrap().to_bits_vec().unwrap();
+        assert_eq!(value(&wide), 0b1111);
+    }
+
+    #[test]
+    fn duplicate_id_code_warns_with_a_line_and_drops_the_signal() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 ! a $end\n\
+            $var wire 1 ! b $end\n\
+            $enddefinitions $end\n";
+        let (w, warns) = wf(vcd);
+        assert_eq!(w.signals.len(), 1);
+        assert_eq!(w.signals[0].name, "a");
+        let line = vcd.lines().position(|l| l.contains("b $end")).unwrap() + 1;
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("duplicate id code") && w.contains(&format!("line {line}:"))),
+            "{warns:?}"
+        );
+    }
+
+    #[test]
+    fn short_var_line_warns_with_a_line() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 $end\n\
+            $enddefinitions $end\n";
+        let (w, warns) = wf(vcd);
+        assert!(w.signals.is_empty());
+        let line = vcd.lines().position(|l| l.contains("$var")).unwrap() + 1;
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("bad $var line") && w.contains(&format!("line {line}:"))),
+            "{warns:?}"
+        );
     }
 }

@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::rtl::view::HlKind;
 use crate::ui::layout::Layout;
+use crate::ui::scrollbar;
 use crate::ui::text;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -151,10 +152,12 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
         let mut x = text_x;
         let mut col = 0usize;
         let active = view.module_at_line(index) == view.module;
+        let inactive = view.inactive.get(index).copied().unwrap_or(false);
         let highlights = app.highlighted_source_names();
         'line: for span in spans {
-            // Code of other modules in the same file is shown dimmed.
-            let fg = if !active {
+            // Code of other modules in the same file, and code in generate
+            // branches that are not instantiated, is shown dimmed.
+            let fg = if !active || inactive {
                 t.dim
             } else {
                 match span.kind {
@@ -209,7 +212,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
     }
     // Bottom row: horizontal scrollbar of the code text.
     let bar_y = code.bottom().saturating_sub(1);
-    text::h_scrollbar(
+    scrollbar::h_scrollbar(
         buf,
         code.x + gutter,
         code.right().saturating_sub(u16::from(scrollbar.is_some())),
@@ -232,18 +235,23 @@ fn draw_scrollbar(
 ) {
     let code = code_rect(l);
     let height = code.height.saturating_sub(1) as usize;
-    if height == 0 {
+    let Some((start, len)) =
+        scrollbar::proportional_geometry(height, view.lines.len(), height, view.scroll)
+    else {
         return;
+    };
+    scrollbar::Bar {
+        orientation: scrollbar::Orientation::Vertical,
+        x: col,
+        y: code.y,
+        span: height,
+        start,
+        len,
+        thumb: "█",
+        track: "│",
+        thumb_fg: t.dim,
+        track_fg: t.dim,
+        bg: t.bg,
     }
-    let total = view.lines.len();
-    let thumb = ((height as f64 / total as f64) * height as f64).max(1.0) as usize;
-    let top = ((view.scroll as f64 / total as f64) * height as f64) as usize;
-    for row in 0..height {
-        let symbol = if row >= top && row < top + thumb {
-            "█"
-        } else {
-            "│"
-        };
-        text::set_cell(buf, col, code.y + row as u16, symbol, t.dim, t.bg);
-    }
+    .draw(buf);
 }

@@ -59,8 +59,13 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if pt_in(area, col, row) {
-                    let index = (row - area.y - 1) as usize;
-                    if index < crate::waveform::TimeBase::CYCLE.len() {
+                    // The box adds a border row above the entries; a click on
+                    // the border (or below the last entry) selects nothing.
+                    let index = row
+                        .checked_sub(area.y + 1)
+                        .map(|r| r as usize)
+                        .filter(|&index| index < crate::waveform::TimeBase::CYCLE.len());
+                    if let Some(index) = index {
                         app.set_time_base(crate::waveform::TimeBase::CYCLE[index]);
                     }
                 } else {
@@ -161,6 +166,8 @@ fn browser_wheel(app: &mut App, delta: i64) {
 
 /// Mouse events forwarded to a focused dialog: scrollbar drag and the wheel.
 fn add_signals_mouse(app: &mut App, m: MouseEvent) {
+    use crate::app::AddAction;
+
     match m.kind {
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
             let rows = if m.kind == MouseEventKind::ScrollUp {
@@ -169,7 +176,7 @@ fn add_signals_mouse(app: &mut App, m: MouseEvent) {
                 WHEEL_STEP as i64
             };
             if let Some(pane) = crate::ui::add::pane_at(app.last_area, m.column, m.row) {
-                app.add_scroll_rows(pane, rows);
+                app.add_action(AddAction::Scroll { pane, rows });
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
@@ -178,60 +185,32 @@ fn add_signals_mouse(app: &mut App, m: MouseEvent) {
             };
             match hit {
                 crate::ui::add::AddHit::Tree(node, arrow) => {
-                    let position = app.add_tree_rows().iter().position(|(id, _)| *id == node);
-                    if let Some(add) = app.add_signals.as_mut() {
-                        add.focus = crate::app::AddFocus::Tree;
-                        if let Some(position) = position {
-                            add.tree_sel = position;
-                        }
-                        if arrow && !add.expanded.remove(&node) {
-                            add.expanded.insert(node);
-                        }
-                    }
-                    if !arrow {
-                        app.add_navigate(node);
+                    if arrow {
+                        app.add_action(AddAction::ToggleNode(node));
+                    } else {
+                        app.add_action(AddAction::OpenScope(node));
                     }
                 }
                 crate::ui::add::AddHit::Instance(index) => {
-                    let node = app.add_instances().get(index).copied();
-                    if let Some(add) = app.add_signals.as_mut() {
-                        add.focus = crate::app::AddFocus::Instances;
-                        add.instance_sel = index;
-                    }
-                    if let Some(node) = node {
-                        app.add_navigate(node);
-                        if let Some(add) = app.add_signals.as_mut() {
-                            add.instance_sel = index;
-                        }
-                    }
+                    app.add_action(AddAction::OpenInstance(index));
                 }
                 crate::ui::add::AddHit::Signal(signal) => {
-                    let position = app
-                        .add_signal_list()
-                        .iter()
-                        .position(|&index| index == signal);
-                    if let Some(add) = app.add_signals.as_mut() {
-                        add.focus = crate::app::AddFocus::Signals;
-                        if let Some(position) = position {
-                            add.signal_sel = position;
-                        }
-                    }
-                    app.add_toggle_signal_at(signal);
+                    app.add_action(AddAction::ToggleSignal(signal));
                 }
                 crate::ui::add::AddHit::Scrollbar(pane) => {
                     app.dragging = Some(new_drag(DragMode::AddScroll(pane), m.column, 0.0));
-                    app.add_scroll_to_row(pane, m.row);
+                    app.add_action(AddAction::ScrollTo { pane, row: m.row });
                 }
-                crate::ui::add::AddHit::Filter => app.add_cycle_filter(),
-                crate::ui::add::AddHit::Apply => app.apply_add_signals(false),
-                crate::ui::add::AddHit::Ok => app.apply_add_signals(true),
-                crate::ui::add::AddHit::Cancel => app.close_add_signals(),
+                crate::ui::add::AddHit::Filter => app.add_action(AddAction::CycleFilter),
+                crate::ui::add::AddHit::Apply => app.add_action(AddAction::Apply { close: false }),
+                crate::ui::add::AddHit::Ok => app.add_action(AddAction::Apply { close: true }),
+                crate::ui::add::AddHit::Cancel => app.add_action(AddAction::Close),
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
             if let Some(drag) = app.dragging {
                 if let DragMode::AddScroll(pane) = drag.mode {
-                    app.add_scroll_to_row(pane, m.row);
+                    app.add_action(AddAction::ScrollTo { pane, row: m.row });
                 }
             }
         }
@@ -341,12 +320,6 @@ fn mouse_down(
     shift: bool,
     ctrl: bool,
 ) -> bool {
-    if let Some(dialog) = app.dialog {
-        if dialog == Dialog::Open {
-            browser_click(app, col, row);
-        }
-        return false;
-    }
     if let Some(menu) = app.menu.open {
         return menu_click(app, col, row, menu);
     }
@@ -1601,6 +1574,24 @@ mod tests {
         crate::app::handle_mouse(&mut app, click(area.x + 1, area.y + 2));
         assert_eq!(app.time_base, crate::waveform::TimeBase::Fs);
         assert!(app.time_menu.is_none());
+    }
+
+    #[test]
+    fn time_menu_border_clicks_are_ignored() {
+        let mut app = app_with(VCD);
+        let l = app.layout();
+        let button = crate::ui::toolbar::time_button(l.toolbar, &app);
+        crate::app::handle_mouse(&mut app, click(button.x + 1, button.y));
+        let area = crate::ui::toolbar::time_menu_rect(l.toolbar, &app);
+        app.time_menu = Some(1);
+        let before = app.time_base;
+        // The top border row must not underflow into an entry index.
+        crate::app::handle_mouse(&mut app, click(area.x + 1, area.y));
+        assert_eq!(app.time_menu, Some(1));
+        assert_eq!(app.time_base, before);
+        // The bottom border row is below the last entry.
+        crate::app::handle_mouse(&mut app, click(area.x + 1, area.bottom() - 1));
+        assert_eq!(app.time_base, before);
     }
 
     #[test]
