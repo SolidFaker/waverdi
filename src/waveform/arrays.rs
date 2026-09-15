@@ -9,7 +9,7 @@
 //!   `{{0, 1, 2}, {2, 3, 4}, {1, 2, 3}}`;
 //! * expanding a node in the Signal List reveals the next dimension.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use super::{fmt_real, fmt_value, Change, Radix, SigKind, SigState, Signal, Ticks, Value};
 
@@ -385,31 +385,9 @@ impl super::Waveform {
                 self.rebuild_array_node(child, current, radix, children, updated);
             }
         }
-        let mut times: BTreeSet<Ticks> = BTreeSet::new();
-        for &child in &list {
-            for change in &self.signals[child].changes {
-                times.insert(change.t);
-            }
-        }
-        let mut changes: Vec<Change> = Vec::new();
-        for t in times {
-            let parts: Vec<String> = list
-                .iter()
-                .map(|&child| {
-                    let signal = &self.signals[child];
-                    element_text_radix(signal, t, radix.get(&child).copied().or(current))
-                })
-                .collect();
-            let value = Value::Str(format!("{{{}}}", parts.join(", ")));
-            if changes
-                .last()
-                .map(|change| change.v == value)
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            changes.push(Change { t, v: value });
-        }
+        let changes = merged_changes(&self.signals, &list, &|child| {
+            radix.get(&child).copied().or(current)
+        });
         if self.signals[index].changes != changes {
             self.signals[index].changes = changes;
             updated.push(index);
@@ -452,18 +430,68 @@ fn split_element_name(name: &str) -> Option<(&str, Vec<i64>)> {
 /// `{child, child, ...}` value changes over the union of the children's
 /// change times.
 fn array_changes(signals: &[Signal], children: &[usize]) -> Vec<Change> {
-    let mut times: BTreeSet<Ticks> = BTreeSet::new();
-    for &child in children {
-        for change in &signals[child].changes {
-            times.insert(change.t);
-        }
-    }
+    merged_changes(signals, children, &|_| None)
+}
+
+/// Merge the children's change lists into the parent's `{a, b, ...}` values.
+/// The children are walked in time order and only the element whose value
+/// changed is re-formatted, so the cost is linear in the inputs plus the
+/// produced text (the naive "format every element at every time" is
+/// quadratic in the element count and freezes on big interfaces).
+fn merged_changes(
+    signals: &[Signal],
+    children: &[usize],
+    radix: &dyn Fn(usize) -> Option<Radix>,
+) -> Vec<Change> {
+    let mut cursors = vec![0usize; children.len()];
+    let first = children
+        .iter()
+        .filter_map(|&child| signals[child].changes.first().map(|change| change.t))
+        .min();
+    let mut parts: Vec<String> = children
+        .iter()
+        .map(|&child| element_text_radix(&signals[child], first.unwrap_or(0), radix(child)))
+        .collect();
     let mut changes: Vec<Change> = Vec::new();
-    for t in times {
-        let parts: Vec<String> = children
+    if let Some(t) = first {
+        changes.push(Change {
+            t,
+            v: Value::Str(format!("{{{}}}", parts.join(", "))),
+        });
+    }
+    loop {
+        // All children whose next change lands on the same time are applied
+        // before one value is emitted for that time.
+        let next = children
             .iter()
-            .map(|&child| element_text(&signals[child], t))
-            .collect();
+            .enumerate()
+            .filter_map(|(index, &child)| {
+                signals[child]
+                    .changes
+                    .get(cursors[index])
+                    .map(|change| change.t)
+            })
+            .min();
+        let Some(t) = next else { break };
+        let mut dirty = false;
+        for (index, &child) in children.iter().enumerate() {
+            while signals[child]
+                .changes
+                .get(cursors[index])
+                .map(|change| change.t == t)
+                .unwrap_or(false)
+            {
+                cursors[index] += 1;
+                let text = element_text_radix(&signals[child], t, radix(child));
+                if text != parts[index] {
+                    parts[index] = text;
+                    dirty = true;
+                }
+            }
+        }
+        if !dirty {
+            continue;
+        }
         let value = Value::Str(format!("{{{}}}", parts.join(", ")));
         if changes
             .last()
@@ -509,10 +537,6 @@ fn element_text_radix(signal: &Signal, t: Ticks, radix: Option<Radix>) -> String
         (SigKind::Str, Some(Value::Str(text))) => text.clone(),
         _ => "x".to_string(),
     }
-}
-
-fn element_text(signal: &Signal, t: Ticks) -> String {
-    element_text_radix(signal, t, None)
 }
 
 #[cfg(test)]
@@ -617,6 +641,55 @@ mod tests {
         assert!(wf
             .scope_aggregate(&["tb".to_string(), "rom_if".to_string()])
             .is_some());
+    }
+
+    #[test]
+    fn rebuild_brace_texts_merges_children_in_time_order() {
+        let mut wf = waveform(vec![
+            leaf("mem[0][3:0]", &[1, 0, 0, 0], 0),
+            leaf("mem[1][3:0]", &[0, 1, 0, 0], 0),
+        ]);
+        wf.build_arrays();
+        // Element 0 changes at t=0 and t=2, element 1 at t=1 and t=2.
+        wf.signals[0].changes = vec![
+            Change {
+                t: 0,
+                v: Value::compact(vec![1, 0, 0, 0]),
+            },
+            Change {
+                t: 2,
+                v: Value::compact(vec![0, 1, 0, 0]),
+            },
+        ];
+        wf.signals[1].changes = vec![
+            Change {
+                t: 1,
+                v: Value::compact(vec![1, 1, 0, 0]),
+            },
+            Change {
+                t: 2,
+                v: Value::compact(vec![0, 0, 1, 0]),
+            },
+        ];
+        let updated = wf.rebuild_array_texts(&std::collections::HashMap::new());
+        assert!(updated.contains(&2), "{updated:?}");
+        let texts: Vec<(u64, String)> = wf.signals[2]
+            .changes
+            .iter()
+            .map(|change| match &change.v {
+                Value::Str(text) => (change.t, text.clone()),
+                other => panic!("not text: {other:?}"),
+            })
+            .collect();
+        // Both elements changing at t=2 produce one value, not two.
+        assert_eq!(
+            texts,
+            vec![
+                (0, "{1, x}".to_string()),
+                (1, "{1, 3}".to_string()),
+                (2, "{2, 4}".to_string()),
+            ]
+        );
     }
 
     #[test]

@@ -1667,9 +1667,10 @@ fn parse_body_item(parser: &mut Parser, module: &mut ModuleDef) -> Option<Body> 
             parser.next();
             None
         }
-        "input" | "output" | "inout" | "wire" | "reg" | "logic" | "bit" | "integer" | "real"
-        | "time" | "genvar" | "supply0" | "supply1" | "tri" | "triand" | "trior" | "wand"
-        | "wor" | "trireg" | "byte" | "shortint" | "longint" | "struct" | "enum" | "union" => {
+        "input" | "output" | "inout" | "wire" | "reg" | "logic" | "bit" | "int" | "integer"
+        | "real" | "time" | "genvar" | "supply0" | "supply1" | "tri" | "triand" | "trior"
+        | "wand" | "wor" | "trireg" | "byte" | "shortint" | "longint" | "struct" | "enum"
+        | "union" => {
             parse_declarations(parser, module, false);
             None
         }
@@ -2217,7 +2218,7 @@ fn parse_declarations(parser: &mut Parser, module: &mut ModuleDef, header: bool)
                             range = None;
                             parser.next();
                         }
-                        "wire" | "reg" | "logic" | "bit" | "integer" | "real" | "time"
+                        "wire" | "reg" | "logic" | "bit" | "int" | "integer" | "real" | "time"
                         | "supply0" | "supply1" | "tri" | "triand" | "trior" | "wand" | "wor"
                         | "trireg" | "byte" | "shortint" | "longint" => {
                             kind.get_or_insert(word);
@@ -3036,6 +3037,7 @@ pub fn is_keyword(name: &str) -> bool {
             | "wire"
             | "reg"
             | "bit"
+            | "int"
             | "integer"
             | "real"
             | "time"
@@ -3320,6 +3322,28 @@ endmodule
             .expect("loop instance inside an index-less generate block");
         assert_eq!(found.module.name, "leaf");
         assert_eq!(found.instance_scope, steps(&["top", "a[0]", "u_leaf"]));
+    }
+
+    #[test]
+    fn simulation_types_declare_signals() {
+        let text = "module m;\n\
+                    \x20   int a;\n\
+                    \x20   int unsigned b;\n\
+                    \x20   int signed c = 0;\n\
+                    \x20   integer d;\n\
+                    \x20   real e;\n\
+                    \x20   time f;\n\
+                    \x20   shortint g;\n\
+                    \x20   longint h;\n\
+                    \x20   byte i;\n\
+                    endmodule\n";
+        let module = parse_module_text(text, Path::new("m.sv"))
+            .into_iter()
+            .next()
+            .unwrap();
+        for name in ["a", "b", "c", "d", "e", "f", "g", "h", "i"] {
+            assert!(module.declares(name), "{name} not declared");
+        }
     }
 
     #[test]

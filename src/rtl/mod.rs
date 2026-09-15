@@ -158,12 +158,62 @@ fn strip_comment(line: &str) -> &str {
 }
 
 fn resolve(base: &Path, token: &str) -> PathBuf {
-    let path = Path::new(token);
+    let token = expand_env(token);
+    let path = Path::new(&token);
     if path.is_absolute() {
         path.to_path_buf()
     } else {
         base.join(path)
     }
+}
+
+/// Expand `$VAR` and `${VAR}` in a filelist token. Unknown variables are
+/// kept verbatim so a literal `$` in a path survives.
+fn expand_env(token: &str) -> String {
+    let mut out = String::with_capacity(token.len());
+    let mut chars = token.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        let braced = chars.peek() == Some(&'{');
+        if braced {
+            chars.next();
+        }
+        let mut name = String::new();
+        if braced {
+            for c in chars.by_ref() {
+                if c == '}' {
+                    break;
+                }
+                name.push(c);
+            }
+        } else {
+            while let Some(&c) = chars.peek() {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    name.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+        }
+        match (name.is_empty(), std::env::var(&name)) {
+            (false, Ok(value)) => out.push_str(&value),
+            _ => {
+                out.push('$');
+                if braced {
+                    out.push('{');
+                    out.push_str(&name);
+                    out.push('}');
+                } else {
+                    out.push_str(&name);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn dedup(paths: &mut Vec<PathBuf>) {
@@ -307,6 +357,30 @@ mod tests {
         assert_eq!(set.incdirs.len(), 1);
         assert!(set.incdirs[0].ends_with("inc"));
         assert_eq!(set.defines, vec!["WIDTH=8", "SUB=1"]);
+    }
+
+    #[test]
+    fn filelist_tokens_expand_environment_variables() {
+        std::env::set_var("WAVERDI_FL_TEST_DIR", "/opt/rtl");
+        assert_eq!(expand_env("$WAVERDI_FL_TEST_DIR/a.sv"), "/opt/rtl/a.sv");
+        assert_eq!(expand_env("${WAVERDI_FL_TEST_DIR}/a.sv"), "/opt/rtl/a.sv");
+        assert_eq!(
+            expand_env("$WAVERDI_FL_TEST_MISSING/a.sv"),
+            "$WAVERDI_FL_TEST_MISSING/a.sv"
+        );
+        assert_eq!(expand_env("plain/a.sv"), "plain/a.sv");
+    }
+
+    #[test]
+    fn filelists_resolve_files_through_environment_variables() {
+        let dir = temp_dir("env");
+        let src = dir.join("top.sv");
+        fs::write(&src, "module top; endmodule\n").unwrap();
+        std::env::set_var("WAVERDI_FL_TEST_ROOT", dir.display().to_string());
+        let list = dir.join("files.f");
+        fs::write(&list, "$WAVERDI_FL_TEST_ROOT/top.sv\n").unwrap();
+        let set = SourceSet::from_filelist(&list).unwrap();
+        assert_eq!(set.files, vec![src]);
     }
 
     #[test]

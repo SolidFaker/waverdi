@@ -1483,9 +1483,11 @@ impl App {
         let mut last = Radix::Bin;
         for &idx in &targets {
             let next = self.radix_for(idx).next();
-            self.apply_radix(idx, next);
+            self.set_radix_tree(idx, next);
             last = next;
         }
+        // One rebuild for the whole selection instead of one per signal.
+        self.refresh_arrays();
         if targets.len() == 1 {
             let name = self.wf.as_ref().unwrap().signals[targets[0]].name.clone();
             self.msg(format!("radix of {name}: {}", last.name()));
@@ -1500,6 +1502,13 @@ impl App {
 
     /// Set the radix of a signal; array signals pass it on to their elements.
     pub(crate) fn apply_radix(&mut self, idx: usize, radix: Radix) {
+        self.set_radix_tree(idx, radix);
+        self.refresh_arrays();
+    }
+
+    /// Record the radix on a signal and its array/aggregate children without
+    /// rebuilding yet; callers that touch several signals refresh once.
+    fn set_radix_tree(&mut self, idx: usize, radix: Radix) {
         let mut stack = vec![idx];
         while let Some(node) = stack.pop() {
             self.radix.insert(node, radix);
@@ -1510,7 +1519,6 @@ impl App {
                 .unwrap_or_default();
             stack.extend(children);
         }
-        self.refresh_arrays();
     }
 
     /// Re-format the brace values of array signals with the current radixes.
