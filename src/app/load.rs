@@ -7,10 +7,12 @@
 //! actually added to the waveform materialize their value changes.
 //!
 //! The session worker is split in two: one thread owns the FSDB reader (FFR
-//! is process-global, so reads stay serialized) and forwards everything that
-//! does not need FFR - aggregate/array recomputation, radix re-formatting -
-//! to a small compute pool. That keeps the UI thread free and lets heavy
-//! value math run in parallel with the next value read.
+//! cannot be used from two threads - concurrent readers deadlock inside the
+//! library), so reads stay serialized and everything that does not need FFR -
+//! installing values, aggregate/array recomputation, radix re-formatting -
+//! runs on a small compute pool. Queued signal requests are coalesced into
+//! one batch per read pass, so adding a whole hierarchy level keeps the
+//! reader busy and produces a single UI update per batch.
 
 use crate::dump::{self, LoadProgress, ParseOut, Stage};
 use crate::rtl::{RtlDb, SourceSet};
@@ -227,7 +229,10 @@ fn parse_rtl_sources(path: &str, tx: &Sender<LoadEvent>, flag: &AtomicBool) {
 /// Work that needs no FFR access and can run on the compute pool.
 #[cfg(fsdb_sdk)]
 enum ComputeTask {
-    Recompute,
+    /// Install a batch of freshly read signals into the shared waveform and
+    /// complete the aggregate/array math. One task per batch keeps the pool
+    /// fed while the reader thread moves on to the next signal.
+    Install(Vec<(usize, Vec<crate::waveform::Change>, Vec<String>)>),
     Rebuild(std::collections::HashMap<usize, crate::waveform::Radix>),
 }
 
@@ -241,8 +246,11 @@ fn pool_size() -> usize {
 /// Serve on-demand value requests for an open FSDB session until the App
 /// drops the job (the request channel closes) or asks for shutdown.
 ///
-/// Value reads happen on this thread (FFR is process-global); everything else
-/// is handed to the compute pool so reads are not delayed by value math.
+/// Value reads must happen on this thread (FFR cannot be used from several
+/// threads - two simultaneous readers deadlock inside the library), so the
+/// reads of one batch stay back to back while the compute pool installs the
+/// previous batch, clones the values for the UI and completes the aggregate
+/// math in parallel.
 #[cfg(fsdb_sdk)]
 fn serve_session(
     meta: Arc<std::sync::Mutex<Waveform>>,
@@ -262,16 +270,37 @@ fn serve_session(
                 break;
             };
             match task {
-                ComputeTask::Recompute => {
+                ComputeTask::Install(raw) => {
+                    // Install first so the aggregates below can see the new
+                    // values, then clone once for the UI.
                     let updates = {
+                        let mut wf = meta.lock().unwrap_or_else(|err| err.into_inner());
+                        let mut updates = Vec::with_capacity(raw.len());
+                        let mut warnings = Vec::new();
+                        for (leaf, changes, mut warns) in raw {
+                            if let Some(signal) = wf.signals.get_mut(leaf) {
+                                signal.changes = changes;
+                                signal.state = crate::waveform::SigState::Ready;
+                                updates.push((leaf, signal.changes.clone()));
+                            }
+                            warnings.append(&mut warns);
+                        }
+                        (updates, warnings)
+                    };
+                    if !updates.0.is_empty() || !updates.1.is_empty() {
+                        let _ = tx.send(LoadEvent::Changes(updates.0, updates.1));
+                    }
+                    // The batch is fully installed: complete any aggregate
+                    // whose members are now all ready.
+                    let arrays = {
                         let mut wf = meta.lock().unwrap_or_else(|err| err.into_inner());
                         wf.recompute_ready_arrays()
                             .into_iter()
                             .map(|index| (index, wf.signals[index].changes.clone()))
                             .collect::<Vec<_>>()
                     };
-                    if !updates.is_empty() {
-                        let _ = tx.send(LoadEvent::Changes(updates, Vec::new()));
+                    if !arrays.is_empty() {
+                        let _ = tx.send(LoadEvent::Changes(arrays, Vec::new()));
                     }
                 }
                 ComputeTask::Rebuild(radix) => {
@@ -293,40 +322,67 @@ fn serve_session(
 
     while let Ok(request) = req_rx.recv() {
         match request {
-            LoadRequest::Signal(index) => {
-                let leaves = {
-                    let wf = meta.lock().unwrap_or_else(|err| err.into_inner());
-                    if index >= wf.signals.len() {
-                        continue;
+            LoadRequest::Signal(first) => {
+                // Adding a whole level queues many requests at once: drain
+                // them into one batch so the reads stay back to back and the
+                // UI gets a single update per batch.
+                let mut batch = vec![first];
+                let mut rebuild = None;
+                let mut shutdown = false;
+                loop {
+                    match req_rx.try_recv() {
+                        Ok(LoadRequest::Signal(index)) => batch.push(index),
+                        Ok(LoadRequest::RebuildArrays(radix)) => rebuild = Some(radix),
+                        Ok(LoadRequest::Shutdown) => {
+                            shutdown = true;
+                            break;
+                        }
+                        Err(_) => break,
                     }
-                    wf.value_leaves(index)
-                };
+                }
                 let var_count = session.var_count();
-                let mut updates = Vec::new();
-                let mut warnings = Vec::new();
-                for leaf in leaves {
-                    let needs_load = {
+                let mut raw = Vec::new();
+                for index in batch {
+                    let leaves = {
                         let wf = meta.lock().unwrap_or_else(|err| err.into_inner());
-                        leaf < var_count
-                            && wf.signals[leaf].state == crate::waveform::SigState::Lazy
+                        if index >= wf.signals.len() {
+                            continue;
+                        }
+                        wf.value_leaves(index)
                     };
-                    if !needs_load {
-                        continue;
+                    for leaf in leaves {
+                        // Claim the leaf before reading it: the install runs
+                        // on the pool, so the next request must not read it
+                        // again while it is in flight.
+                        let claimed = {
+                            let mut wf = meta.lock().unwrap_or_else(|err| err.into_inner());
+                            match wf.signals.get_mut(leaf) {
+                                Some(signal)
+                                    if leaf < var_count
+                                        && signal.state == crate::waveform::SigState::Lazy =>
+                                {
+                                    signal.state = crate::waveform::SigState::Loading;
+                                    true
+                                }
+                                _ => false,
+                            }
+                        };
+                        if !claimed {
+                            continue;
+                        }
+                        let (changes, warns) = session.read_signal(leaf);
+                        raw.push((leaf, changes, warns));
                     }
-                    let (changes, warns) = session.read_signal(leaf);
-                    let installed = {
-                        let mut wf = meta.lock().unwrap_or_else(|err| err.into_inner());
-                        wf.signals[leaf].changes = changes;
-                        wf.signals[leaf].state = crate::waveform::SigState::Ready;
-                        wf.signals[leaf].changes.clone()
-                    };
-                    updates.push((leaf, installed));
-                    warnings.extend(warns);
                 }
-                if !updates.is_empty() || !warnings.is_empty() {
-                    let _ = tx.send(LoadEvent::Changes(updates, warnings));
+                if !raw.is_empty() {
+                    let _ = task_tx.send(ComputeTask::Install(raw));
                 }
-                let _ = task_tx.send(ComputeTask::Recompute);
+                if let Some(radix) = rebuild {
+                    let _ = task_tx.send(ComputeTask::Rebuild(radix));
+                }
+                if shutdown {
+                    break;
+                }
             }
             LoadRequest::RebuildArrays(radix) => {
                 let _ = task_tx.send(ComputeTask::Rebuild(radix));
@@ -335,4 +391,65 @@ fn serve_session(
         }
     }
     drop(task_tx);
+}
+
+#[cfg(all(test, fsdb_sdk))]
+mod tests {
+    use super::*;
+    use crate::waveform::SigState;
+    use std::sync::{Arc, Mutex};
+
+    /// A batch of requests is read back to back and installed by the pool:
+    /// every requested signal becomes Ready and its values reach the UI.
+    #[test]
+    fn batched_requests_install_their_signals() {
+        let Some(home) = std::env::var_os("VERDI_HOME") else {
+            return;
+        };
+        let path =
+            std::path::PathBuf::from(home).join("demo/nCompare/nCmp_demo1/demo_RTL_verilog.fsdb");
+        if !path.is_file() {
+            return;
+        }
+        let (out, mut session) =
+            crate::fsdb::parse_fsdb_lazy(&path, &mut |_| true).expect("lazy parse");
+        let indexes: Vec<usize> = (0..out.wf.signals.len())
+            .filter(|&index| {
+                out.wf.signals[index].state == SigState::Lazy
+                    && out.wf.signals[index].members.is_empty()
+            })
+            .take(24)
+            .collect();
+        assert!(!indexes.is_empty(), "demo dump has lazy signals");
+        let meta = Arc::new(Mutex::new(out.wf.clone()));
+        let (req_tx, req_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let requested = indexes.clone();
+        let producer = std::thread::spawn(move || {
+            for index in requested {
+                let _ = req_tx.send(LoadRequest::Signal(index));
+            }
+            drop(req_tx);
+        });
+        serve_session(Arc::clone(&meta), &mut session, &req_rx, &tx);
+        producer.join().unwrap();
+        drop(tx);
+        let mut installed = std::collections::HashSet::new();
+        for event in rx {
+            if let LoadEvent::Changes(updates, _) = event {
+                installed.extend(updates.into_iter().map(|(index, _)| index));
+            }
+        }
+        for index in &indexes {
+            assert!(
+                installed.contains(index),
+                "signal {index} was not installed"
+            );
+            assert_eq!(
+                meta.lock().unwrap().signals[*index].state,
+                SigState::Ready,
+                "signal {index} was not marked ready"
+            );
+        }
+    }
 }
