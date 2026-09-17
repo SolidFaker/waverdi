@@ -22,6 +22,10 @@ use std::path::Path;
 
 pub mod source;
 
+/// Cap for synthesized (array/aggregate) brace texts. Each of their values is
+/// a formatted string, so they cannot hold as many changes as a plain signal.
+pub(crate) const MAX_AGGREGATE_CHANGES: usize = 200_000;
+
 /// A parsed waveform plus non-fatal parser warnings.
 pub struct ParseOut {
     pub wf: Waveform,

@@ -2372,4 +2372,73 @@ endmodule
         assert_eq!(changes[0].t, 0);
         assert_eq!(changes[1].t, 10);
     }
+
+    /// Expanding an interface asks for members that were read while building
+    /// the aggregate; they must still reach the UI instead of staying in the
+    /// "loading" state forever (regression test).
+    #[test]
+    #[cfg(fsdb_sdk)]
+    fn expanding_an_interface_delivers_its_members() {
+        let dump = match std::env::var("WAVERDI_TEST_FSDB") {
+            Ok(path) => path,
+            Err(_) => {
+                let Some(home) = std::env::var_os("VERDI_HOME") else {
+                    return;
+                };
+                std::path::PathBuf::from(home)
+                    .join("demo/nCompare/nCmp_demo1/demo_RTL_verilog.fsdb")
+                    .display()
+                    .to_string()
+            }
+        };
+        if !std::path::Path::new(&dump).is_file() {
+            return;
+        }
+        let mut app = App::new();
+        app.start_load(&dump);
+        for _ in 0..3000 {
+            app.poll_load();
+            if app.wf.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let Some((aggregate, members)) = app.wf.as_ref().and_then(|wf| {
+            wf.signals
+                .iter()
+                .enumerate()
+                .find(|(_, signal)| signal.var_type == "aggregate" && !signal.members.is_empty())
+                .map(|(index, signal)| (index, signal.members.clone()))
+        }) else {
+            return;
+        };
+        let wait_ready = |app: &mut App, indexes: &[usize]| {
+            for _ in 0..6000 {
+                app.poll_load();
+                let ready = {
+                    let wf = app.wf.as_ref().unwrap();
+                    indexes
+                        .iter()
+                        .all(|&index| wf.signals[index].state == crate::waveform::SigState::Ready)
+                };
+                if ready {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            false
+        };
+        app.add_signal(aggregate);
+        assert!(
+            wait_ready(&mut app, &[aggregate]),
+            "the aggregate itself must become ready"
+        );
+        for &member in &members {
+            app.request_signal(member);
+        }
+        assert!(
+            wait_ready(&mut app, &members),
+            "expanded interface members must become ready"
+        );
+    }
 }

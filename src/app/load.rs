@@ -230,10 +230,14 @@ fn serve_session(
 ) {
     let (task_tx, task_rx) = mpsc::channel::<ComputeTask>();
     let task_rx = Arc::new(std::sync::Mutex::new(task_rx));
+    // Signals the UI asked for. Checked by the pool at install time, so a
+    // request that arrives while its read is already in flight is honoured.
+    let wanted: Arc<std::sync::Mutex<std::collections::HashSet<usize>>> = Arc::default();
     for _ in 0..pool_size() {
         let rx = Arc::clone(&task_rx);
         let meta = Arc::clone(&meta);
         let tx = tx.clone();
+        let wanted = Arc::clone(&wanted);
         std::thread::spawn(move || loop {
             let task = rx.lock().unwrap_or_else(|err| err.into_inner()).recv();
             let Ok(task) = task else {
@@ -242,16 +246,25 @@ fn serve_session(
             match task {
                 ComputeTask::Install(raw) => {
                     // Install first so the aggregates below can see the new
-                    // values, then clone once for the UI.
+                    // values, then clone once for the UI - and only for the
+                    // signals the UI actually asked for. The wanted set is
+                    // checked here (not when the read started) so a signal
+                    // requested while its read was in flight still arrives.
                     let updates = {
                         let mut wf = meta.lock().unwrap_or_else(|err| err.into_inner());
                         let mut updates = Vec::with_capacity(raw.len());
                         let mut warnings = Vec::new();
                         for (leaf, changes, mut warns) in raw {
+                            let wanted = wanted
+                                .lock()
+                                .unwrap_or_else(|err| err.into_inner())
+                                .contains(&leaf);
                             if let Some(signal) = wf.signals.get_mut(leaf) {
                                 signal.changes = changes;
                                 signal.state = crate::waveform::SigState::Ready;
-                                updates.push((leaf, signal.changes.clone()));
+                                if wanted {
+                                    updates.push((leaf, signal.changes.clone()));
+                                }
                             }
                             warnings.append(&mut warns);
                         }
@@ -313,6 +326,10 @@ fn serve_session(
                 let var_count = session.var_count();
                 let mut raw = Vec::new();
                 for index in batch {
+                    {
+                        let mut wanted = wanted.lock().unwrap_or_else(|err| err.into_inner());
+                        wanted.insert(index);
+                    }
                     let leaves = {
                         let wf = meta.lock().unwrap_or_else(|err| err.into_inner());
                         if index >= wf.signals.len() {
@@ -320,6 +337,7 @@ fn serve_session(
                         }
                         wf.value_leaves(index)
                     };
+                    let mut delivered = false;
                     for leaf in leaves {
                         // Claim the leaf before reading it: the install runs
                         // on the pool, so the next request must not read it
@@ -337,11 +355,41 @@ fn serve_session(
                                 _ => false,
                             }
                         };
-                        if !claimed {
+                        if claimed {
+                            let (changes, warns) = session.read_signal(leaf);
+                            delivered |= leaf == index;
+                            raw.push((leaf, changes, warns));
                             continue;
                         }
-                        let (changes, warns) = session.read_signal(leaf);
-                        raw.push((leaf, changes, warns));
+                        // Already loaded for an earlier aggregate: the UI may
+                        // still need its own copy now that it asks for it.
+                        let existing = {
+                            let wf = meta.lock().unwrap_or_else(|err| err.into_inner());
+                            (wf.signals[leaf].state == crate::waveform::SigState::Ready
+                                && wanted
+                                    .lock()
+                                    .unwrap_or_else(|err| err.into_inner())
+                                    .contains(&leaf))
+                            .then(|| wf.signals[leaf].changes.clone())
+                        };
+                        if let Some(changes) = existing {
+                            delivered |= leaf == index;
+                            raw.push((leaf, changes, Vec::new()));
+                        }
+                    }
+                    // A requested signal that is already complete in the
+                    // shared waveform (e.g. an interface whose members were
+                    // read earlier) still has to reach the UI.
+                    if !delivered {
+                        let existing = {
+                            let wf = meta.lock().unwrap_or_else(|err| err.into_inner());
+                            (wf.signals[index].state == crate::waveform::SigState::Ready
+                                && !wf.signals[index].changes.is_empty())
+                            .then(|| wf.signals[index].changes.clone())
+                        };
+                        if let Some(changes) = existing {
+                            raw.push((index, changes, Vec::new()));
+                        }
                     }
                 }
                 if !raw.is_empty() {

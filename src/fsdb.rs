@@ -31,6 +31,17 @@ extern "C" {
     fn wav_fsdb_read_tree(handle: *mut c_void) -> i32;
     fn wav_fsdb_add_signal(handle: *mut c_void, idcode: i64) -> i32;
     fn wav_fsdb_load_signals(handle: *mut c_void) -> i32;
+    fn wav_fsdb_reset_signal_list(handle: *mut c_void) -> i32;
+    fn wav_fsdb_unload_signals(handle: *mut c_void) -> i32;
+    fn wav_fsdb_read_changes(
+        vc: *mut c_void,
+        times: *mut u64,
+        values: *mut u8,
+        lengths: *mut u64,
+        capacity: u64,
+        stride: u64,
+        count: *mut u64,
+    ) -> i32;
     fn wav_fsdb_time_range(handle: *mut c_void, min: *mut u64, max: *mut u64) -> i32;
     fn wav_fsdb_scale_unit(handle: *mut c_void, buf: *mut c_char, len: u64) -> i32;
     fn wav_fsdb_close(handle: *mut c_void);
@@ -38,9 +49,6 @@ extern "C" {
     fn wav_fsdb_has_vc(vc: *mut c_void) -> i32;
     fn wav_fsdb_min_time(vc: *mut c_void, t: *mut u64) -> i32;
     fn wav_fsdb_goto_time(vc: *mut c_void, t: u64) -> i32;
-    fn wav_fsdb_next_vc(vc: *mut c_void) -> i32;
-    fn wav_fsdb_cur_time(vc: *mut c_void, t: *mut u64) -> i32;
-    fn wav_fsdb_value(vc: *mut c_void, buf: *mut u8, len: u64, out_len: *mut u64) -> i32;
     fn wav_fsdb_bit_size(vc: *mut c_void) -> u32;
     fn wav_fsdb_bytes_per_bit(vc: *mut c_void) -> u32;
     fn wav_fsdb_free_handle(vc: *mut c_void);
@@ -202,9 +210,15 @@ impl FsdbSession {
         let _lock = FFR_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let _silence = StderrSilencer::new();
         let mut warnings = Vec::new();
-        // Values are loaded into the FFR cache only for the signal that is
-        // actually requested.
-        unsafe { wav_fsdb_add_signal(self.handle, var.idcode) };
+        // The FFR signal list accumulates and `ffrLoadSignals` loads every
+        // signal in it, so a read only stays cheap if the previous signal is
+        // unloaded and the list reset first: otherwise each new signal would
+        // reload all previously added ones (quadratic in the signals added).
+        unsafe {
+            wav_fsdb_unload_signals(self.handle);
+            wav_fsdb_reset_signal_list(self.handle);
+            wav_fsdb_add_signal(self.handle, var.idcode);
+        }
         if unsafe { wav_fsdb_load_signals(self.handle) } != 0 {
             warnings.push(format!("{}: failed to load signal values", var.name));
             return (Vec::new(), warnings);
@@ -415,31 +429,49 @@ fn read_changes(
             } else {
                 1usize << bytes_per_bit.min(3)
             };
-            let mut buf = vec![0u8; size.max(8)];
-            loop {
-                let mut time = 0u64;
-                if unsafe { wav_fsdb_cur_time(vc, &mut time) } != 0 {
+            // Read in chunks: one FFI call per chunk instead of three per
+            // change, with the decoding left to Rust.
+            const CHUNK: usize = 4096;
+            let stride = size.max(8);
+            let mut times = vec![0u64; CHUNK];
+            let mut lengths = vec![0u64; CHUNK];
+            let mut buf = vec![0u8; CHUNK * stride];
+            'read: loop {
+                let mut count = 0u64;
+                let rc = unsafe {
+                    wav_fsdb_read_changes(
+                        vc,
+                        times.as_mut_ptr(),
+                        buf.as_mut_ptr(),
+                        lengths.as_mut_ptr(),
+                        CHUNK as u64,
+                        stride as u64,
+                        &mut count,
+                    )
+                };
+                if rc != 0 || count == 0 {
                     break;
                 }
-                let mut out_len = 0u64;
-                if unsafe { wav_fsdb_value(vc, buf.as_mut_ptr(), buf.len() as u64, &mut out_len) }
-                    == 0
-                {
-                    if let Some(value) = decode_value(bytes_per_bit, bits, &buf[..out_len as usize])
-                    {
+                for k in 0..count as usize {
+                    let start = k * stride;
+                    let bytes = &buf[start..start + lengths[k] as usize];
+                    if let Some(value) = decode_value(bytes_per_bit, bits, bytes) {
                         if !changes.last().map(|c| c.v == value).unwrap_or(false) {
-                            changes.push(Change { t: time, v: value });
+                            changes.push(Change {
+                                t: times[k],
+                                v: value,
+                            });
                         }
                     }
+                    if changes.len() >= MAX_CHANGES_READ_PER_SIGNAL {
+                        warnings.push(format!(
+                            "{}: value changes truncated at {} while reading",
+                            var.name, MAX_CHANGES_READ_PER_SIGNAL
+                        ));
+                        break 'read;
+                    }
                 }
-                if changes.len() >= MAX_CHANGES_READ_PER_SIGNAL {
-                    warnings.push(format!(
-                        "{}: value changes truncated at {} while reading",
-                        var.name, MAX_CHANGES_READ_PER_SIGNAL
-                    ));
-                    break;
-                }
-                if unsafe { wav_fsdb_next_vc(vc) } != 0 {
+                if count < CHUNK as u64 {
                     break;
                 }
             }

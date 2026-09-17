@@ -431,31 +431,23 @@ fn array_changes(signals: &[Signal], children: &[usize]) -> Vec<Change> {
 }
 
 /// Merge the children's change lists into the parent's `{a, b, ...}` values.
-/// The children are walked in time order and only the element whose value
-/// changed is re-formatted, so the cost is linear in the inputs plus the
-/// produced text (the naive "format every element at every time" is
-/// quadratic in the element count and freezes on big interfaces).
+/// The children are walked in time order, only the emitted times are
+/// formatted, and a signal whose members hold more changes than
+/// [`MAX_AGGREGATE_CHANGES`] is thinned while merging, so a big interface
+/// cannot produce a text value per member change (millions of strings).
 fn merged_changes(
     signals: &[Signal],
     children: &[usize],
     radix: &dyn Fn(usize) -> Option<Radix>,
 ) -> Vec<Change> {
+    let total: usize = children
+        .iter()
+        .map(|&child| signals[child].changes.len())
+        .sum();
+    let stride = total.div_ceil(crate::dump::MAX_AGGREGATE_CHANGES).max(1);
     let mut cursors = vec![0usize; children.len()];
-    let first = children
-        .iter()
-        .filter_map(|&child| signals[child].changes.first().map(|change| change.t))
-        .min();
-    let mut parts: Vec<String> = children
-        .iter()
-        .map(|&child| element_text_radix(&signals[child], first.unwrap_or(0), radix(child)))
-        .collect();
+    let mut applied = 0usize;
     let mut changes: Vec<Change> = Vec::new();
-    if let Some(t) = first {
-        changes.push(Change {
-            t,
-            v: Value::Str(format!("{{{}}}", parts.join(", "))),
-        });
-    }
     loop {
         // All children whose next change lands on the same time are applied
         // before one value is emitted for that time.
@@ -479,16 +471,18 @@ fn merged_changes(
                 .unwrap_or(false)
             {
                 cursors[index] += 1;
-                let text = element_text_radix(&signals[child], t, radix(child));
-                if text != parts[index] {
-                    parts[index] = text;
-                    dirty = true;
-                }
+                applied += 1;
+                dirty = true;
             }
         }
-        if !dirty {
+        if !dirty || (!changes.is_empty() && !applied.is_multiple_of(stride)) {
             continue;
         }
+        // Only emitted times pay for the element formatting and the join.
+        let parts: Vec<String> = children
+            .iter()
+            .map(|&child| element_text_radix(&signals[child], t, radix(child)))
+            .collect();
         let value = Value::Str(format!("{{{}}}", parts.join(", ")));
         if changes
             .last()

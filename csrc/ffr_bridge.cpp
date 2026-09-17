@@ -170,6 +170,14 @@ int wav_fsdb_load_signals(void *h) {
     return handle(h)->obj->ffrLoadSignals() == FSDB_RC_SUCCESS ? 0 : -1;
 }
 
+int wav_fsdb_reset_signal_list(void *h) {
+    return handle(h)->obj->ffrResetSignalList() == FSDB_RC_SUCCESS ? 0 : -1;
+}
+
+int wav_fsdb_unload_signals(void *h) {
+    return handle(h)->obj->ffrUnloadSignals() == FSDB_RC_SUCCESS ? 0 : -1;
+}
+
 int wav_fsdb_time_range(void *h, unsigned long long *min_time,
                         unsigned long long *max_time) {
     fsdbTag64 lo, hi;
@@ -272,6 +280,46 @@ void wav_fsdb_free_handle(void *vh) {
     if (vh) {
         vc_handle(vh)->ffrFree();
     }
+}
+
+// Read up to `capacity` value changes of one signal in a single C++ loop.
+// The old Rust loop paid three FFI calls per change; this pays one call per
+// chunk and leaves the decoding to Rust. `values` must hold `stride` bytes
+// per entry.
+int wav_fsdb_read_changes(void *vh, unsigned long long *times, byte_T *values,
+                          unsigned long *lengths, unsigned long capacity,
+                          unsigned long stride, unsigned long *count) {
+    ffrVCTrvsHdl hdl = vc_handle(vh);
+    unsigned long n = 0;
+    while (n < capacity) {
+        fsdbTag64 tag;
+        if (hdl->ffrGetXTag(&tag) != FSDB_RC_SUCCESS) {
+            break;
+        }
+        byte_T *vc = nullptr;
+        if (hdl->ffrGetVC(&vc) != FSDB_RC_SUCCESS || !vc) {
+            break;
+        }
+        unsigned bpb = (unsigned)hdl->ffrGetBytesPerBit();
+        if (bpb > (unsigned)FSDB_BYTES_PER_BIT_8B) {
+            break;
+        }
+        unsigned long size = (bpb == (unsigned)FSDB_BYTES_PER_BIT_1B)
+                                 ? (unsigned long)hdl->ffrGetBitSize()
+                                 : (1ul << bpb);
+        if (size > stride) {
+            break;
+        }
+        std::memcpy(values + n * stride, vc, size);
+        times[n] = tag_to_u64(tag);
+        lengths[n] = size;
+        ++n;
+        if (hdl->ffrGotoNextVC() != FSDB_RC_SUCCESS) {
+            break;
+        }
+    }
+    *count = n;
+    return 0;
 }
 
 } // extern "C"
