@@ -237,7 +237,6 @@ impl super::Waveform {
     }
 
     /// Child signal indices for every synthesized array signal.
-    #[cfg_attr(not(fsdb_sdk), allow(dead_code))]
     pub(crate) fn array_children(&self) -> Vec<Vec<usize>> {
         let mut children = vec![Vec::new(); self.signals.len()];
         for (index, signal) in self.signals.iter().enumerate() {
@@ -269,7 +268,6 @@ impl super::Waveform {
 
     /// Signal indices whose values must be loaded to build `index`: the
     /// element signals of an array subtree, or the signal itself.
-    #[cfg_attr(not(fsdb_sdk), allow(dead_code))]
     pub(crate) fn value_leaves(&self, index: usize) -> Vec<usize> {
         let children = self.array_children();
         let mut out = Vec::new();
@@ -310,7 +308,6 @@ impl super::Waveform {
     /// Recompute the brace text of every array or aggregate whose element
     /// values are all present. Used after lazily loading elements. Returns
     /// the indices that were recomputed.
-    #[cfg_attr(not(fsdb_sdk), allow(dead_code))]
     pub(crate) fn recompute_ready_arrays(&mut self) -> Vec<usize> {
         let children = self.array_children();
         let synthesized: Vec<usize> = (0..self.signals.len())

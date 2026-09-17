@@ -2,21 +2,22 @@
 //!
 //! Parsing a large dump can take seconds to minutes; keeping it on the UI
 //! thread would freeze the TUI. The worker sends progress events that the
-//! App drains from its idle tick. For FSDB the worker keeps the reader alive
-//! after parsing and loads signal values on demand, so only signals that are
-//! actually added to the waveform materialize their value changes.
+//! App drains from its idle tick. Every format is opened through a
+//! [`crate::dump::source::DumpSource`]: the worker hands the hierarchy to the
+//! UI first and keeps the source alive afterwards, loading signal values only
+//! when they are actually added to the waveform.
 //!
-//! The session worker is split in two: one thread owns the FSDB reader (FFR
-//! cannot be used from two threads - concurrent readers deadlock inside the
-//! library), so reads stay serialized and everything that does not need FFR -
-//! installing values, aggregate/array recomputation, radix re-formatting -
-//! runs on a small compute pool. Queued signal requests are coalesced into
-//! one batch per read pass, so adding a whole hierarchy level keeps the
-//! reader busy and produces a single UI update per batch.
+//! The session worker is split in two: one thread owns the source - for FSDB
+//! that is the FFR reader (FFR cannot be used from two threads - concurrent
+//! readers deadlock inside the library), so reads stay serialized - while
+//! everything that does not need the backend - installing values,
+//! aggregate/array recomputation, radix re-formatting - runs on a small
+//! compute pool. Queued signal requests are coalesced into one batch per read
+//! pass, so adding a whole hierarchy level keeps the reader busy and produces
+//! a single UI update per batch.
 
-use crate::dump::{self, LoadProgress, ParseOut, Stage};
+use crate::dump::{LoadProgress, ParseOut, Stage};
 use crate::rtl::{RtlDb, SourceSet};
-#[cfg(fsdb_sdk)]
 use crate::waveform::Waveform;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,10 +28,8 @@ use std::sync::Arc;
 pub enum LoadRequest {
     /// Materialize the value changes of `wf.signals[index]` (and of the array
     /// or aggregate signals that become complete once its members are loaded).
-    #[cfg_attr(not(fsdb_sdk), allow(dead_code))]
     Signal(usize),
     /// Re-format array/aggregate brace texts with the given radix overrides.
-    #[cfg_attr(not(fsdb_sdk), allow(dead_code))]
     RebuildArrays(std::collections::HashMap<usize, crate::waveform::Radix>),
     Shutdown,
 }
@@ -39,15 +38,14 @@ pub enum LoadEvent {
     Progress(LoadProgress),
     Waveform(Box<ParseOut>),
     Rtl(Box<SourceSet>, Box<RtlDb>),
-    #[cfg_attr(not(fsdb_sdk), allow(dead_code))]
     /// `(signal index, changes)` updates plus warnings from the backend.
     Changes(Vec<(usize, Vec<crate::waveform::Change>)>, Vec<String>),
     Failed(String),
     Done,
 }
 
-/// A running (or finished) background load. For lazy FSDB dumps the job stays
-/// alive after [`LoadEvent::Done`] to serve value requests.
+/// A running (or finished) background load. The job stays alive after
+/// [`LoadEvent::Done`] to serve value requests.
 pub struct LoadJob {
     pub path: String,
     pub rx: Receiver<LoadEvent>,
@@ -65,78 +63,53 @@ impl LoadJob {
     pub fn start(path: &str, discover_sources: bool) -> LoadJob {
         let (tx, rx) = mpsc::channel();
         let (req_tx, req_rx) = mpsc::channel();
-        // Only the lazy FSDB path consumes requests.
-        #[cfg(not(fsdb_sdk))]
-        let _ = &req_rx;
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&cancel);
         let path_owned = path.to_string();
         let worker = std::thread::spawn(move || {
             let cancelled = || flag.load(Ordering::Relaxed);
-
-            #[cfg(fsdb_sdk)]
-            if dump::detect(Path::new(&path_owned)) == dump::Format::Fsdb {
-                let mut report = |progress: LoadProgress| -> bool {
-                    let _ = tx.send(LoadEvent::Progress(progress));
-                    !cancelled()
-                };
-                match crate::fsdb::parse_fsdb_lazy(Path::new(&path_owned), &mut report) {
-                    Ok((mut out, mut session)) => {
-                        if cancelled() {
-                            let _ = tx.send(LoadEvent::Failed("load cancelled".to_string()));
-                            return;
-                        }
-                        // Array grouping and scope aggregates touch every
-                        // signal; do it off the UI thread. Values are still
-                        // lazy at this point.
-                        out.wf.build_arrays();
-                        out.wf.build_scope_aggregates();
-                        for signal in &mut out.wf.signals {
-                            if signal.var_type == "array" {
-                                signal.state = crate::waveform::SigState::Lazy;
-                            }
-                        }
-                        let meta = Arc::new(std::sync::Mutex::new(out.wf.clone()));
-                        let _ = tx.send(LoadEvent::Waveform(Box::new(out)));
-                        if discover_sources {
-                            parse_rtl_sources(&path_owned, &tx, &flag);
-                        }
-                        let _ = tx.send(LoadEvent::Done);
-                        serve_session(meta, &mut session, &req_rx, &tx);
-                        return;
-                    }
-                    Err(err) => {
-                        let _ = tx.send(LoadEvent::Failed(err));
-                        return;
-                    }
-                }
-            }
-
             let mut report = |progress: LoadProgress| -> bool {
                 let _ = tx.send(LoadEvent::Progress(progress));
                 !cancelled()
             };
-            let mut out = match dump::parse_with_progress(Path::new(&path_owned), &mut report) {
-                Ok(out) => out,
-                Err(err) => {
-                    let _ = tx.send(LoadEvent::Failed(err));
-                    return;
-                }
-            };
+            let mut source =
+                match crate::dump::source::open_source(Path::new(&path_owned), &mut report) {
+                    Ok(source) => source,
+                    Err(err) => {
+                        let _ = tx.send(LoadEvent::Failed(err));
+                        return;
+                    }
+                };
             if cancelled() {
                 let _ = tx.send(LoadEvent::Failed("load cancelled".to_string()));
                 return;
             }
+            let mut out = ParseOut {
+                wf: source.take_hierarchy(),
+                warnings: source.take_warnings(),
+            };
             // Array grouping and scope aggregates touch every signal; do it
-            // off the UI thread.
+            // off the UI thread. Values are still lazy at this point.
             out.wf.build_arrays();
             out.wf.build_scope_aggregates();
+            for signal in &mut out.wf.signals {
+                if signal.var_type == "array" {
+                    signal.state = crate::waveform::SigState::Lazy;
+                }
+            }
+            let meta = Arc::new(std::sync::Mutex::new(out.wf.clone()));
             let _ = tx.send(LoadEvent::Waveform(Box::new(out)));
 
             if discover_sources && path_owned.ends_with(".fsdb") {
                 parse_rtl_sources(&path_owned, &tx, &flag);
             }
             let _ = tx.send(LoadEvent::Done);
+            // Eager dumps already carry their values: they end here and the
+            // App recomputes aggregates locally instead of round-tripping.
+            if !source.is_lazy() {
+                return;
+            }
+            serve_session(meta, &mut *source, &req_rx, &tx);
         });
         LoadJob {
             path: path.to_string(),
@@ -191,8 +164,8 @@ impl Drop for LoadJob {
         if let Some(tx) = &self.requests {
             let _ = tx.send(LoadRequest::Shutdown);
         }
-        // Wait for the worker to leave FFR before the process exits: the
-        // library's teardown stalls while a reader thread is still inside it.
+        // Wait for the worker to leave the backend before the process exits:
+        // FFR's teardown stalls while a reader thread is still inside it.
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -226,8 +199,7 @@ fn parse_rtl_sources(path: &str, tx: &Sender<LoadEvent>, flag: &AtomicBool) {
     }
 }
 
-/// Work that needs no FFR access and can run on the compute pool.
-#[cfg(fsdb_sdk)]
+/// Work that needs no backend access and can run on the compute pool.
 enum ComputeTask {
     /// Install a batch of freshly read signals into the shared waveform and
     /// complete the aggregate/array math. One task per batch keeps the pool
@@ -236,25 +208,23 @@ enum ComputeTask {
     Rebuild(std::collections::HashMap<usize, crate::waveform::Radix>),
 }
 
-#[cfg(fsdb_sdk)]
 fn pool_size() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get().clamp(1, 4))
         .unwrap_or(2)
 }
 
-/// Serve on-demand value requests for an open FSDB session until the App
-/// drops the job (the request channel closes) or asks for shutdown.
+/// Serve on-demand value requests for an open source until the App drops the
+/// job (the request channel closes) or asks for shutdown.
 ///
-/// Value reads must happen on this thread (FFR cannot be used from several
-/// threads - two simultaneous readers deadlock inside the library), so the
+/// Value reads must happen on this thread - FFR cannot be used from several
+/// threads (two simultaneous readers deadlock inside the library) - so the
 /// reads of one batch stay back to back while the compute pool installs the
 /// previous batch, clones the values for the UI and completes the aggregate
 /// math in parallel.
-#[cfg(fsdb_sdk)]
 fn serve_session(
     meta: Arc<std::sync::Mutex<Waveform>>,
-    session: &mut crate::fsdb::FsdbSession,
+    session: &mut dyn crate::dump::source::DumpSource,
     req_rx: &Receiver<LoadRequest>,
     tx: &Sender<LoadEvent>,
 ) {
@@ -411,8 +381,12 @@ mod tests {
         if !path.is_file() {
             return;
         }
-        let (out, mut session) =
-            crate::fsdb::parse_fsdb_lazy(&path, &mut |_| true).expect("lazy parse");
+        let mut source =
+            crate::dump::source::open_source(&path, &mut |_| true).expect("lazy parse");
+        let out = crate::dump::ParseOut {
+            wf: source.take_hierarchy(),
+            warnings: source.take_warnings(),
+        };
         let indexes: Vec<usize> = (0..out.wf.signals.len())
             .filter(|&index| {
                 out.wf.signals[index].state == SigState::Lazy
@@ -431,7 +405,7 @@ mod tests {
             }
             drop(req_tx);
         });
-        serve_session(Arc::clone(&meta), &mut session, &req_rx, &tx);
+        serve_session(Arc::clone(&meta), &mut *source, &req_rx, &tx);
         producer.join().unwrap();
         drop(tx);
         let mut installed = std::collections::HashSet::new();

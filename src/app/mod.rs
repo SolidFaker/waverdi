@@ -2356,12 +2356,20 @@ endmodule
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        // Eager dumps arrive whole: the Waveform event carries the hierarchy
+        // and its values, exactly as before the adapter layer existed.
         let wf = app.wf.as_ref().expect("waveform loaded");
         assert_eq!(wf.signals.len(), 1);
+        assert_eq!(wf.signals[0].name, "clk");
+        assert_eq!(wf.signals[0].state, crate::waveform::SigState::Ready);
         assert_eq!(app.path, vcd.display().to_string());
         assert!(
             app.load.as_ref().is_some_and(|job| job.finished),
             "loader marked finished after Done"
         );
+        let changes = &app.wf.as_ref().unwrap().signals[0].changes;
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].t, 0);
+        assert_eq!(changes[1].t, 10);
     }
 }

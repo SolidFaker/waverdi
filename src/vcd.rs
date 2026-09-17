@@ -2,7 +2,7 @@ use crate::dump::ParseOut;
 use crate::waveform::{
     Change, ScopeTree, SigKind, SigState, Signal, Ticks, TimeScale, Value, Waveform,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub fn parse_vcd(path: &Path) -> Result<ParseOut, String> {
@@ -173,6 +173,8 @@ struct Parser {
     cur_scope: Vec<String>,
     cur_time: Ticks,
     warnings: Vec<String>,
+    /// Signals that hit the per-signal read cap and only warn once.
+    truncated: HashSet<usize>,
 }
 
 impl Parser {
@@ -190,6 +192,7 @@ impl Parser {
             cur_scope: Vec::new(),
             cur_time: 0,
             warnings: Vec::new(),
+            truncated: HashSet::new(),
         }
     }
 
@@ -296,6 +299,12 @@ impl Parser {
             }
             return;
         };
+        // Once the read cap is hit, further changes are dropped; the
+        // dispatcher decimates the kept prefix afterwards, like the FSDB
+        // reader does. A pathological dump must not exhaust memory here.
+        if self.truncated.contains(&idx) {
+            return;
+        }
         let sig = &mut self.wf.signals[idx];
         let v = match v {
             Value::Bits(mut b) => {
@@ -322,6 +331,17 @@ impl Parser {
             t: self.cur_time,
             v,
         });
+        if sig.changes.len() >= crate::dump::MAX_CHANGES_READ_PER_SIGNAL {
+            let name = sig.name.clone();
+            self.truncated.insert(idx);
+            self.warn(
+                line,
+                format!(
+                    "{name}: value changes truncated at {} while reading",
+                    crate::dump::MAX_CHANGES_READ_PER_SIGNAL
+                ),
+            );
+        }
     }
 
     fn change(&mut self, ln: &[u8], line: usize) {

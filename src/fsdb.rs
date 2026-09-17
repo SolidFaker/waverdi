@@ -5,7 +5,9 @@
 //! used here. `build.rs` only enables this module (`cfg(fsdb_sdk)`) when
 //! `VERDI_HOME` points at an installation shipping `share/FsdbReader`.
 
-use crate::dump::ParseOut;
+use crate::dump::{
+    ParseOut, MAX_CHANGES_PER_SIGNAL, MAX_CHANGES_READ_PER_SIGNAL, MAX_TOTAL_CHANGES,
+};
 use crate::waveform::{Change, ScopeTree, SigKind, SigState, Signal, TimeScale, Value, Waveform};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::Path;
@@ -115,14 +117,6 @@ impl StderrSilencer {
 /// FFR keeps process-global state (active object, message hooks), so all
 /// access is serialized even when parsing from multiple threads.
 static FFR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Value changes kept per signal; longer recordings are decimated evenly.
-pub const MAX_CHANGES_PER_SIGNAL: usize = 2_000_000;
-/// Hard stop while reading one signal (the slice is decimated afterwards).
-const MAX_CHANGES_READ_PER_SIGNAL: usize = 16_000_000;
-/// Total kept value changes across all signals; once reached, the remaining
-/// signals load without values so memory stays bounded.
-pub const MAX_TOTAL_CHANGES: u64 = 32_000_000;
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_fsdb(path: &Path) -> Result<ParseOut, String> {
@@ -453,58 +447,10 @@ fn read_changes(
     }
     unsafe { wav_fsdb_free_handle(vc) };
 
-    if changes.len() > MAX_CHANGES_PER_SIGNAL {
-        let before = changes.len();
-        changes = decimate(changes, MAX_CHANGES_PER_SIGNAL);
-        warnings.push(format!(
-            "{}: {before} value changes decimated to {} for display",
-            var.name,
-            changes.len()
-        ));
-    }
+    let mut changes =
+        crate::dump::limit_changes(&var.name, changes, MAX_CHANGES_PER_SIGNAL, budget, warnings);
     changes.shrink_to_fit();
-    *budget = budget.saturating_sub(changes.len() as u64);
-    if *budget == 0 {
-        warnings.push(format!(
-            "value changes are limited to {MAX_TOTAL_CHANGES} in total; remaining signals are loaded without values"
-        ));
-    }
     changes
-}
-
-/// Keep at most `cap` changes, preserving the first and last and any
-/// isolated pulse (a change whose neighbours have the same value), so narrow
-/// glitches survive even in heavily decimated signals.
-fn decimate(changes: Vec<Change>, cap: usize) -> Vec<Change> {
-    let n = changes.len();
-    let step = n.div_ceil(cap);
-    if step <= 1 {
-        return changes;
-    }
-    let mut keep = vec![false; n];
-    let mut index = 0usize;
-    while index < n {
-        keep[index] = true;
-        index += step;
-    }
-    keep[n - 1] = true;
-    for index in 1..n.saturating_sub(1) {
-        if changes[index].v != changes[index - 1].v
-            && changes[index].v != changes[index + 1].v
-            && changes[index - 1].v == changes[index + 1].v
-        {
-            keep[index - 1] = true;
-            keep[index] = true;
-            keep[index + 1] = true;
-        }
-    }
-    let mut kept = Vec::with_capacity(cap + cap / 4 + 1);
-    for (index, change) in changes.into_iter().enumerate() {
-        if keep[index] {
-            kept.push(change);
-        }
-    }
-    kept
 }
 
 fn decode_value(bytes_per_bit: u32, bits: usize, bytes: &[u8]) -> Option<Value> {
@@ -722,42 +668,6 @@ mod tests {
         let home = std::env::var_os("VERDI_HOME")?;
         let path = PathBuf::from(home).join("demo/dumper/modelsim_link_third_party/sample.fsdb");
         path.is_file().then_some(path)
-    }
-
-    #[test]
-    #[cfg(fsdb_sdk)]
-    fn decimates_long_change_lists() {
-        let changes: Vec<Change> = (0..1000)
-            .map(|i| Change {
-                t: i,
-                v: Value::Real(i as f64),
-            })
-            .collect();
-        let kept = decimate(changes, 10);
-        assert_eq!(kept.len(), 11);
-        assert_eq!(kept.first().unwrap().t, 0);
-        assert_eq!(kept.last().unwrap().t, 999);
-    }
-
-    #[test]
-    #[cfg(fsdb_sdk)]
-    fn decimation_keeps_isolated_pulses() {
-        let mut changes: Vec<Change> = (0..10_000)
-            .map(|i| Change {
-                t: i,
-                v: Value::Real(0.0),
-            })
-            .collect();
-        changes[5_000] = Change {
-            t: 5_000,
-            v: Value::Real(1.0),
-        };
-        let kept = decimate(changes, 100);
-        assert!(
-            kept.iter()
-                .any(|change| change.t == 5_000 && change.v.as_real() == Some(1.0)),
-            "pulse was decimated away"
-        );
     }
 
     #[test]
