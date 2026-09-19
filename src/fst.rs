@@ -3,47 +3,37 @@ use crate::waveform::{Change, ScopeTree, SigKind, SigState, Signal, TimeScale, V
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use wellen::simple::Waveform as WellenWaveform;
-use wellen::{Hierarchy, ItemRef, SignalRef, SignalValueRef, TimescaleUnit};
+use wellen::{Hierarchy, ItemRef, SignalRef, SignalSource, SignalValueRef, TimescaleUnit};
 
 /// Load an FST dump through the `wellen` library.
 pub fn parse_fst(path: &Path) -> Result<ParseOut, String> {
     let mut source =
         wellen::simple::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
 
-    let refs: Vec<SignalRef> = {
-        let hierarchy = source.hierarchy();
-        let mut seen = HashSet::new();
-        let mut refs = Vec::new();
-        for var_ref in hierarchy.all_vars() {
-            let signal_ref = hierarchy[var_ref].signal_ref();
-            if seen.insert(signal_ref) {
-                refs.push(signal_ref);
-            }
-        }
-        refs
-    };
+    let refs = unique_refs(source.hierarchy());
     source.load_signals(&refs);
 
     let mut warnings = Vec::new();
     let ts = convert_timescale(source.hierarchy().timescale(), &mut warnings);
 
-    let hierarchy = source.hierarchy();
-    let mut signals = Vec::new();
-    let mut tree = ScopeTree::new();
+    let (mut tree, meta) = collect_meta(source.hierarchy());
+    let mut signals = Vec::with_capacity(meta.len());
     let mut cache: HashMap<SignalRef, Vec<Change>> = HashMap::new();
-    let mut scope = Vec::new();
-    for item in hierarchy.items() {
-        visit_item(
-            &source,
-            hierarchy,
-            item,
-            tree.root,
-            &mut tree,
-            &mut signals,
-            &mut scope,
-            &mut cache,
-        );
+    for item in meta {
+        let changes = if let Some(cached) = cache.get(&item.signal_ref) {
+            cached.clone()
+        } else {
+            let changes = source
+                .get_signal(item.signal_ref)
+                .map(|signal| materialize(signal, source.time_table()))
+                .unwrap_or_default();
+            cache.insert(item.signal_ref, changes.clone());
+            changes
+        };
+        let parent = item.parent;
+        let index = signals.len();
+        signals.push(item.into_signal(changes, SigState::Ready));
+        tree.nodes[parent].signals.push(index);
     }
 
     let mut start = u64::MAX;
@@ -75,16 +65,151 @@ pub fn parse_fst(path: &Path) -> Result<ParseOut, String> {
     Ok(ParseOut { wf, warnings })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn visit_item(
-    source: &WellenWaveform,
+/// Hierarchy-only view of an FST, produced without decoding a single value.
+pub(crate) struct FstHierarchy {
+    pub out: ParseOut,
+    /// wellen reference per `out.wf.signals` entry, in the same order.
+    pub refs: Vec<SignalRef>,
+    pub values: FstValues,
+}
+
+/// The value half of an FST. wellen filters signals by streaming the whole
+/// body, so the lazy source decodes every signal in one pass and hands later
+/// batches out of its cache instead of re-reading the file.
+pub(crate) struct FstValues {
+    hierarchy: Hierarchy,
+    source: SignalSource,
+    time_table: Vec<wellen::Time>,
+}
+
+impl FstValues {
+    pub(crate) fn time_table(&self) -> &[wellen::Time] {
+        &self.time_table
+    }
+
+    /// Decode the given signals; the result is keyed by wellen reference.
+    pub(crate) fn load(&mut self, refs: &[SignalRef]) -> HashMap<SignalRef, wellen::Signal> {
+        self.source
+            .load_signals(refs, &self.hierarchy, false)
+            .into_iter()
+            .map(|signal| (signal.signal_ref(), signal))
+            .collect()
+    }
+}
+
+/// Read only the hierarchy (header and time table) of an FST, leaving every
+/// signal empty and `Lazy` for the adapter to fill on request.
+pub(crate) fn parse_fst_hierarchy(path: &Path) -> Result<FstHierarchy, String> {
+    let header = wellen::viewers::read_header_from_file(path, &wellen::LoadOptions::default())
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let wellen::viewers::HeaderResult {
+        hierarchy, body, ..
+    } = header;
+    let wellen::viewers::BodyResult { source, time_table } =
+        wellen::viewers::read_body(body, &hierarchy, None)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+
+    let mut warnings = Vec::new();
+    let ts = convert_timescale(hierarchy.timescale(), &mut warnings);
+    let (mut tree, meta) = collect_meta(&hierarchy);
+    let refs: Vec<SignalRef> = meta.iter().map(|item| item.signal_ref).collect();
+    let mut signals = Vec::with_capacity(meta.len());
+    for item in meta {
+        let parent = item.parent;
+        let index = signals.len();
+        signals.push(item.into_signal(Vec::new(), SigState::Lazy));
+        tree.nodes[parent].signals.push(index);
+    }
+
+    let wf = Waveform {
+        ts,
+        // The time table is complete in the header, so the lazy hierarchy
+        // already shows the full range like the eager parse does.
+        start: time_table.first().copied().unwrap_or(0),
+        end: time_table.last().copied().unwrap_or(0),
+        signals,
+        tree,
+        radix: HashMap::new(),
+        value_times_cache: Vec::new(),
+    };
+    Ok(FstHierarchy {
+        out: ParseOut { wf, warnings },
+        refs,
+        values: FstValues {
+            hierarchy,
+            source,
+            time_table,
+        },
+    })
+}
+
+/// One variable of an FST hierarchy in traversal order. The eager parse and
+/// the lazy source share this walk, so both agree on names, widths and scopes.
+pub(crate) struct VarMeta {
+    pub signal_ref: SignalRef,
+    name: String,
+    var_type: String,
+    bits: u32,
+    kind: SigKind,
+    /// Scope tree node this variable is listed under.
+    parent: usize,
+    scope: Vec<String>,
+}
+
+impl VarMeta {
+    fn into_signal(self, changes: Vec<Change>, state: SigState) -> Signal {
+        let (min, max) = if self.kind == SigKind::Real {
+            real_range(&changes)
+        } else {
+            (f64::INFINITY, f64::NEG_INFINITY)
+        };
+        Signal {
+            name: self.name,
+            bits: self.bits,
+            var_type: self.var_type,
+            dir: String::new(),
+            scope: self.scope,
+            kind: self.kind,
+            changes: Arc::new(changes),
+            min,
+            max,
+            parent: None,
+            members: Vec::new(),
+            state,
+        }
+    }
+}
+
+/// Distinct wellen references of a hierarchy; aliases share one reference.
+fn unique_refs(hierarchy: &Hierarchy) -> Vec<SignalRef> {
+    let mut seen = HashSet::new();
+    let mut refs = Vec::new();
+    for var_ref in hierarchy.all_vars() {
+        let signal_ref = hierarchy[var_ref].signal_ref();
+        if seen.insert(signal_ref) {
+            refs.push(signal_ref);
+        }
+    }
+    refs
+}
+
+fn collect_meta(hierarchy: &Hierarchy) -> (ScopeTree, Vec<VarMeta>) {
+    let mut tree = ScopeTree::new();
+    let mut meta = Vec::new();
+    let mut scope = Vec::new();
+    for item in hierarchy.items() {
+        collect_item(hierarchy, item, tree.root, &mut tree, &mut meta, &mut scope);
+    }
+    (tree, meta)
+}
+
+fn collect_item(
     hierarchy: &Hierarchy,
     item: ItemRef,
     parent: usize,
     tree: &mut ScopeTree,
-    signals: &mut Vec<Signal>,
+    meta: &mut Vec<VarMeta>,
     scope: &mut Vec<String>,
-    cache: &mut HashMap<SignalRef, Vec<Change>>,
 ) {
     match item {
         ItemRef::Scope(scope_ref) => {
@@ -92,20 +217,12 @@ fn visit_item(
             let id = tree.add_scope(parent, name.clone(), String::new());
             scope.push(name);
             for child in hierarchy[scope_ref].items(hierarchy) {
-                visit_item(source, hierarchy, child, id, tree, signals, scope, cache);
+                collect_item(hierarchy, child, id, tree, meta, scope);
             }
             scope.pop();
         }
         ItemRef::Var(var_ref) => {
             let var = &hierarchy[var_ref];
-            let signal_ref = var.signal_ref();
-            let changes = if let Some(cached) = cache.get(&signal_ref) {
-                cached.clone()
-            } else {
-                let changes = materialize(source, signal_ref);
-                cache.insert(signal_ref, changes.clone());
-                changes
-            };
             let kind = if var.is_real(hierarchy) {
                 SigKind::Real
             } else if var.is_string(hierarchy) {
@@ -118,37 +235,21 @@ fn visit_item(
                 SigKind::Str => 0,
                 SigKind::Bits => 1,
             });
-            let (min, max) = if kind == SigKind::Real {
-                real_range(&changes)
-            } else {
-                (f64::INFINITY, f64::NEG_INFINITY)
-            };
-            let signal = Signal {
+            meta.push(VarMeta {
+                signal_ref: var.signal_ref(),
                 name: var.name(hierarchy).to_string(),
-                bits,
                 var_type: format!("{:?}", var.var_type()).to_lowercase(),
-                dir: String::new(),
-                scope: scope.clone(),
+                bits,
                 kind,
-                changes: Arc::new(changes),
-                min,
-                max,
-                parent: None,
-                members: Vec::new(),
-                state: SigState::Ready,
-            };
-            let index = signals.len();
-            signals.push(signal);
-            tree.nodes[parent].signals.push(index);
+                parent,
+                scope: scope.clone(),
+            });
         }
     }
 }
 
-fn materialize(source: &WellenWaveform, signal_ref: SignalRef) -> Vec<Change> {
-    let Some(signal) = source.get_signal(signal_ref) else {
-        return Vec::new();
-    };
-    let time_table = source.time_table();
+/// Decode a loaded wellen signal using the file's time table.
+pub(crate) fn materialize(signal: &wellen::Signal, time_table: &[wellen::Time]) -> Vec<Change> {
     let mut changes: Vec<Change> = Vec::new();
     for (time_idx, value) in signal.iter_changes() {
         let Some(value) = convert_value(value) else {

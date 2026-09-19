@@ -983,6 +983,81 @@ mod tests {
         assert!(!wf.signals.iter().any(|signal| signal.name == "count"));
     }
 
+    /// The Signal List (`display_value`) and the wave pane (`value_at`) read
+    /// the same values for plain and synthesized signals when the cursor sits
+    /// *between* two changes: the last change before the cursor must win, not
+    /// `x`. Guards the lazy-aggregate rewrite, which moved the value column
+    /// and bus sampling onto the shared helpers.
+    #[test]
+    fn display_matches_value_between_changes_for_plain_and_synthesized() {
+        let mut wf = waveform(vec![
+            Signal {
+                changes: Arc::new(vec![
+                    Change {
+                        t: 0,
+                        v: Value::compact(vec![0]),
+                    },
+                    Change {
+                        t: 10,
+                        v: Value::compact(vec![1]),
+                    },
+                ]),
+                ..leaf("clk", &[0], 0)
+            },
+            Signal {
+                changes: Arc::new(vec![
+                    Change {
+                        t: 0,
+                        v: Value::compact(vec![0, 0, 0, 1, 0, 0, 0, 0]),
+                    },
+                    Change {
+                        t: 20,
+                        v: Value::compact(vec![0, 1, 0, 1, 0, 0, 0, 0]),
+                    },
+                ]),
+                ..leaf("bus[7:0]", &[0; 8], 0)
+            },
+            leaf("mem[0][7:0]", &[0, 0, 0, 0, 0, 0, 0, 1], 0),
+            Signal {
+                changes: Arc::new(vec![
+                    Change {
+                        t: 0,
+                        v: Value::compact(vec![0, 0, 0, 0, 0, 0, 1, 1]),
+                    },
+                    Change {
+                        t: 20,
+                        v: Value::compact(vec![0, 0, 0, 0, 0, 0, 0, 0]),
+                    },
+                ]),
+                ..leaf("mem[1][7:0]", &[0, 0, 0, 0, 0, 0, 1, 1], 0)
+            },
+        ]);
+        wf.build_arrays();
+        let mem = wf.signals.iter().position(|s| s.name == "mem").unwrap();
+        let cursor = 15;
+        // Plain scalar: the change at t=10 still applies at t=15.
+        assert_eq!(wf.value_at(0, cursor), Some(Value::Small(1, 1)));
+        assert_eq!(wf.display_value(0, cursor, Radix::Hex), "h1");
+        // Plain bus: the change at t=0 still applies before the one at t=20.
+        let bus_value = wf.value_at(1, cursor).expect("bus value at cursor");
+        assert_eq!(bus_value, Value::compact(vec![0, 0, 0, 1, 0, 0, 0, 0]));
+        assert_eq!(
+            wf.display_value(1, cursor, Radix::Hex),
+            fmt_value(&bus_value, Radix::Hex)
+        );
+        // Synthesized array: the members are joined at the cursor, and the
+        // merged transition times include the later member's change.
+        let text = match wf.value_at(mem, cursor) {
+            Some(Value::Str(text)) => text,
+            other => panic!("expected brace value, got {other:?}"),
+        };
+        assert_eq!(text, "{80, c0}");
+        assert_eq!(wf.display_value(mem, cursor, Radix::Hex), "{80, c0}");
+        assert_eq!(wf.value_times(mem), vec![0, 20]);
+        // A later change moves both the joined value and the wave segment.
+        assert_eq!(wf.display_value(mem, 20, Radix::Hex), "{80, 0}");
+    }
+
     #[test]
     fn brace_values_track_changes() {
         let mut wf = waveform(vec![

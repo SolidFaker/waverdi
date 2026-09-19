@@ -665,4 +665,64 @@ mod tests {
             );
         }
     }
+
+    /// Requesting an aggregate must load and deliver every leaf of its
+    /// subtree, whatever the request order: the leaves carry the values, the
+    /// synthesized nodes only join them.
+    #[test]
+    fn requested_aggregates_deliver_every_leaf() {
+        let mut signals = vec![lazy_signal("a"), lazy_signal("b"), lazy_signal("c")];
+        let mut array = lazy_signal("arr");
+        array.var_type = "array".to_string();
+        array.members = vec![0, 1];
+        signals.push(array);
+        let mut aggregate = lazy_signal("agg");
+        aggregate.var_type = "aggregate".to_string();
+        aggregate.members = vec![2, 3];
+        signals.push(aggregate);
+        signals[0].parent = Some(3);
+        signals[1].parent = Some(3);
+        let wf = Waveform {
+            ts: TimeScale::default(),
+            start: 0,
+            end: 10,
+            signals,
+            tree: ScopeTree::new(),
+            radix: std::collections::HashMap::new(),
+            value_times_cache: Vec::new(),
+        };
+        let values = |t: u64, v: u8| {
+            vec![Change {
+                t,
+                v: Value::compact(vec![v]),
+            }]
+        };
+        let meta = Arc::new(Mutex::new(wf));
+        let (req_tx, req_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        for index in [4usize, 0, 2, 3, 1] {
+            req_tx.send(LoadRequest::Signal(index)).expect("queue");
+        }
+        drop(req_tx);
+        let mut source = FakeSource {
+            values: vec![values(0, 1), values(1, 0), values(2, 1)],
+        };
+        serve_session(Arc::clone(&meta), &mut source, &req_rx, &tx);
+        drop(tx);
+        let mut installed = std::collections::HashSet::new();
+        for event in rx {
+            if let LoadEvent::Changes(updates, _) = event {
+                installed.extend(updates.into_iter().map(|(index, _)| index));
+            }
+        }
+        for index in 0..3 {
+            assert!(installed.contains(&index), "leaf {index} was not delivered");
+            let wf = meta.lock().unwrap();
+            assert_eq!(wf.signals[index].state, SigState::Ready);
+            assert!(!wf.signals[index].changes.is_empty());
+        }
+        for index in 3..5 {
+            assert_eq!(meta.lock().unwrap().signals[index].state, SigState::Ready);
+        }
+    }
 }

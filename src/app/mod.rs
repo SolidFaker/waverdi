@@ -2387,16 +2387,30 @@ endmodule
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        // Eager dumps arrive whole: the Waveform event carries the hierarchy
-        // and its values, exactly as before the adapter layer existed.
+        // VCD loads lazily now: the Waveform event carries the hierarchy and
+        // its values arrive only when the signal is requested.
         let wf = app.wf.as_ref().expect("waveform loaded");
         assert_eq!(wf.signals.len(), 1);
         assert_eq!(wf.signals[0].name, "clk");
-        assert_eq!(wf.signals[0].state, crate::waveform::SigState::Ready);
+        assert_eq!(wf.signals[0].state, crate::waveform::SigState::Lazy);
+        assert!(wf.signals[0].changes.is_empty());
         assert_eq!(app.path, vcd.display().to_string());
         // The backend described itself before the hierarchy arrived and the
         // description survived the waveform install.
-        assert!(!app.backend_caps.lazy, "eager VCD backend must be reported");
+        assert!(app.backend_caps.lazy, "lazy VCD backend must be reported");
+
+        app.request_signal(0);
+        for _ in 0..500 {
+            app.poll_load();
+            let ready = app
+                .wf
+                .as_ref()
+                .is_some_and(|wf| wf.signals[0].state == crate::waveform::SigState::Ready);
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(
             app.load.as_ref().is_some_and(|job| job.finished),
             "loader marked finished after Done"

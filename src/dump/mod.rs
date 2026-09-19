@@ -11,9 +11,9 @@
 //! 1. extend [`Format`] and [`detect`] with its extension;
 //! 2. write the parser (or converter shim) that produces a [`ParseOut`];
 //! 3. add a [`source::DumpSource`] implementation that serves values per
-//!    signal - lazily when the format allows random reads, otherwise by
-//!    parsing up front and handing the values out on request (see
-//!    `EagerSource`); apply the shared limits via [`limit_changes`];
+//!    signal - by random access, by one decode pass that fills a cache, or by
+//!    re-streaming the file - and apply the shared limits via
+//!    [`limit_changes`];
 //! 4. dispatch to it from [`source::open_source`];
 //! 5. test through `cargo test` and a `dump::source` unit test.
 
@@ -67,8 +67,11 @@ pub enum Format {
 pub(crate) const MAX_CHANGES_PER_SIGNAL: usize = 2_000_000;
 /// Hard stop while reading one signal (the slice is decimated afterwards).
 pub(crate) const MAX_CHANGES_READ_PER_SIGNAL: usize = 16_000_000;
-/// Total kept value changes across all signals; once reached, the remaining
-/// signals load without values so memory stays bounded.
+/// Global charge for a full-file parse: the eager FSDB reader stops once it
+/// is exhausted and leaves the remaining signals without values, so parsing a
+/// single huge dump cannot allocate without bound. Lazy reads never drop a
+/// requested signal's values - each one is already bounded per signal and the
+/// user chose it.
 pub(crate) const MAX_TOTAL_CHANGES: u64 = 32_000_000;
 
 /// Cap one signal's change list, then charge the kept changes to the global

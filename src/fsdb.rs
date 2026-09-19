@@ -144,7 +144,7 @@ pub fn parse_fsdb_with(path: &Path, progress: crate::dump::Progress) -> Result<P
     let result = assemble(
         &mut input,
         &mut |handle, var, warnings, budget| {
-            let (raw, mut raw_warnings) = collect_raw_changes(handle, var, budget);
+            let (raw, mut raw_warnings) = collect_raw_changes(handle, var, budget, true);
             warnings.append(&mut raw_warnings);
             decode_raw(raw, &var.name, warnings)
         },
@@ -280,7 +280,7 @@ impl FsdbSession {
             return results;
         }
         for &(slot, var) in &vars {
-            results[slot] = collect_raw_changes(self.handle, var, &mut self.budget);
+            results[slot] = collect_raw_changes(self.handle, var, &mut self.budget, false);
         }
         results
     }
@@ -481,10 +481,18 @@ pub(crate) struct RawChanges {
 /// since dedupe in [`decode_raw`] can only shrink it - so the memory bound
 /// is decided while the FFR lock is still held, before the value math moves
 /// to the pool.
+///
+/// `stop_when_spent` keeps the shared cap for a whole-file eager parse, where
+/// nobody chose which signals to read. Lazily requested signals pass `false`:
+/// the user asked for them, so dropping their values (which would show as `x`
+/// and draw flat rows, indistinguishable from unknown data) is never right.
+/// Their memory is already bounded per signal by [`MAX_CHANGES_PER_SIGNAL`]
+/// and [`MAX_CHANGES_READ_PER_SIGNAL`].
 fn collect_raw_changes(
     handle: *mut c_void,
     var: &VarMeta,
     budget: &mut u64,
+    stop_when_spent: bool,
 ) -> (RawChanges, Vec<String>) {
     let mut warnings = Vec::new();
     let mut raw = RawChanges::default();
@@ -492,7 +500,7 @@ fn collect_raw_changes(
         warnings.push(format!("{}: memory signals are not displayed", var.name));
         return (raw, warnings);
     }
-    if *budget == 0 {
+    if stop_when_spent && *budget == 0 {
         raw.no_budget = true;
         return (raw, warnings);
     }
@@ -550,11 +558,13 @@ fn collect_raw_changes(
     }
     unsafe { wav_fsdb_free_handle(vc) };
 
-    *budget = budget.saturating_sub(raw.times.len() as u64);
-    if *budget == 0 {
-        warnings.push(format!(
-            "value changes are limited to {MAX_TOTAL_CHANGES} in total; remaining signals are loaded without values"
-        ));
+    if stop_when_spent {
+        *budget = budget.saturating_sub(raw.times.len() as u64);
+        if *budget == 0 {
+            warnings.push(format!(
+                "value changes are limited to {MAX_TOTAL_CHANGES} in total; remaining signals are loaded without values"
+            ));
+        }
     }
     (raw, warnings)
 }
