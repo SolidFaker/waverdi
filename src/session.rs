@@ -246,6 +246,22 @@ fn pool_size() -> usize {
         .unwrap_or(2)
 }
 
+/// Requests served in one read pass. A UI adding a whole hierarchy queues
+/// thousands of requests at once; serving them as a single batch would hold
+/// every leaf's raw bytes and decoded values before the first signal reaches
+/// the UI (observed as GBs of RSS with nothing installed). The rest of a
+/// burst stays queued for the next pass: passes are slower, but the in-flight
+/// memory stays proportional to one bounded pass and values still arrive
+/// incrementally. This is a scheduling bound, never a value budget - the lazy
+/// reader must not drop requested values (they would render as `x`).
+const MAX_SIGNALS_PER_PASS: usize = 64;
+
+/// Completed read passes waiting for the compute pool. The reader can fill a
+/// pass faster than the pool finishes the aggregate math of the previous one,
+/// so the queue is bounded to keep a burst from accumulating raw value
+/// storage on this thread.
+const INSTALL_QUEUE: usize = 2;
+
 /// Decode a batch of leaves on the reader thread, for sources without a raw
 /// value path. FSDB skips this: its bytes go to the pool undecoded.
 fn decode_batch(
@@ -266,14 +282,16 @@ fn decode_batch(
 /// threads (two simultaneous readers deadlock inside the library) - so the
 /// reads of one batch stay back to back while the compute pool installs the
 /// previous batch, clones the values for the UI and completes the aggregate
-/// math in parallel.
+/// math in parallel. Each outer iteration serves at most
+/// [`MAX_SIGNALS_PER_PASS`] requests so a large add cannot pin the whole
+/// hierarchy's values before any of them is installed.
 fn serve_session(
     meta: Arc<std::sync::Mutex<Waveform>>,
     session: &mut dyn crate::dump::source::DumpSource,
     req_rx: &Receiver<LoadRequest>,
     tx: &Sender<LoadEvent>,
 ) {
-    let (task_tx, task_rx) = mpsc::channel::<ComputeTask>();
+    let (task_tx, task_rx) = mpsc::sync_channel::<ComputeTask>(INSTALL_QUEUE);
     let task_rx = Arc::new(std::sync::Mutex::new(task_rx));
     // Signals the UI asked for. Checked by the pool at install time, so a
     // request that arrives while its read is already in flight is honoured.
@@ -371,13 +389,20 @@ fn serve_session(
             LoadRequest::Signal(first) => {
                 // Adding a whole level queues many requests at once: drain
                 // them into one batch so the reads stay back to back and the
-                // UI gets a single update per batch.
+                // UI gets a single update per batch. The batch is capped, so
+                // the rest of the burst is served by the following passes
+                // instead of being materialized all at once.
                 let mut batch = vec![first];
                 let mut rebuild = None;
                 let mut shutdown = false;
                 loop {
                     match req_rx.try_recv() {
-                        Ok(LoadRequest::Signal(index)) => batch.push(index),
+                        Ok(LoadRequest::Signal(index)) => {
+                            batch.push(index);
+                            if batch.len() >= MAX_SIGNALS_PER_PASS {
+                                break;
+                            }
+                        }
                         Ok(LoadRequest::RebuildArrays(radix)) => rebuild = Some(radix),
                         Ok(LoadRequest::Shutdown) => {
                             shutdown = true;
@@ -724,5 +749,93 @@ mod tests {
         for index in 3..5 {
             assert_eq!(meta.lock().unwrap().signals[index].state, SigState::Ready);
         }
+    }
+
+    /// A burst larger than one pass is served in bounded passes: every request
+    /// still gets its values, but no read materializes more than
+    /// [`MAX_SIGNALS_PER_PASS`] signals at once, so a UI adding thousands of
+    /// signals cannot pin the whole hierarchy's values before the first
+    /// signal is installed.
+    #[test]
+    fn burst_requests_are_served_in_bounded_passes() {
+        #[derive(Default)]
+        struct BatchSource {
+            vars: usize,
+            reads: Arc<Mutex<Vec<usize>>>,
+        }
+
+        impl crate::dump::source::DumpSource for BatchSource {
+            fn var_count(&self) -> usize {
+                self.vars
+            }
+
+            fn take_hierarchy(&mut self) -> Waveform {
+                unreachable!("the session installs into the waveform it was given")
+            }
+
+            fn read_signal(&mut self, _index: usize) -> (Vec<Change>, Vec<String>) {
+                (Vec::new(), Vec::new())
+            }
+
+            fn read_signals(&mut self, indexes: &[usize]) -> Vec<(Vec<Change>, Vec<String>)> {
+                self.reads
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .push(indexes.len());
+                indexes.iter().map(|_| (Vec::new(), Vec::new())).collect()
+            }
+        }
+
+        let count = MAX_SIGNALS_PER_PASS * 3;
+        let signals: Vec<Signal> = (0..count)
+            .map(|index| lazy_signal(&format!("s{index}")))
+            .collect();
+        let wf = Waveform {
+            ts: TimeScale::default(),
+            start: 0,
+            end: 10,
+            signals,
+            tree: ScopeTree::new(),
+            radix: std::collections::HashMap::new(),
+            value_times_cache: Vec::new(),
+        };
+        let meta = Arc::new(Mutex::new(wf));
+        let (req_tx, req_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        for index in 0..count {
+            req_tx.send(LoadRequest::Signal(index)).expect("queue");
+        }
+        drop(req_tx);
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let mut source = BatchSource {
+            vars: count,
+            reads: Arc::clone(&reads),
+        };
+        serve_session(Arc::clone(&meta), &mut source, &req_rx, &tx);
+        drop(tx);
+
+        let mut installed = std::collections::HashSet::new();
+        for event in rx {
+            if let LoadEvent::Changes(updates, _) = event {
+                installed.extend(updates.into_iter().map(|(index, _)| index));
+            }
+        }
+        assert_eq!(
+            installed.len(),
+            count,
+            "every requested signal is delivered"
+        );
+        for index in 0..count {
+            assert_eq!(meta.lock().unwrap().signals[index].state, SigState::Ready);
+        }
+        let reads = reads.lock().unwrap_or_else(|err| err.into_inner()).clone();
+        assert!(
+            reads.len() >= 3,
+            "a burst must be split into several passes: {reads:?}"
+        );
+        assert!(
+            reads.iter().all(|&size| size <= MAX_SIGNALS_PER_PASS),
+            "a pass read too many signals at once: {reads:?}"
+        );
     }
 }
