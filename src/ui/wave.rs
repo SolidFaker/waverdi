@@ -380,6 +380,43 @@ fn run_cell(summary: u8) -> WaveCell {
     }
 }
 
+/// Index of the first change that does not precede `col_end` (i.e. its time is
+/// `>= col_end`), searched from `from`.
+///
+/// A plain walk would visit every change inside the visible window, which is
+/// O(changes in view) per row and explodes at coarse zoom. Galloping from the
+/// current index costs O(1) for a sparse column and O(log changes in the
+/// column) for a dense one, exactly like the old per-column binary search but
+/// without rescanning the whole list. The result is identical to the walk
+/// (`partition_point` semantics on the time-ordered list).
+fn first_not_before(
+    len: usize,
+    from: usize,
+    col_end: f64,
+    time_at: impl Fn(usize) -> f64,
+) -> usize {
+    if from >= len || time_at(from) >= col_end {
+        return from;
+    }
+    let mut lo = from;
+    let mut span = 1usize;
+    let mut hi = (lo + span).min(len);
+    while hi < len && time_at(hi) < col_end {
+        lo = hi;
+        span = span.saturating_mul(2);
+        hi = lo.saturating_add(span).min(len);
+    }
+    while lo + 1 < hi {
+        let mid = lo + (hi - lo) / 2;
+        if time_at(mid) < col_end {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    hi
+}
+
 /// Sample a single-bit row column by column. The change index only ever
 /// advances with the columns and the value summary is computed once per run
 /// of columns holding the same value, so dense change lists are never
@@ -396,9 +433,7 @@ fn sample_bit_row(changes: &[Change], t0: f64, scale: f64, cols: usize) -> Vec<W
     for col in 0..cols {
         let col_end = t0 + (col as f64 + 0.5) * scale;
         let before = i;
-        while i < changes.len() && (changes[i].t as f64) < col_end {
-            i += 1;
-        }
+        i = first_not_before(changes.len(), i, col_end, |k| changes[k].t as f64);
         let transitions = i - before;
         if transitions > 0 {
             value = Some(&changes[i - 1].v);
@@ -433,8 +468,8 @@ fn sample_bit_row(changes: &[Change], t0: f64, scale: f64, cols: usize) -> Vec<W
 }
 
 /// Sample a bus row: change markers use the same rounding as the cursor
-/// column, and the time list is walked once instead of binary-searching it
-/// per column.
+/// column, and the time list is searched from the last drawn column instead
+/// of binary-searching it per column.
 fn sample_bus_row(times: &BusTimes<'_>, t0: f64, scale: f64, cols: usize) -> Vec<WaveCell> {
     let cut = t0 - 0.5 * scale;
     let mut i = time_partition_point(times, |time| (time as f64) < cut);
@@ -442,9 +477,7 @@ fn sample_bus_row(times: &BusTimes<'_>, t0: f64, scale: f64, cols: usize) -> Vec
     for col in 0..cols {
         let col_end = t0 + (col as f64 + 0.5) * scale;
         let before = i;
-        while i < times.len() && (times.time_at(i) as f64) < col_end {
-            i += 1;
-        }
+        i = first_not_before(times.len(), i, col_end, |k| times.time_at(k) as f64);
         let glyph = if i > before { BUS_CROSS } else { BUS_LINE };
         cells.push(WaveCell {
             glyph,
@@ -480,9 +513,7 @@ fn sample_analog_row(
     for col in 0..cols {
         let col_end = t0 + (col as f64 + 0.5) * scale;
         let before = i;
-        while i < changes.len() && (changes[i].t as f64) < col_end {
-            i += 1;
-        }
+        i = first_not_before(changes.len(), i, col_end, |k| changes[k].t as f64);
         if i > before {
             let count = i - before;
             let stride = (count / 64).max(1);
@@ -1005,6 +1036,62 @@ mod tests {
                 sample_bus_row(&BusTimes::Merged(&times), t0, scale, cols),
                 reference_bus_row(&BusTimes::Merged(&times), t0, scale, cols),
                 "merged times differ at t0={t0} scale={scale}"
+            );
+        }
+    }
+
+    /// Deterministic LCG for the dense-row equivalence test.
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state
+    }
+
+    /// The galloping search must return exactly what the old per-column
+    /// `partition_point` did, also when a column spans thousands of changes,
+    /// holds duplicate ticks or the view runs past the last change.
+    #[test]
+    fn galloping_sampling_matches_the_per_column_reference_on_dense_rows() {
+        let mut state = 0x1234_5678_9ABC_DEF0u64;
+        let mut changes: Vec<Change> = Vec::with_capacity(60_000);
+        let mut t: u64 = 0;
+        for k in 0..60_000u64 {
+            if k % 11 == 0 {
+                // Burst: several changes at the same tick.
+            } else if k % 5 == 0 {
+                t += 1;
+            } else {
+                t += lcg(&mut state) % 7 + 1;
+            }
+            changes.push(Change {
+                t,
+                v: wide((k % 4) as u8),
+            });
+        }
+        let times: Vec<waveform::Ticks> = changes.iter().map(|c| c.t).collect();
+        for &(t0, scale, cols) in &[
+            (0.0, 500.0, 120),          // dense: hundreds of changes per column
+            (0.0, 1.0, 60),             // sparse
+            (100.0, 0.25, 80),          // zoomed in
+            (500.0, 5.5, 47),           // mixed
+            (-20.0, 3.0, 33),           // starts before the first change
+            (t as f64 + 10.0, 0.5, 40), // past the last change
+        ] {
+            assert_eq!(
+                sample_bit_row(&changes, t0, scale, cols),
+                reference_bit_row(&changes, t0, scale, cols),
+                "bit row differs at t0={t0} scale={scale} cols={cols}"
+            );
+            assert_eq!(
+                sample_bus_row(&BusTimes::Changes(&changes), t0, scale, cols),
+                reference_bus_row(&BusTimes::Changes(&changes), t0, scale, cols),
+                "bus row differs at t0={t0} scale={scale} cols={cols}"
+            );
+            assert_eq!(
+                sample_bus_row(&BusTimes::Merged(&times), t0, scale, cols),
+                reference_bus_row(&BusTimes::Merged(&times), t0, scale, cols),
+                "merged row differs at t0={t0} scale={scale} cols={cols}"
             );
         }
     }
