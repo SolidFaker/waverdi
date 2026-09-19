@@ -1,4 +1,6 @@
 use super::{App, ListRow};
+use crate::ui::layout::Layout;
+use crate::ui::wave::{WaveCell, WaveKey};
 use crate::waveform::{SigKind, Ticks, Value, Waveform};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -156,6 +158,30 @@ impl App {
         row.labels.insert(time, (text.clone(), width));
         (text, width)
     }
+
+    /// Sampled columns of one waveform row. `compute` runs only when the row
+    /// was not sampled for the current zoom window, pane width, value/radix
+    /// versions and analog range; overlay-only redraws hit the cache.
+    pub(crate) fn wave_row(
+        &self,
+        index: usize,
+        l: &Layout,
+        range: (f64, f64),
+        compute: impl FnOnce() -> Vec<WaveCell>,
+    ) -> Rc<[WaveCell]> {
+        let key = WaveKey::new(
+            self.t0,
+            self.scale,
+            l.cols,
+            l.rows.width,
+            self.waveform_version,
+            self.radix_version,
+            range,
+        );
+        self.wave_rows
+            .borrow_mut()
+            .get_or_compute(index, key, compute)
+    }
 }
 
 /// Time of the next/previous edge of a signal, optionally filtered to one
@@ -252,6 +278,39 @@ mod tests {
         let zoomed = app.wave_label(root, 0, compute);
         assert!(!Rc::ptr_eq(&first.0, &zoomed.0));
         assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn sampled_rows_are_reused_across_cursor_moves() {
+        use crate::ui::wave::{WaveCell, WaveInk};
+        use std::rc::Rc;
+
+        let mut app = app_with(VCD);
+        app.set_display(vec![0]);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        let l = app.layout();
+        let build = || {
+            vec![WaveCell {
+                glyph: "▁",
+                ink: WaveInk::Low,
+            }]
+        };
+        let first = app.wave_row(0, &l, (0.0, 0.0), build);
+        let second = app.wave_row(0, &l, (0.0, 0.0), build);
+        assert!(Rc::ptr_eq(&first, &second));
+
+        // The cursor is not part of the key: moving it must not resample.
+        app.move_cursor(1);
+        let moved = app.wave_row(0, &l, (0.0, 0.0), build);
+        assert!(Rc::ptr_eq(&first, &moved), "cursor-only redraw resampled");
+
+        app.zoom_in();
+        let zoomed = app.wave_row(0, &l, (0.0, 0.0), build);
+        assert!(!Rc::ptr_eq(&first, &zoomed), "zoom must resample");
+
+        app.touch_radix();
+        let radixed = app.wave_row(0, &l, (0.0, 0.0), build);
+        assert!(!Rc::ptr_eq(&zoomed, &radixed), "radix change must resample");
     }
 
     #[test]

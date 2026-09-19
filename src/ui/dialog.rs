@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Widget as _};
 use ratatui::Frame;
+use std::sync::LazyLock;
 
 const KEYS: &[&str] = &[
     "General   q quit   o open (system dialog when available)",
@@ -169,10 +170,32 @@ pub fn close_button(screen: Rect, app: &App, dialog: Dialog) -> Rect {
     }
 }
 
+/// The static help text wrapped for every inner width the dialog can have.
+/// The dialog is at most 64 columns wide (4 border/padding columns), so all
+/// reachable widths are covered; wrapping runs once per process instead of on
+/// every redraw.
+static KEYS_WRAPPED: LazyLock<Vec<Vec<String>>> = LazyLock::new(|| {
+    (0..=64)
+        .map(|width| {
+            KEYS.iter()
+                .flat_map(|line| text::wrap(line, width))
+                .collect()
+        })
+        .collect()
+});
+
+/// Help lines of the Keys dialog for an inner width (clamped to the widths
+/// that can actually occur).
+fn keys_lines(inner_w: usize) -> &'static [String] {
+    KEYS_WRAPPED
+        .get(inner_w)
+        .or_else(|| KEYS_WRAPPED.last())
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
 fn keys_line_count(inner_w: usize) -> usize {
-    KEYS.iter()
-        .map(|line| text::wrap(line, inner_w).len())
-        .sum()
+    keys_lines(inner_w).len()
 }
 
 /// Scrollable body of a dialog: `None` when everything fits.
@@ -313,10 +336,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
             Dialog::Settings => draw_settings(buf, area, app),
             Dialog::Keys => {
                 let inner_w = area.width.saturating_sub(4) as usize;
-                let mut lines: Vec<String> = Vec::new();
-                for line in KEYS {
-                    lines.extend(text::wrap(line, inner_w));
-                }
+                let lines = keys_lines(inner_w);
                 let rows = area.height.saturating_sub(2) as usize;
                 let max_scroll = lines.len().saturating_sub(rows);
                 let scroll = app.dialog_scroll.min(max_scroll);
@@ -428,9 +448,11 @@ fn dim_outside(buf: &mut Buffer, screen: Rect, dialog: Rect) {
 }
 
 /// Scale a colour down to 55% (RGB and plain white), leaving the terminal
-/// default and named colours untouched.
+/// default and named colours untouched. `11/20` is the exact integer form of
+/// the old `* 0.55` truncation, so the colours (and the test below) are
+/// unchanged while the per-cell float math disappears.
 fn dim_color(color: Color) -> Option<Color> {
-    let scale = |value: u8| (value as f32 * 0.55) as u8;
+    let scale = |value: u8| (value as u32 * 11 / 20) as u8;
     match color {
         Color::Rgb(r, g, b) => Some(Color::Rgb(scale(r), scale(g), scale(b))),
         Color::White => Some(Color::Rgb(150, 150, 150)),
@@ -706,4 +728,36 @@ fn draw_find(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) -> O
         t,
     );
     Some(Position::new(input_x + caret, area.y + 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dim_mix_is_identical_to_the_old_float_blend() {
+        // The integer mix replaced per-cell float math; every reachable
+        // channel value must truncate exactly like the old expression.
+        for value in 0..=u8::MAX {
+            let old = (value as f32 * 0.55) as u8;
+            let new = (value as u32 * 11 / 20) as u8;
+            assert_eq!(old, new, "value={value}");
+            assert_eq!(
+                dim_color(Color::Rgb(value, value, value)),
+                Some(Color::Rgb(old, old, old))
+            );
+        }
+        assert_eq!(dim_color(Color::White), Some(Color::Rgb(150, 150, 150)));
+        assert_eq!(dim_color(Color::Reset), None);
+    }
+
+    #[test]
+    fn keys_help_is_wrapped_once_per_width() {
+        let first = keys_lines(40);
+        let again = keys_lines(40);
+        assert!(std::ptr::eq(first, again), "wrap cache missed");
+        let expected: usize = KEYS.iter().map(|line| text::wrap(line, 40).len()).sum();
+        assert_eq!(first.len(), expected);
+        assert_eq!(keys_line_count(40), expected);
+    }
 }

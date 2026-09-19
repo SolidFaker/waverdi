@@ -118,39 +118,24 @@ fn col_width(items: &[String]) -> usize {
 }
 
 /// Grid geometry inside `rect`: column width, column count and the number of
-/// items that fit, reserving the last column for the scrollbar.
-fn grid_geometry(rect: Rect, items: &[String]) -> (usize, usize, usize) {
+/// items that fit, reserving the last column for the scrollbar. Computed once
+/// per draw and then reused by the row loop and the scrollbar.
+#[derive(Clone, Copy)]
+struct GridGeometry {
+    col_w: usize,
+    cols: usize,
+    visible: usize,
+}
+
+fn grid_geometry(rect: Rect, items: &[String]) -> GridGeometry {
     let col_w = col_width(items);
     let width = rect.width.saturating_sub(1) as usize;
     let cols = (width / col_w).max(1);
-    (col_w, cols, cols * rect.height as usize)
-}
-
-fn tree_name(app: &App, node: usize) -> String {
-    app.wf
-        .as_ref()
-        .map(|wf| wf.tree.nodes[node].name.clone())
-        .unwrap_or_default()
-}
-
-fn instance_names(app: &App) -> Vec<String> {
-    app.add_instances()
-        .iter()
-        .map(|&node| tree_name(app, node))
-        .collect()
-}
-
-fn signal_names(app: &App) -> Vec<String> {
-    app.add_signal_list()
-        .iter()
-        .map(|&index| {
-            app.wf
-                .as_ref()
-                .and_then(|wf| wf.signals.get(index))
-                .map(|signal| signal.name.clone())
-                .unwrap_or_default()
-        })
-        .collect()
+    GridGeometry {
+        col_w,
+        cols,
+        visible: cols * rect.height as usize,
+    }
 }
 
 /// Columns of a picker pane (the tree is a single column).
@@ -158,8 +143,8 @@ pub fn pane_cols(screen: Rect, app: &App, pane: AddFocus) -> usize {
     let l = layout(screen);
     match pane {
         AddFocus::Tree => 1,
-        AddFocus::Instances => grid_geometry(l.instances, &instance_names(app)).1,
-        AddFocus::Signals => grid_geometry(l.signals, &signal_names(app)).1,
+        AddFocus::Instances => grid_geometry(l.instances, &app.add_pane(pane).1).cols,
+        AddFocus::Signals => grid_geometry(l.signals, &app.add_pane(pane).1).cols,
     }
 }
 
@@ -168,8 +153,8 @@ pub fn pane_visible(screen: Rect, app: &App, pane: AddFocus) -> usize {
     let l = layout(screen);
     match pane {
         AddFocus::Tree => l.tree.height as usize,
-        AddFocus::Instances => grid_geometry(l.instances, &instance_names(app)).2,
-        AddFocus::Signals => grid_geometry(l.signals, &signal_names(app)).2,
+        AddFocus::Instances => grid_geometry(l.instances, &app.add_pane(pane).1).visible,
+        AddFocus::Signals => grid_geometry(l.signals, &app.add_pane(pane).1).visible,
     }
 }
 
@@ -276,13 +261,14 @@ pub fn draw(frame: &mut ratatui::Frame, screen: Rect, app: &App) {
     draw_scrollbar(buf, l.tree, tree_start, tree_rows.len(), tree_visible, t);
 
     // --- instances of the current level ---------------------------------
-    let instances = instance_names(app);
+    let (instance_items, instances) = app.add_pane(AddFocus::Instances);
     let instance_start = app.add_scroll_of(AddFocus::Instances);
-    let instance_visible = grid_geometry(l.instances, &instances).2;
+    let geometry = grid_geometry(l.instances, &instances);
     draw_grid(
         buf,
         l.instances,
         &instances,
+        geometry,
         instance_start,
         |index| add.focus == AddFocus::Instances && index == add.instance_sel,
         |_| false,
@@ -293,44 +279,39 @@ pub fn draw(frame: &mut ratatui::Frame, screen: Rect, app: &App) {
         buf,
         l.instances,
         instance_start,
-        instances.len(),
-        instance_visible,
+        instance_items.len(),
+        geometry.visible,
         t,
     );
 
     // --- signals of the current level -----------------------------------
-    let signals: Vec<(usize, String)> = app
-        .add_signal_list()
-        .iter()
-        .map(|&index| {
-            let name = app
-                .wf
-                .as_ref()
-                .and_then(|wf| wf.signals.get(index))
-                .map(|signal| signal.name.clone())
-                .unwrap_or_default();
-            (index, name)
-        })
-        .collect();
-    let names: Vec<String> = signals.iter().map(|(_, name)| name.clone()).collect();
+    let (signal_items, names) = app.add_pane(AddFocus::Signals);
     let signal_start = app.add_scroll_of(AddFocus::Signals);
-    let signal_visible = grid_geometry(l.signals, &names).2;
+    let geometry = grid_geometry(l.signals, &names);
     draw_grid(
         buf,
         l.signals,
         &names,
+        geometry,
         signal_start,
         |index| add.focus == AddFocus::Signals && index == add.signal_sel,
         |index| {
-            signals
+            signal_items
                 .get(index)
-                .map(|(signal, _)| add.selected.contains(signal))
+                .map(|signal| add.selected.contains(signal))
                 .unwrap_or(false)
         },
         t.popup_bg,
         t,
     );
-    draw_scrollbar(buf, l.signals, signal_start, names.len(), signal_visible, t);
+    draw_scrollbar(
+        buf,
+        l.signals,
+        signal_start,
+        signal_items.len(),
+        geometry.visible,
+        t,
+    );
 
     // --- separators -----------------------------------------------------
     let sep = Style::new().fg(t.dim);
@@ -365,6 +346,7 @@ fn draw_grid(
     buf: &mut Buffer,
     rect: Rect,
     items: &[String],
+    geometry: GridGeometry,
     start: usize,
     cursor: impl Fn(usize) -> bool,
     selected: impl Fn(usize) -> bool,
@@ -374,7 +356,11 @@ fn draw_grid(
     if rect.width == 0 || rect.height == 0 {
         return;
     }
-    let (col_w, cols, visible) = grid_geometry(rect, items);
+    let GridGeometry {
+        col_w,
+        cols,
+        visible,
+    } = geometry;
     for (offset, name) in items.iter().skip(start).take(visible).enumerate() {
         let row = offset / cols;
         let col = offset % cols;
@@ -496,23 +482,21 @@ pub fn hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<AddHit> {
         return Some(AddHit::Tree(node, col < arrow_zone));
     }
     if inside(l.instances) {
-        let instances = app.add_instances();
-        let names = instance_names(app);
-        let (col_w, cols, _) = grid_geometry(l.instances, &names);
+        let (instances, names) = app.add_pane(AddFocus::Instances);
+        let geometry = grid_geometry(l.instances, &names);
         let start = app.add_scroll_of(AddFocus::Instances);
         let index = start
-            + (row - l.instances.y) as usize * cols
-            + (col.saturating_sub(l.instances.x) as usize / col_w);
+            + (row - l.instances.y) as usize * geometry.cols
+            + (col.saturating_sub(l.instances.x) as usize / geometry.col_w);
         return instances.get(index).map(|_| AddHit::Instance(index));
     }
     if inside(l.signals) {
-        let list = app.add_signal_list();
-        let names = signal_names(app);
-        let (col_w, cols, _) = grid_geometry(l.signals, &names);
+        let (list, names) = app.add_pane(AddFocus::Signals);
+        let geometry = grid_geometry(l.signals, &names);
         let start = app.add_scroll_of(AddFocus::Signals);
         let index = start
-            + (row - l.signals.y) as usize * cols
-            + (col.saturating_sub(l.signals.x) as usize / col_w);
+            + (row - l.signals.y) as usize * geometry.cols
+            + (col.saturating_sub(l.signals.x) as usize / geometry.col_w);
         return list.get(index).copied().map(AddHit::Signal);
     }
     None

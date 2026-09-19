@@ -4,6 +4,7 @@
 use super::{App, Dialog, TreeNode};
 use crate::waveform::{SigKind, Signal};
 use std::collections::HashSet;
+use std::rc::Rc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AddFilter {
@@ -77,7 +78,7 @@ fn is_net(var_type: &str) -> bool {
     )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum AddFocus {
     Tree,
     Instances,
@@ -157,7 +158,69 @@ pub struct AddSignals {
     pub focus: AddFocus,
 }
 
+/// Items and display names of one picker pane, valid while the picker level,
+/// its filter and the waveform are unchanged. Draw and hit testing share it,
+/// so names are cloned once per content change instead of per frame and per
+/// event. The two grid panes are cached separately because a frame reads both.
+pub(crate) struct AddNamesCache {
+    key: (usize, AddFilter, u64, u64),
+    items: Rc<[usize]>,
+    names: Rc<[String]>,
+}
+
 impl App {
+    /// Items of the "Add Signals" picker: signal (or tree node) indices and
+    /// their display names, cached per pane until the picker content changes.
+    pub(crate) fn add_pane(&self, pane: AddFocus) -> (Rc<[usize]>, Rc<[String]>) {
+        let Some(add) = &self.add_signals else {
+            return (Rc::from([]), Rc::from([]));
+        };
+        let key = (
+            add.scope,
+            add.filter,
+            self.waveform_version,
+            self.rtl_version,
+        );
+        let mut cache = self.add_names.borrow_mut();
+        if let Some(cached) = cache.get(&pane) {
+            if cached.key == key {
+                return (cached.items.clone(), cached.names.clone());
+            }
+        }
+        let items: Vec<usize> = match pane {
+            AddFocus::Instances => self.add_instances(),
+            AddFocus::Signals => self.add_signal_list(),
+            AddFocus::Tree => Vec::new(),
+        };
+        let names: Vec<String> = items
+            .iter()
+            .map(|&index| match pane {
+                AddFocus::Instances => self
+                    .wf
+                    .as_ref()
+                    .map(|wf| wf.tree.nodes[index].name.clone())
+                    .unwrap_or_default(),
+                _ => self
+                    .wf
+                    .as_ref()
+                    .and_then(|wf| wf.signals.get(index))
+                    .map(|signal| signal.name.clone())
+                    .unwrap_or_default(),
+            })
+            .collect();
+        let items: Rc<[usize]> = items.into();
+        let names: Rc<[String]> = names.into();
+        cache.insert(
+            pane,
+            AddNamesCache {
+                key,
+                items: items.clone(),
+                names: names.clone(),
+            },
+        );
+        (items, names)
+    }
+
     /// Open the "Add Signals" picker at the currently selected hierarchy.
     pub fn open_add_signals(&mut self) {
         let Some(wf) = &self.wf else {
@@ -363,12 +426,12 @@ impl App {
         self.add_ensure_visible(focus);
     }
 
-    /// Number of items in a picker pane.
+    /// Number of items in a picker pane. The grid panes read the cached item
+    /// list so the draw and hit-test paths do not rebuild indices per frame.
     pub fn add_pane_len(&self, pane: AddFocus) -> usize {
         match pane {
             AddFocus::Tree => self.add_tree_rows().len(),
-            AddFocus::Instances => self.add_instances().len(),
-            AddFocus::Signals => self.add_signal_list().len(),
+            AddFocus::Instances | AddFocus::Signals => self.add_pane(pane).0.len(),
         }
     }
 
@@ -659,5 +722,51 @@ mod tests {
             saw_input |= filter(&app) == AddFilter::Inputs;
         }
         assert!(saw_input, "input is reachable with directions recorded");
+    }
+
+    /// The picker panes cache their names per pane and drop them when the
+    /// filter changes.
+    #[test]
+    fn picker_pane_names_are_cached_per_pane() {
+        use crate::app::AddFocus;
+        use std::rc::Rc;
+
+        let vcd = "$timescale 1ns $end\n\
+            $scope module top $end\n\
+            $var wire 1 ! clk $end\n\
+            $var wire 1 \" rst $end\n\
+            $scope module sub $end\n\
+            $var wire 1 # a $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n0\"\n0#\n";
+        let mut app = app_with(vcd);
+        app.open_add_signals();
+        let top = {
+            let wf = app.wf.as_ref().unwrap();
+            wf.tree.nodes[wf.tree.root].children[0]
+        };
+        app.add_navigate(top);
+
+        let (_, first) = app.add_pane(AddFocus::Signals);
+        let (_, again) = app.add_pane(AddFocus::Signals);
+        assert!(
+            Rc::ptr_eq(&first, &again),
+            "signals pane names must be cached"
+        );
+
+        // Alternating panes must not evict each other within one frame.
+        let (_, instances) = app.add_pane(AddFocus::Instances);
+        let (_, signals) = app.add_pane(AddFocus::Signals);
+        assert!(
+            Rc::ptr_eq(&first, &signals),
+            "instances lookup evicted signals"
+        );
+        assert_eq!(instances.len(), 1, "only the sub instance at this level");
+
+        // A filter change rebuilds the pane.
+        app.add_cycle_filter();
+        let (_, filtered) = app.add_pane(AddFocus::Signals);
+        assert!(!Rc::ptr_eq(&first, &filtered), "filter change must rebuild");
+        assert_eq!(filtered.len(), 2, "both wires pass the net filter");
     }
 }

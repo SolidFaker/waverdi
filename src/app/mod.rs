@@ -27,6 +27,9 @@ use crate::dump::source::Capabilities;
 use crate::rtl::{RtlDb, SourceSet, SourceView};
 use crate::theme::{Theme, ThemeKind, UiSetting, WaveSetting};
 use crate::ui::layout::{compute_layout, Layout, Splits};
+use crate::ui::status::StatusCache;
+use crate::ui::toolbar::ToolbarCache;
+use crate::ui::wave::WaveRowCache;
 use crate::waveform::{Radix, Ticks, TimeBase, Waveform};
 use ratatui::layout::Rect;
 use std::cell::RefCell;
@@ -35,6 +38,8 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
+
+use self::add::AddNamesCache;
 
 /// Cached flattened pane rows, rebuilt when [`App::panes_version`] changed.
 type PaneCache<T> = RefCell<Option<(u64, Rc<Vec<T>>)>>;
@@ -261,6 +266,16 @@ pub struct App {
     rtl_version: u64,
     list_value_cache: RefCell<Option<ListValueCache>>,
     wave_labels: RefCell<HashMap<usize, WaveRowLabels>>,
+    /// Sampled waveform rows, reused across overlay-only redraws.
+    wave_rows: RefCell<WaveRowCache>,
+    /// Status line segments, split so cursor moves only reformat the cursor.
+    pub(crate) status_cache: RefCell<StatusCache>,
+    /// Shortcut-bar rectangles and labels, rebuilt when geometry or time base
+    /// changes instead of on every draw and hit test.
+    pub(crate) toolbar_cache: RefCell<ToolbarCache>,
+    /// Names shown by the "Add Signals" picker panes, rebuilt when the picker
+    /// level, filter or waveform changes.
+    add_names: RefCell<HashMap<AddFocus, AddNamesCache>>,
     find_cache: RefCell<Option<FindCache>>,
     /// Inputs of the last `sync_source` resolution: selected tree row, tree
     /// shape and RTL version. Skipping same-key redraws avoids the per-frame
@@ -345,6 +360,10 @@ impl App {
             rtl_version: 0,
             list_value_cache: RefCell::new(None),
             wave_labels: RefCell::new(HashMap::new()),
+            wave_rows: RefCell::new(WaveRowCache::default()),
+            status_cache: RefCell::new(StatusCache::new()),
+            toolbar_cache: RefCell::new(ToolbarCache::new()),
+            add_names: RefCell::new(HashMap::new()),
             find_cache: RefCell::new(None),
             source_key: None,
             trace_key: None,
@@ -771,6 +790,7 @@ impl App {
         self.wf = Some(wf);
         self.touch_waveform();
         self.wave_labels.borrow_mut().clear();
+        self.wave_rows.borrow_mut().clear();
         self.dialog = None;
         self.dialog_scroll = 0;
         self.time_menu = None;

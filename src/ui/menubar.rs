@@ -63,20 +63,28 @@ pub fn menu_action(idx: usize, item: usize) -> Action {
     MENUS[idx].1[item].1
 }
 
-fn item_offsets(menu: Rect) -> Vec<u16> {
-    let mut x = menu.x + BRAND.len() as u16;
-    let mut out = Vec::with_capacity(MENUS.len());
-    for (name, _) in MENUS {
-        out.push(x);
-        x += (name.len() + 3) as u16;
+/// Relative x offsets of the menu labels inside the menubar. The brand and
+/// the menu names are static, so the offsets are a compile-time constant
+/// instead of a `Vec` rebuilt for every item of every frame.
+const fn item_offsets() -> [u16; MENUS.len()] {
+    let mut out = [0u16; MENUS.len()];
+    let mut x = BRAND.len() as u16;
+    let mut i = 0;
+    while i < MENUS.len() {
+        out[i] = x;
+        x += MENUS[i].0.len() as u16 + 3;
+        i += 1;
     }
     out
 }
 
+static ITEM_OFFSETS: [u16; MENUS.len()] = item_offsets();
+
 pub fn menu_item_at(menu: Rect, col: u16) -> Option<usize> {
-    for (i, x) in item_offsets(menu).iter().enumerate() {
+    for (i, offset) in ITEM_OFFSETS.iter().enumerate() {
+        let x = menu.x + *offset;
         let width = (MENUS[i].0.len() + 3) as u16;
-        if col >= *x && col < x + width {
+        if col >= x && col < x + width {
             return Some(i);
         }
     }
@@ -87,7 +95,7 @@ pub fn dropdown_rect(l: &Layout, idx: usize) -> Rect {
     let items = MENUS[idx].1;
     let width = items.iter().map(|(name, _)| name.len()).max().unwrap_or(10) + 4;
     Rect {
-        x: item_offsets(l.menu)[idx],
+        x: l.menu.x + ITEM_OFFSETS[idx],
         y: l.menu.bottom(),
         width: width as u16,
         height: items.len() as u16 + 2,
@@ -107,7 +115,7 @@ pub fn draw_bar(buf: &mut Buffer, l: &Layout, app: &App) {
             .add_modifier(Modifier::BOLD),
     );
     for (i, (name, _)) in MENUS.iter().enumerate() {
-        let x = item_offsets(l.menu)[i];
+        let x = l.menu.x + ITEM_OFFSETS[i];
         let style = if app.menu.open == Some(i) {
             Style::new().fg(t.text).bg(t.menu_active)
         } else {

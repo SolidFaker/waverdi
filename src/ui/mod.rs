@@ -53,9 +53,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         source::draw(buf, &l, app);
         status::draw_messages(buf, &l, app);
         status::draw_status(buf, &l, app);
-        if app.wf.is_some() {
-            wave::draw_scrollbars(buf, &l, app);
-        }
         if let Some(idx) = app.menu.open {
             menubar::draw_dropdown(buf, &l, app, idx);
         }
