@@ -2,6 +2,7 @@ use crate::dump::ParseOut;
 use crate::waveform::{Change, ScopeTree, SigKind, SigState, Signal, TimeScale, Value, Waveform};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use wellen::simple::Waveform as WellenWaveform;
 use wellen::{Hierarchy, ItemRef, SignalRef, SignalValueRef, TimescaleUnit};
 
@@ -68,6 +69,8 @@ pub fn parse_fst(path: &Path) -> Result<ParseOut, String> {
         end,
         signals,
         tree,
+        radix: HashMap::new(),
+        value_times_cache: Vec::new(),
     };
     Ok(ParseOut { wf, warnings })
 }
@@ -127,7 +130,7 @@ fn visit_item(
                 dir: String::new(),
                 scope: scope.clone(),
                 kind,
-                changes,
+                changes: Arc::new(changes),
                 min,
                 max,
                 parent: None,

@@ -1,5 +1,6 @@
 use super::value::{fmt_real, fmt_unknown, Radix, Value};
 use super::Ticks;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SigKind {
@@ -34,14 +35,18 @@ pub struct Signal {
     pub dir: String,
     pub scope: Vec<String>,
     pub kind: SigKind,
-    pub changes: Vec<Change>,
+    /// Changes live behind an `Arc` so the loader and the UI can share one
+    /// allocation instead of copying every value across the event channel.
+    pub changes: Arc<Vec<Change>>,
     pub min: f64,
     pub max: f64,
     /// Signal this one was expanded from (bit/chunk of a bus), if any.
     pub parent: Option<usize>,
-    /// Members of a synthesized scope aggregate (struct/interface/instance).
-    /// Kept separate from `parent` so a signal can be an array element and a
-    /// scope member at the same time.
+    /// Children of a synthesized array node or of a scope aggregate
+    /// (struct/interface/instance). For arrays they mirror the `parent`
+    /// links; keeping them here lets values be joined without scanning every
+    /// signal. Kept separate from `parent` so a signal can be an array
+    /// element and a scope member at the same time.
     pub members: Vec<usize>,
     /// Lazy loading state; always `Ready` for fully parsed dumps.
     pub state: SigState,
@@ -128,7 +133,7 @@ mod tests {
             dir: String::new(),
             scope: vec![],
             kind,
-            changes: vec![],
+            changes: Arc::new(Vec::new()),
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             parent: None,
@@ -147,11 +152,11 @@ mod tests {
     #[test]
     fn value_at_returns_latest_change() {
         let mut s = sig(SigKind::Real, 64);
-        s.changes.push(Change {
+        Arc::make_mut(&mut s.changes).push(Change {
             t: 5,
             v: Value::Real(1.0),
         });
-        s.changes.push(Change {
+        Arc::make_mut(&mut s.changes).push(Change {
             t: 9,
             v: Value::Real(2.0),
         });
@@ -163,11 +168,11 @@ mod tests {
     #[test]
     fn change_in_matches_display_column() {
         let mut s = sig(SigKind::Bits, 4);
-        s.changes.push(Change {
+        Arc::make_mut(&mut s.changes).push(Change {
             t: 5,
             v: Value::Bits(vec![0, 0, 0, 1]),
         });
-        s.changes.push(Change {
+        Arc::make_mut(&mut s.changes).push(Change {
             t: 9,
             v: Value::Bits(vec![0, 1, 0, 1]),
         });

@@ -2,16 +2,21 @@
 //!
 //! Dumps store every element of an unpacked array as its own variable
 //! (`mem[0][7:0]`, `mem[1][7:0]`, ...). This module groups those elements
-//! into a tree of signals linked through `Signal::parent`:
+//! into a tree of signals linked through `Signal::parent`, with the children
+//! recorded in `Signal::members`:
 //!
 //! * a parent signal prints the whole array as `{0, 1, 2, 3}`;
 //! * multi-dimensional arrays nest one brace level per dimension,
 //!   `{{0, 1, 2}, {2, 3, 4}, {1, 2, 3}}`;
 //! * expanding a node in the Signal List reveals the next dimension.
+//!
+//! The brace text is never stored: synthesized signals keep an empty change
+//! list and join their members at the requested time.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
-use super::{fmt_real, fmt_value, Change, Radix, SigKind, SigState, Signal, Ticks, Value};
+use super::{fmt_real, fmt_value, Radix, SigKind, SigState, Signal, Ticks, Value};
 
 impl super::Waveform {
     /// Group per-element signals of unpacked arrays and add the synthesized
@@ -65,7 +70,6 @@ impl super::Waveform {
             let mut next: BTreeMap<Vec<i64>, usize> = BTreeMap::new();
             for (key, mut children) in parents {
                 children.sort_by_key(|child| keys[child].clone());
-                let changes = array_changes(&self.signals, &children);
                 let bits = children
                     .iter()
                     .map(|&child| self.signals[child].bits.max(1))
@@ -85,11 +89,13 @@ impl super::Waveform {
                     dir: String::new(),
                     scope: scope.to_vec(),
                     kind: SigKind::Str,
-                    changes,
+                    // Brace values are synthesized from the members on
+                    // demand; nothing is pre-joined or stored here.
+                    changes: Arc::new(Vec::new()),
                     min: f64::INFINITY,
                     max: f64::NEG_INFINITY,
                     parent: None,
-                    members: Vec::new(),
+                    members: children.clone(),
                     state: SigState::Ready,
                 });
                 for &child in &children {
@@ -219,7 +225,7 @@ impl super::Waveform {
             dir: String::new(),
             scope,
             kind: SigKind::Str,
-            changes: Vec::new(),
+            changes: Arc::new(Vec::new()),
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             parent: None,
@@ -236,15 +242,25 @@ impl super::Waveform {
         })
     }
 
+    /// True for the synthesized brace signals (unpacked arrays and
+    /// aggregates); their values are computed from the members, never stored.
+    pub fn is_synthesized(&self, index: usize) -> bool {
+        self.signals.get(index).is_some_and(is_synthesized)
+    }
+
     /// Child signal indices for every synthesized array signal.
     pub(crate) fn array_children(&self) -> Vec<Vec<usize>> {
         let mut children = vec![Vec::new(); self.signals.len()];
         for (index, signal) in self.signals.iter().enumerate() {
             if let Some(parent) = signal.parent {
-                children[parent].push(index);
+                // Synthesized nodes record their children in `members`;
+                // only bit/chunk expansions still link through `parent`.
+                if self.signals[parent].members.is_empty() {
+                    children[parent].push(index);
+                }
             }
             if !signal.members.is_empty() {
-                children[index].extend(signal.members.iter().copied());
+                children[index] = signal.members.clone();
             }
         }
         children
@@ -253,17 +269,18 @@ impl super::Waveform {
     /// Children shown when a signal row is expanded: array elements, bit
     /// chunks and scope-aggregate members.
     pub fn children(&self, index: usize) -> Vec<usize> {
-        let mut out: Vec<usize> = self
-            .signals
+        let Some(signal) = self.signals.get(index) else {
+            return Vec::new();
+        };
+        if !signal.members.is_empty() {
+            return signal.members.clone();
+        }
+        self.signals
             .iter()
             .enumerate()
-            .filter(|(_, signal)| signal.parent == Some(index))
+            .filter(|(_, child)| child.parent == Some(index))
             .map(|(child, _)| child)
-            .collect();
-        if let Some(signal) = self.signals.get(index) {
-            out.extend(signal.members.iter().copied());
-        }
-        out
+            .collect()
     }
 
     /// Signal indices whose values must be loaded to build `index`: the
@@ -299,9 +316,11 @@ impl super::Waveform {
         {
             return false;
         }
-        let changes = array_changes(&self.signals, list);
-        self.signals[index].changes = changes;
+        // The brace text is synthesized at the requested time, so becoming
+        // ready only marks the signal; no merged change list is stored.
+        self.signals[index].changes = Arc::new(Vec::new());
         self.signals[index].state = SigState::Ready;
+        self.set_cached_value_times(index, None);
         true
     }
 
@@ -324,71 +343,223 @@ impl super::Waveform {
             if !ready {
                 continue;
             }
-            let changes = array_changes(&self.signals, &children[index]);
-            self.signals[index].changes = changes;
+            self.signals[index].changes = Arc::new(Vec::new());
             self.signals[index].state = SigState::Ready;
+            self.set_cached_value_times(index, None);
             updated.push(index);
         }
         updated
     }
 
-    /// Re-format the brace text of every array/aggregate signal after radix
-    /// changes. An override applies to the elements it contains; a leaf
-    /// override only affects that element (and the parents that embed it).
-    /// Returns the synthesized signals whose text actually changed.
+    /// Record the radix overrides, drop the cached transition times of every
+    /// synthesized signal and immediately refresh them: the times themselves
+    /// are radix-independent, but the invalidation keeps the cache honest
+    /// (transitions cannot change, only the rendered text around them).
+    /// Returns the `Ready` synthesized signals whose rendered width or first
+    /// / last transition may have changed.
     pub fn rebuild_array_texts(&mut self, radix: &HashMap<usize, Radix>) -> Vec<usize> {
-        let roots: Vec<usize> = (0..self.signals.len())
-            .filter(|&index| {
-                matches!(self.signals[index].var_type.as_str(), "array" | "aggregate")
-                    && self.signals[index].parent.is_none()
+        self.radix = radix.clone();
+        let mut updated = Vec::new();
+        for index in 0..self.signals.len() {
+            if !is_synthesized(&self.signals[index]) {
+                continue;
+            }
+            self.set_cached_value_times(index, None);
+            if self.signals[index].state == SigState::Ready {
+                updated.push(index);
+            }
+        }
+        self.refresh_value_times();
+        updated
+    }
+
+    /// Value of signal `index` at time `t`. Plain signals read their stored
+    /// changes; synthesized array/aggregate signals join the members' values
+    /// at `t` into `{...}` instead of keeping a pre-joined change list. Like
+    /// the old stored brace changes they are unknown before the first member
+    /// change and while the members are still loading.
+    pub fn value_at(&self, index: usize, t: Ticks) -> Option<Value> {
+        let signal = self.signals.get(index)?;
+        if !is_synthesized(signal) {
+            return signal.value_at(t).cloned();
+        }
+        if signal.state != SigState::Ready || t < self.first_time(index)? {
+            return None;
+        }
+        Some(Value::Str(self.element_text(index, t, None)))
+    }
+
+    /// Transition times of a signal. Synthesized signals merge their members'
+    /// times once the signal is `Ready` (unloaded ones keep an empty list,
+    /// like their old empty change list); the union is thinned with the same
+    /// stride rule the old merged change list used (every change counts, one
+    /// time is emitted at the first multiple of the stride), so the list
+    /// never grows past [`crate::dump::MAX_AGGREGATE_CHANGES`] values for a
+    /// huge interface.
+    pub fn value_times(&self, index: usize) -> Vec<Ticks> {
+        let Some(signal) = self.signals.get(index) else {
+            return Vec::new();
+        };
+        if !is_synthesized(signal) {
+            return signal.changes.iter().map(|change| change.t).collect();
+        }
+        if signal.state != SigState::Ready {
+            return Vec::new();
+        }
+        if let Some(times) = self.cached_value_times(index) {
+            return times.to_vec();
+        }
+        self.compute_value_times(index).to_vec()
+    }
+
+    /// Number of transitions of a signal, used by width and search code.
+    pub fn value_len(&self, index: usize) -> usize {
+        match self.signals.get(index) {
+            Some(signal) if !is_synthesized(signal) => signal.changes.len(),
+            _ => self.value_times(index).len(),
+        }
+    }
+
+    /// Display text of signal `index` at `t` with `radix`: synthesized brace
+    /// signals are joined from their members at `t`.
+    pub fn display_value(&self, index: usize, t: Ticks, radix: Radix) -> String {
+        let Some(signal) = self.signals.get(index) else {
+            return "x".to_string();
+        };
+        if signal.state != SigState::Ready {
+            return "…".to_string();
+        }
+        if is_synthesized(signal) {
+            match self.value_at(index, t) {
+                Some(value) => fmt_value(&value, radix),
+                None => "x".to_string(),
+            }
+        } else {
+            signal.display_value(t, radix)
+        }
+    }
+
+    /// Render an `old→new` transition when the cursor column sits on an edge
+    /// of a synthesized signal (plain signals use [`Signal::display_change_in`]).
+    pub fn display_change_in(
+        &self,
+        index: usize,
+        from: f64,
+        to: f64,
+        radix: Radix,
+    ) -> Option<String> {
+        let signal = self.signals.get(index)?;
+        if !is_synthesized(signal) {
+            return signal.display_change_in(from, to, radix);
+        }
+        let times = self.value_times(index);
+        let i = times.partition_point(|&t| (t as f64) < from);
+        let &t = times.get(i)?;
+        if (t as f64) >= to {
+            return None;
+        }
+        let previous = i
+            .checked_sub(1)
+            .and_then(|j| self.value_at(index, times[j]))?;
+        let new = self.value_at(index, t)?;
+        Some(format!(
+            "{}→{}",
+            fmt_value(&previous, radix),
+            fmt_value(&new, radix)
+        ))
+    }
+
+    /// Fill the cached transition times of every ready synthesized signal.
+    /// Used when a whole waveform is installed or a radix change dropped the
+    /// caches; steady-state updates cache only the signals that turned ready.
+    pub fn refresh_value_times(&mut self) {
+        for index in 0..self.signals.len() {
+            self.cache_value_times(index);
+        }
+    }
+
+    /// Fill the cached transition times of one ready synthesized signal. The
+    /// merge walks all members once per change batch instead of once per draw
+    /// call, so drawing stays a cache hit.
+    pub fn cache_value_times(&mut self, index: usize) {
+        if !self.signals.get(index).is_some_and(is_synthesized)
+            || self.signals[index].state != SigState::Ready
+            || self.cached_value_times(index).is_some()
+        {
+            return;
+        }
+        let times = self.compute_value_times(index);
+        self.set_cached_value_times(index, Some(times));
+    }
+
+    fn cached_value_times(&self, index: usize) -> Option<Arc<[Ticks]>> {
+        self.value_times_cache.get(index).and_then(Option::clone)
+    }
+
+    fn set_cached_value_times(&mut self, index: usize, times: Option<Arc<[Ticks]>>) {
+        if self.value_times_cache.len() <= index {
+            self.value_times_cache.resize(index + 1, None);
+        }
+        self.value_times_cache[index] = times;
+    }
+
+    /// Brace text of a synthesized signal: its members at `t`, each formatted
+    /// with its own radix or one inherited from the parent. Nested arrays
+    /// nest one brace level per dimension, like the old stored texts.
+    fn element_text(&self, index: usize, t: Ticks, inherited: Option<Radix>) -> String {
+        let signal = &self.signals[index];
+        if !is_synthesized(signal) {
+            return element_text_radix(signal, t, inherited);
+        }
+        let current = self.radix.get(&index).copied().or(inherited);
+        let parts: Vec<String> = signal
+            .members
+            .iter()
+            .map(|&child| self.element_text(child, t, self.radix.get(&child).copied().or(current)))
+            .collect();
+        format!("{{{}}}", parts.join(", "))
+    }
+
+    /// Merged member times of a synthesized signal, with nested synthesized
+    /// members resolved through their caches.
+    fn compute_value_times(&self, index: usize) -> Arc<[Ticks]> {
+        let sources: Vec<Arc<[Ticks]>> = self.signals[index]
+            .members
+            .iter()
+            .map(|&child| {
+                if let Some(times) = self.cached_value_times(child) {
+                    times
+                } else if is_synthesized(&self.signals[child]) {
+                    self.compute_value_times(child)
+                } else {
+                    Arc::from(
+                        self.signals[child]
+                            .changes
+                            .iter()
+                            .map(|change| change.t)
+                            .collect::<Vec<_>>(),
+                    )
+                }
             })
             .collect();
-        let mut children: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for (index, signal) in self.signals.iter().enumerate() {
-            if let Some(parent) = signal.parent {
-                children.entry(parent).or_default().push(index);
-            }
-            if !signal.members.is_empty() {
-                children
-                    .entry(index)
-                    .or_default()
-                    .extend(signal.members.iter().copied());
-            }
-        }
-        let mut updated = Vec::new();
-        for root in roots {
-            self.rebuild_array_node(root, None, radix, &children, &mut updated);
-        }
-        updated
+        Arc::from(merged_times(&sources))
     }
 
-    fn rebuild_array_node(
-        &mut self,
-        index: usize,
-        inherited: Option<Radix>,
-        radix: &HashMap<usize, Radix>,
-        children: &BTreeMap<usize, Vec<usize>>,
-        updated: &mut Vec<usize>,
-    ) {
-        let current = radix.get(&index).copied().or(inherited);
-        let Some(list) = children.get(&index).cloned() else {
-            return;
-        };
-        if list.is_empty() {
-            return;
+    /// First transition of a signal: the minimum over its members, without
+    /// merging their whole change lists.
+    fn first_time(&self, index: usize) -> Option<Ticks> {
+        let signal = &self.signals[index];
+        if !is_synthesized(signal) {
+            return signal.changes.first().map(|change| change.t);
         }
-        for &child in &list {
-            if matches!(self.signals[child].var_type.as_str(), "array" | "aggregate") {
-                self.rebuild_array_node(child, current, radix, children, updated);
-            }
+        if let Some(times) = self.cached_value_times(index) {
+            return times.first().copied();
         }
-        let changes = merged_changes(&self.signals, &list, &|child| {
-            radix.get(&child).copied().or(current)
-        });
-        if self.signals[index].changes != changes {
-            self.signals[index].changes = changes;
-            updated.push(index);
-        }
+        signal
+            .members
+            .iter()
+            .filter_map(|&child| self.first_time(child))
+            .min()
     }
 }
 
@@ -424,81 +595,50 @@ fn split_element_name(name: &str) -> Option<(&str, Vec<i64>)> {
     (!indices.is_empty()).then_some((base, indices))
 }
 
-/// `{child, child, ...}` value changes over the union of the children's
-/// change times.
-fn array_changes(signals: &[Signal], children: &[usize]) -> Vec<Change> {
-    merged_changes(signals, children, &|_| None)
+/// True for the signals whose `{...}` values are synthesized on demand.
+fn is_synthesized(signal: &Signal) -> bool {
+    matches!(signal.var_type.as_str(), "array" | "aggregate")
 }
 
-/// Merge the children's change lists into the parent's `{a, b, ...}` values.
-/// The children are walked in time order, only the emitted times are
-/// formatted, and a signal whose members hold more changes than
-/// [`MAX_AGGREGATE_CHANGES`] is thinned while merging, so a big interface
-/// cannot produce a text value per member change (millions of strings).
-fn merged_changes(
-    signals: &[Signal],
-    children: &[usize],
-    radix: &dyn Fn(usize) -> Option<Radix>,
-) -> Vec<Change> {
-    let total: usize = children
-        .iter()
-        .map(|&child| signals[child].changes.len())
-        .sum();
+/// Union of the members' change times. The sources are walked in time order
+/// and every change is applied, but a time is only emitted on the first
+/// multiple of the stride - the same rule the old merged change list used -
+/// so the result never grows past [`crate::dump::MAX_AGGREGATE_CHANGES`]
+/// for a signal whose members hold millions of changes.
+fn merged_times(sources: &[Arc<[Ticks]>]) -> Vec<Ticks> {
+    let total: usize = sources.iter().map(|times| times.len()).sum();
     let stride = total.div_ceil(crate::dump::MAX_AGGREGATE_CHANGES).max(1);
-    let mut cursors = vec![0usize; children.len()];
+    let mut cursors = vec![0usize; sources.len()];
     let mut applied = 0usize;
-    let mut changes: Vec<Change> = Vec::new();
+    let mut times: Vec<Ticks> = Vec::new();
     loop {
-        // All children whose next change lands on the same time are applied
-        // before one value is emitted for that time.
-        let next = children
+        // All members whose next change lands on the same time are applied
+        // before one time is emitted for that time.
+        let next = sources
             .iter()
             .enumerate()
-            .filter_map(|(index, &child)| {
-                signals[child]
-                    .changes
-                    .get(cursors[index])
-                    .map(|change| change.t)
-            })
+            .filter_map(|(index, source)| source.get(cursors[index]).copied())
             .min();
         let Some(t) = next else { break };
         let mut dirty = false;
-        for (index, &child) in children.iter().enumerate() {
-            while signals[child]
-                .changes
-                .get(cursors[index])
-                .map(|change| change.t == t)
-                .unwrap_or(false)
-            {
+        for (index, source) in sources.iter().enumerate() {
+            while source.get(cursors[index]) == Some(&t) {
                 cursors[index] += 1;
                 applied += 1;
                 dirty = true;
             }
         }
-        if !dirty || (!changes.is_empty() && !applied.is_multiple_of(stride)) {
-            continue;
+        if dirty && (times.is_empty() || applied.is_multiple_of(stride)) {
+            times.push(t);
         }
-        // Only emitted times pay for the element formatting and the join.
-        let parts: Vec<String> = children
-            .iter()
-            .map(|&child| element_text_radix(&signals[child], t, radix(child)))
-            .collect();
-        let value = Value::Str(format!("{{{}}}", parts.join(", ")));
-        if changes
-            .last()
-            .map(|change| change.v == value)
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        changes.push(Change { t, v: value });
     }
-    changes
+    times
 }
 
 /// Text of one element at time `t`: the bit vector in `radix` (decimal by
-/// default, unknown values as `x`), the real number, the string, or the nested
-/// braces of a sub-array.
+/// default, unknown values as `x`), the real number or the string. Nested
+/// array levels are joined by the parent's `element_text` before this is
+/// reached.
 fn element_text_radix(signal: &Signal, t: Ticks, radix: Option<Radix>) -> String {
     match (signal.kind, signal.value_at(t)) {
         (SigKind::Bits, Some(value @ (Value::Small(..) | Value::Bits(_)))) => {
@@ -533,7 +673,7 @@ fn element_text_radix(signal: &Signal, t: Ticks, radix: Option<Radix>) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::waveform::{ScopeTree, TimeScale, Waveform};
+    use crate::waveform::{Change, ScopeTree, TimeScale, Waveform};
 
     fn leaf(name: &str, bits: &[u8], t: Ticks) -> Signal {
         Signal {
@@ -543,10 +683,10 @@ mod tests {
             dir: String::new(),
             scope: vec!["tb".to_string()],
             kind: SigKind::Bits,
-            changes: vec![Change {
+            changes: Arc::new(vec![Change {
                 t,
                 v: Value::compact(bits.to_vec()),
-            }],
+            }]),
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             parent: None,
@@ -562,6 +702,8 @@ mod tests {
             end: 10,
             signals,
             tree: ScopeTree::new(),
+            radix: HashMap::new(),
+            value_times_cache: Vec::new(),
         }
     }
 
@@ -593,7 +735,9 @@ mod tests {
             wf.signals[index].state = SigState::Ready;
         }
         assert!(wf.recompute_aggregate(aggregate));
-        match wf.signals[aggregate].changes.last().map(|c| &c.v) {
+        // The aggregate stores no brace text; it is joined on demand.
+        assert!(wf.signals[aggregate].changes.is_empty());
+        match wf.value_at(aggregate, 0) {
             Some(Value::Str(text)) => assert!(text.starts_with('{'), "{text}"),
             other => panic!("expected brace value, got {other:?}"),
         }
@@ -642,7 +786,7 @@ mod tests {
         ]);
         wf.build_arrays();
         // Element 0 changes at t=0 and t=2, element 1 at t=1 and t=2.
-        wf.signals[0].changes = vec![
+        wf.signals[0].changes = Arc::new(vec![
             Change {
                 t: 0,
                 v: Value::compact(vec![1, 0, 0, 0]),
@@ -651,8 +795,8 @@ mod tests {
                 t: 2,
                 v: Value::compact(vec![0, 1, 0, 0]),
             },
-        ];
-        wf.signals[1].changes = vec![
+        ]);
+        wf.signals[1].changes = Arc::new(vec![
             Change {
                 t: 1,
                 v: Value::compact(vec![1, 1, 0, 0]),
@@ -661,26 +805,79 @@ mod tests {
                 t: 2,
                 v: Value::compact(vec![0, 0, 1, 0]),
             },
-        ];
+        ]);
         let updated = wf.rebuild_array_texts(&std::collections::HashMap::new());
         assert!(updated.contains(&2), "{updated:?}");
-        let texts: Vec<(u64, String)> = wf.signals[2]
-            .changes
-            .iter()
-            .map(|change| match &change.v {
-                Value::Str(text) => (change.t, text.clone()),
+        // The merged transition times of both elements, in time order.
+        assert_eq!(wf.value_times(2), vec![0, 1, 2]);
+        let values: Vec<String> = wf
+            .value_times(2)
+            .into_iter()
+            .map(|t| match wf.value_at(2, t) {
+                Some(Value::Str(text)) => text,
                 other => panic!("not text: {other:?}"),
             })
             .collect();
         // Both elements changing at t=2 produce one value, not two.
         assert_eq!(
-            texts,
+            values,
             vec![
-                (0, "{1, x}".to_string()),
-                (1, "{1, 3}".to_string()),
-                (2, "{2, 4}".to_string()),
+                "{1, x}".to_string(),
+                "{1, 3}".to_string(),
+                "{2, 4}".to_string()
             ]
         );
+        assert!(wf.signals[2].changes.is_empty(), "brace texts stay lazy");
+    }
+
+    /// Synthesized signals keep no change list at all: the members are the
+    /// only stored state and `value_at`/`value_times` join them on demand.
+    #[test]
+    fn array_values_are_synthesized_lazily() {
+        let mut wf = waveform(vec![
+            Signal {
+                changes: Arc::new(vec![
+                    Change {
+                        t: 0,
+                        v: Value::compact(vec![0, 0]),
+                    },
+                    Change {
+                        t: 5,
+                        v: Value::compact(vec![1, 0]),
+                    },
+                ]),
+                ..leaf("a[0][1:0]", &[0, 0], 0)
+            },
+            leaf("a[1][1:0]", &[1, 0], 0),
+        ]);
+        wf.build_arrays();
+        let root = wf.signals.iter().position(|s| s.name == "a").unwrap();
+        assert!(wf.signals[root].changes.is_empty());
+        assert_eq!(wf.value_at(root, 0), Some(Value::Str("{0, 1}".into())));
+        assert_eq!(wf.value_at(root, 5), Some(Value::Str("{1, 1}".into())));
+        assert_eq!(wf.value_times(root), vec![0, 5]);
+        assert_eq!(wf.value_len(root), 2);
+        // The UI fills the cache when the signal turns ready (or on install);
+        // a later radix change invalidates and immediately refreshes it
+        // (transitions do not depend on radix).
+        wf.refresh_value_times();
+        assert!(wf.value_times_cache[root].is_some());
+        wf.rebuild_array_texts(&HashMap::new());
+        assert!(wf.value_times_cache[root].is_some());
+        assert_eq!(wf.value_times(root), vec![0, 5]);
+    }
+
+    #[test]
+    fn synthesized_values_are_unknown_before_the_first_member_change() {
+        let mut wf = waveform(vec![
+            leaf("a[0][1:0]", &[0, 0], 3),
+            leaf("a[1][1:0]", &[1, 0], 7),
+        ]);
+        wf.build_arrays();
+        let root = wf.signals.iter().position(|s| s.name == "a").unwrap();
+        assert_eq!(wf.value_at(root, 2), None);
+        assert_eq!(wf.value_at(root, 3), Some(Value::Str("{0, x}".into())));
+        assert_eq!(wf.value_at(root, 7), Some(Value::Str("{0, 1}".into())));
     }
 
     #[test]
@@ -691,10 +888,9 @@ mod tests {
         ]);
         wf.build_arrays();
         assert_eq!(wf.signals.len(), 3);
-        let root = &wf.signals[2];
-        assert_eq!(root.name, "mem");
-        assert_eq!(root.kind, SigKind::Str);
-        assert_eq!(root.value_at(0), Some(&Value::Str("{0, 2}".to_string())));
+        assert_eq!(wf.signals[2].name, "mem");
+        assert_eq!(wf.signals[2].kind, SigKind::Str);
+        assert_eq!(wf.value_at(2, 0), Some(Value::Str("{0, 2}".to_string())));
         assert_eq!(wf.signals[0].parent, Some(2));
         assert_eq!(wf.signals[1].parent, Some(2));
     }
@@ -725,17 +921,11 @@ mod tests {
             .iter()
             .position(|signal| signal.name == "arr")
             .unwrap();
+        assert_eq!(wf.value_at(sub0, 0), Some(Value::Str("{0, 1}".into())));
+        assert_eq!(wf.value_at(sub1, 0), Some(Value::Str("{2, 3}".into())));
         assert_eq!(
-            wf.signals[sub0].value_at(0),
-            Some(&Value::Str("{0, 1}".into()))
-        );
-        assert_eq!(
-            wf.signals[sub1].value_at(0),
-            Some(&Value::Str("{2, 3}".into()))
-        );
-        assert_eq!(
-            wf.signals[root].value_at(0),
-            Some(&Value::Str("{{0, 1}, {2, 3}}".to_string()))
+            wf.value_at(root, 0),
+            Some(Value::Str("{{0, 1}, {2, 3}}".to_string()))
         );
         assert_eq!(wf.signals[0].parent, Some(sub0));
         assert_eq!(wf.signals[2].parent, Some(sub1));
@@ -754,23 +944,23 @@ mod tests {
         let root = wf.signals.iter().position(|s| s.name == "arr").unwrap();
         // Hex is the default radix for arrays.
         assert_eq!(
-            wf.signals[root].value_at(0),
-            Some(&Value::Str("{a, 10}".to_string()))
+            wf.value_at(root, 0),
+            Some(Value::Str("{a, 10}".to_string()))
         );
         let mut radix = HashMap::new();
         radix.insert(root, Radix::Hex);
         wf.rebuild_array_texts(&radix);
         assert_eq!(
-            wf.signals[root].value_at(0),
-            Some(&Value::Str("{a, 10}".to_string()))
+            wf.value_at(root, 0),
+            Some(Value::Str("{a, 10}".to_string()))
         );
         // A leaf override only reformats that element.
         radix.clear();
         radix.insert(0, Radix::Bin);
         wf.rebuild_array_texts(&radix);
         assert_eq!(
-            wf.signals[root].value_at(0),
-            Some(&Value::Str("{1010, 10}".to_string()))
+            wf.value_at(root, 0),
+            Some(Value::Str("{1010, 10}".to_string()))
         );
     }
 
@@ -797,7 +987,7 @@ mod tests {
     fn brace_values_track_changes() {
         let mut wf = waveform(vec![
             Signal {
-                changes: vec![
+                changes: Arc::new(vec![
                     Change {
                         t: 0,
                         v: Value::Bits(vec![0, 0]),
@@ -806,19 +996,19 @@ mod tests {
                         t: 5,
                         v: Value::Bits(vec![1, 0]),
                     },
-                ],
+                ]),
                 ..leaf("a[0][1:0]", &[0, 0], 0)
             },
             leaf("a[1][1:0]", &[1, 0], 0),
         ]);
         wf.build_arrays();
         let root = wf.signals.iter().position(|s| s.name == "a").unwrap();
-        let values: Vec<String> = wf.signals[root]
-            .changes
-            .iter()
-            .map(|change| match &change.v {
-                Value::Str(text) => text.clone(),
-                _ => unreachable!(),
+        let values: Vec<String> = wf
+            .value_times(root)
+            .into_iter()
+            .map(|t| match wf.value_at(root, t) {
+                Some(Value::Str(text)) => text,
+                other => panic!("not text: {other:?}"),
             })
             .collect();
         assert_eq!(values, vec!["{0, 1}", "{1, 1}"]);

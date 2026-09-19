@@ -158,11 +158,13 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
 
                 let radix = app.radix_for(*sig);
                 let (from, to) = app.cursor_column_range();
-                let transition = signal.display_change_in(from, to, radix);
+                // Brace values of arrays/aggregates are joined at the cursor
+                // column; `Waveform` handles both plain and synthesized rows.
+                let transition = wf.display_change_in(*sig, from, to, radix);
                 let on_edge = transition.is_some();
                 let value = match transition {
                     Some(text_value) if text_value.chars().count() <= value_w => text_value,
-                    _ => signal.display_value(app.cursor, radix),
+                    _ => wf.display_value(*sig, app.cursor, radix),
                 };
                 let value_style = if on_edge {
                     Style::new()

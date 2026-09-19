@@ -19,6 +19,7 @@
 
 use crate::waveform::{Change, Waveform};
 use std::path::Path;
+use std::sync::Arc;
 
 pub mod source;
 
@@ -139,14 +140,16 @@ pub(crate) fn enforce_limits(out: &mut ParseOut) {
     let mut budget = MAX_TOTAL_CHANGES;
     for signal in &mut out.wf.signals {
         let name = signal.name.clone();
-        let changes = std::mem::take(&mut signal.changes);
-        signal.changes = limit_changes(
+        // Freshly parsed signals are never shared yet, so `make_mut` does not
+        // clone here; wrapping the limited Vec back up keeps the field an Arc.
+        let changes = std::mem::take(Arc::make_mut(&mut signal.changes));
+        signal.changes = Arc::new(limit_changes(
             &name,
             changes,
             MAX_CHANGES_PER_SIGNAL,
             &mut budget,
             &mut out.warnings,
-        );
+        ));
     }
 }
 

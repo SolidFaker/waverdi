@@ -76,7 +76,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         match list_row {
             crate::app::ListRow::Group { .. } => draw_group_row(buf, l, t, selected, y),
             crate::app::ListRow::Signal { sig, .. } => {
-                draw_signal_row(buf, l, app, *sig, &wf.signals[*sig], row_bg, y);
+                draw_signal_row(buf, l, app, *sig, wf, row_bg, y);
             }
         }
     }
@@ -198,10 +198,11 @@ fn draw_signal_row(
     l: &Layout,
     app: &App,
     idx: usize,
-    sig: &Signal,
+    wf: &Waveform,
     row_bg: Color,
     y: u16,
 ) {
+    let sig = &wf.signals[idx];
     if sig.state != crate::waveform::SigState::Ready {
         let label = if sig.state == crate::waveform::SigState::Loading {
             "… loading"
@@ -226,7 +227,7 @@ fn draw_signal_row(
     match sig.kind {
         waveform::SigKind::Bits if sig.bits <= 1 => draw_bit_row(buf, l, app, sig, row_bg, y),
         waveform::SigKind::Bits | waveform::SigKind::Str => {
-            draw_bus_row(buf, l, app, idx, sig, row_bg, y)
+            draw_bus_row(buf, l, app, wf, idx, row_bg, y)
         }
         waveform::SigKind::Real => draw_analog_row(buf, l, app, sig, row_bg, y, (sig.min, sig.max)),
     }
@@ -276,30 +277,89 @@ fn draw_bit_row(buf: &mut Buffer, l: &Layout, app: &App, sig: &Signal, row_bg: C
 }
 
 /// Draw a bus (or string) as a horizontal trace, writing the value inside each
-/// visible segment the way Verdi's nWave does.
+/// visible segment the way Verdi's nWave does. Synthesized arrays and
+/// aggregates join their members at each drawn time instead of reading a
+/// stored change list.
 fn draw_bus_row(
     buf: &mut Buffer,
     l: &Layout,
     app: &App,
+    wf: &Waveform,
     idx: usize,
-    sig: &Signal,
     row_bg: Color,
     y: u16,
 ) {
+    let radix = app.radix_for(idx);
+    if wf.is_synthesized(idx) {
+        let times = wf.value_times(idx);
+        draw_bus_trace(
+            buf,
+            l,
+            app,
+            row_bg,
+            y,
+            BusTimes::Merged(&times),
+            |j| match wf.value_at(idx, times[j]) {
+                Some(value) => waveform::fmt_value(&value, radix),
+                None => "x".to_string(),
+            },
+        );
+        return;
+    }
+    let changes = &wf.signals[idx].changes;
+    draw_bus_trace(buf, l, app, row_bg, y, BusTimes::Changes(changes), |j| {
+        waveform::fmt_value(&changes[j].v, radix)
+    });
+}
+
+/// Time source of a bus row: the zero-copy change list of a plain signal or
+/// the merged times of a synthesized one.
+enum BusTimes<'a> {
+    Changes(&'a [waveform::Change]),
+    Merged(&'a [waveform::Ticks]),
+}
+
+impl BusTimes<'_> {
+    fn len(&self) -> usize {
+        match self {
+            BusTimes::Changes(changes) => changes.len(),
+            BusTimes::Merged(times) => times.len(),
+        }
+    }
+
+    fn time_at(&self, index: usize) -> waveform::Ticks {
+        match self {
+            BusTimes::Changes(changes) => changes[index].t,
+            BusTimes::Merged(times) => times[index],
+        }
+    }
+}
+
+/// Shared drawing of a bus row over a virtual, time-ordered change list. The
+/// text of a change is provided lazily so plain signals keep their zero-copy
+/// change list while synthesized signals join their members.
+fn draw_bus_trace(
+    buf: &mut Buffer,
+    l: &Layout,
+    app: &App,
+    row_bg: Color,
+    y: u16,
+    times: BusTimes<'_>,
+    text_at: impl Fn(usize) -> String,
+) {
     let t = &app.theme;
     let (t0, scale) = (app.t0, app.scale);
-    let changes = &sig.changes;
-    let n = changes.len();
+    let n = times.len();
     // Change markers use the same rounding as the cursor column.
     let cut = t0 - 0.5 * scale;
-    let mut i = changes.partition_point(|c| (c.t as f64) < cut);
+    let mut i = time_partition_point(&times, |time| (time as f64) < cut);
 
     for col in 0..l.cols {
         let col_end = t0 + (col as f64 + 0.5) * scale;
         // Binary search instead of walking every change: zoomed-out views
         // stay fast no matter how many changes the signal has.
         let before = i;
-        i = changes.partition_point(|c| (c.t as f64) < col_end);
+        i = time_partition_point(&times, |time| (time as f64) < col_end);
         let transition = i > before;
         let symbol = if transition { BUS_CROSS } else { BUS_LINE };
         text::set_cell(buf, l.rows.x + col as u16, y, symbol, t.bus, row_bg);
@@ -308,25 +368,22 @@ fn draw_bus_row(
     if n == 0 || l.cols == 0 {
         return;
     }
-    let radix = app.radix_for(idx);
     let width = l.cols as i64;
     let t_end = t0 + width as f64 * scale;
-    let mut j = changes
-        .partition_point(|c| (c.t as f64) <= t0)
-        .saturating_sub(1);
+    let mut j = time_partition_point(&times, |time| (time as f64) <= t0).saturating_sub(1);
     while j < n {
-        let cs = changes[j].t as f64;
+        let cs = times.time_at(j) as f64;
         if cs >= t_end {
             break;
         }
         let ce = if j + 1 < n {
-            changes[j + 1].t as f64
+            times.time_at(j + 1) as f64
         } else {
             t_end
         };
         let c0 = (((cs - t0) / scale).round() as i64).clamp(0, width);
         let c1 = (((ce - t0) / scale).round() as i64).clamp(0, width);
-        let value = segment_text(&changes[j].v, radix);
+        let value = text_at(j);
         let len = value.chars().count() as i64;
         if c1 - c0 >= len + 2 {
             text::put(
@@ -344,12 +401,27 @@ fn draw_bus_row(
             // segment that follows them.
             let target_col = (c0 + (len + 2).max(1)).clamp(1, width);
             let target_t = t0 + target_col as f64 * scale;
-            let active = changes
-                .partition_point(|c| (c.t as f64) <= target_t)
-                .saturating_sub(1);
+            let active =
+                time_partition_point(&times, |time| (time as f64) <= target_t).saturating_sub(1);
             j = active.max(j + 1);
         }
     }
+}
+
+/// Partition point of a bus row's time list: index of the first entry whose
+/// time makes `pred` false, all earlier entries satisfying it
+/// (`slice::partition_point` needs a real slice).
+fn time_partition_point(times: &BusTimes<'_>, pred: impl Fn(waveform::Ticks) -> bool) -> usize {
+    let (mut lo, mut hi) = (0, times.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if pred(times.time_at(mid)) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 fn draw_analog_row(
@@ -458,10 +530,6 @@ fn rail_color(t: &Theme, value: Option<&Value>) -> Color {
         2 => t.xcol,
         _ => t.zcol,
     }
-}
-
-fn segment_text(value: &Value, radix: waveform::Radix) -> String {
-    waveform::fmt_value(value, radix)
 }
 
 fn draw_range(buf: &mut Buffer, l: &Layout, app: &App) {

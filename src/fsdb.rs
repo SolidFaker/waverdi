@@ -11,6 +11,7 @@ use crate::dump::{
 use crate::waveform::{Change, ScopeTree, SigKind, SigState, Signal, TimeScale, Value, Waveform};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::Path;
+use std::sync::Arc;
 
 type ScopeCb = extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char, u32);
 type VarCb = extern "C" fn(*mut c_void, *const c_char, i64, u32, u32, u32, u32, u32, u32);
@@ -142,7 +143,11 @@ pub fn parse_fsdb_with(path: &Path, progress: crate::dump::Progress) -> Result<P
     let mut budget = MAX_TOTAL_CHANGES;
     let result = assemble(
         &mut input,
-        &mut |handle, var, warnings, budget| read_changes(handle, var, warnings, budget),
+        &mut |handle, var, warnings, budget| {
+            let (raw, mut raw_warnings) = collect_raw_changes(handle, var, budget);
+            warnings.append(&mut raw_warnings);
+            decode_raw(raw, &var.name, warnings)
+        },
         &mut budget,
         progress,
     );
@@ -202,29 +207,82 @@ impl FsdbSession {
         self.vars.len()
     }
 
+    /// Whether any variable records a port direction. The UI uses this to
+    /// decide whether the direction-based filters can show anything.
+    pub fn has_directions(&self) -> bool {
+        self.vars.iter().any(|var| var.direction != 0)
+    }
+
     /// Read the value changes of one dump variable.
     pub fn read_signal(&mut self, index: usize) -> (Vec<Change>, Vec<String>) {
-        let Some(var) = self.vars.get(index) else {
-            return (Vec::new(), Vec::new());
-        };
+        self.read_signals(&[index])
+            .pop()
+            .unwrap_or_else(|| (Vec::new(), Vec::new()))
+    }
+
+    /// Read the value changes of several dump variables in one FFR pass. The
+    /// results are in the input order; unknown indices yield empty results.
+    pub fn read_signals(&mut self, indexes: &[usize]) -> Vec<(Vec<Change>, Vec<String>)> {
+        self.read_signals_raw(indexes)
+            .into_iter()
+            .zip(indexes)
+            .map(|((raw, mut warnings), &index)| {
+                let name = self
+                    .vars
+                    .get(index)
+                    .map(|var| var.name.as_str())
+                    .unwrap_or("");
+                let changes = decode_raw(raw, name, &mut warnings);
+                (changes, warnings)
+            })
+            .collect()
+    }
+
+    /// Read several dump variables without decoding their values: the caller
+    /// gets the raw bytes out of FFR and decodes them elsewhere, so the
+    /// global FFR lock is only held for the copy. The results are in the
+    /// input order; unknown indices yield empty results.
+    pub(crate) fn read_signals_raw(&mut self, indexes: &[usize]) -> Vec<(RawChanges, Vec<String>)> {
+        let mut results: Vec<(RawChanges, Vec<String>)> = indexes
+            .iter()
+            .map(|_| (RawChanges::default(), Vec::new()))
+            .collect();
+        // Resolve the indices first: invalid ones never reach FFR, and an
+        // all-invalid batch must not touch the (process global) library.
+        let vars: Vec<(usize, &VarMeta)> = indexes
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, &index)| self.vars.get(index).map(|var| (slot, var)))
+            .collect();
+        if vars.is_empty() {
+            return results;
+        }
         let _lock = FFR_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let _silence = StderrSilencer::new();
-        let mut warnings = Vec::new();
         // The FFR signal list accumulates and `ffrLoadSignals` loads every
-        // signal in it, so a read only stays cheap if the previous signal is
-        // unloaded and the list reset first: otherwise each new signal would
-        // reload all previously added ones (quadratic in the signals added).
+        // signal in it, so a read only stays cheap if the previous signals are
+        // unloaded and the list reset first. Adding the whole batch before a
+        // single load makes one pass serve every requested signal instead of
+        // reloading the earlier ones per signal (quadratic in the batch).
         unsafe {
             wav_fsdb_unload_signals(self.handle);
             wav_fsdb_reset_signal_list(self.handle);
-            wav_fsdb_add_signal(self.handle, var.idcode);
+            for &(_, var) in &vars {
+                wav_fsdb_add_signal(self.handle, var.idcode);
+            }
         }
         if unsafe { wav_fsdb_load_signals(self.handle) } != 0 {
-            warnings.push(format!("{}: failed to load signal values", var.name));
-            return (Vec::new(), warnings);
+            for &(slot, var) in &vars {
+                results[slot]
+                    .1
+                    .push(format!("{}: failed to load signal values", var.name));
+            }
+            return results;
         }
-        let changes = read_changes(self.handle, var, &mut warnings, &mut self.budget);
-        (changes, warnings)
+        for &(slot, var) in &vars {
+            results[slot] = collect_raw_changes(self.handle, var, &mut self.budget);
+        }
+        results
     }
 }
 
@@ -247,7 +305,7 @@ struct Input {
 }
 
 /// Open the dump and collect its hierarchy. Callers must hold [`FFR_LOCK`]
-/// and a [`StderrSilencer`]; [`read_signal`](FsdbSession::read_signal) and
+/// and a [`StderrSilencer`]; [`read_signals`](FsdbSession::read_signals) and
 /// the session teardown take them per call.
 fn open_input(path: &Path, load_values: bool) -> Result<Input, String> {
     let display = path.display().to_string();
@@ -357,7 +415,7 @@ fn assemble(
             dir: direction_name(var.direction),
             scope: var.scope.clone(),
             kind,
-            changes,
+            changes: Arc::new(changes),
             min,
             max,
             parent: None,
@@ -394,49 +452,74 @@ fn assemble(
             end,
             signals,
             tree,
+            radix: std::collections::HashMap::new(),
+            value_times_cache: Vec::new(),
         },
         warnings,
     })
 }
 
-fn read_changes(
+/// Value changes of one signal as they come out of FFR, before decoding:
+/// `stride` bytes per change in `data`, in time order. The loader decodes
+/// these on its compute pool so the reader is not held up by value math.
+#[derive(Default)]
+pub(crate) struct RawChanges {
+    pub bytes_per_bit: u32,
+    pub bits: usize,
+    pub times: Vec<u64>,
+    /// Concatenated value bytes, `stride` per entry.
+    pub data: Vec<u8>,
+    pub stride: usize,
+    /// The read hit [`MAX_CHANGES_READ_PER_SIGNAL`].
+    pub truncated: bool,
+    /// The shared change budget ran out before this signal.
+    pub no_budget: bool,
+}
+
+/// Copy one variable's raw change bytes out of FFR without decoding them.
+/// The global budget is charged with the raw count here - an upper bound,
+/// since dedupe in [`decode_raw`] can only shrink it - so the memory bound
+/// is decided while the FFR lock is still held, before the value math moves
+/// to the pool.
+fn collect_raw_changes(
     handle: *mut c_void,
     var: &VarMeta,
-    warnings: &mut Vec<String>,
     budget: &mut u64,
-) -> Vec<Change> {
+) -> (RawChanges, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut raw = RawChanges::default();
     if var.var_type == 17 || var.var_type == 18 {
         warnings.push(format!("{}: memory signals are not displayed", var.name));
-        return Vec::new();
+        return (raw, warnings);
     }
     if *budget == 0 {
-        return Vec::new();
+        raw.no_budget = true;
+        return (raw, warnings);
     }
     let vc = unsafe { wav_fsdb_vc_handle(handle, var.idcode) };
     if vc.is_null() {
-        return Vec::new();
+        return (raw, warnings);
     }
-    let mut changes: Vec<Change> = Vec::new();
     if unsafe { wav_fsdb_has_vc(vc) } != 0 {
         let mut min_time = 0u64;
         if unsafe { wav_fsdb_min_time(vc, &mut min_time) } == 0
             && unsafe { wav_fsdb_goto_time(vc, min_time) } == 0
         {
-            let bytes_per_bit = unsafe { wav_fsdb_bytes_per_bit(vc) };
-            let bits = unsafe { wav_fsdb_bit_size(vc) } as usize;
-            let size = if bytes_per_bit == 0 {
-                bits.max(1)
+            raw.bytes_per_bit = unsafe { wav_fsdb_bytes_per_bit(vc) };
+            raw.bits = unsafe { wav_fsdb_bit_size(vc) } as usize;
+            let size = if raw.bytes_per_bit == 0 {
+                raw.bits.max(1)
             } else {
-                1usize << bytes_per_bit.min(3)
+                1usize << raw.bytes_per_bit.min(3)
             };
             // Read in chunks: one FFI call per chunk instead of three per
-            // change, with the decoding left to Rust.
+            // change, with the decoding left to the compute pool.
             const CHUNK: usize = 4096;
-            let stride = size.max(8);
+            raw.stride = size.max(8);
             let mut times = vec![0u64; CHUNK];
             let mut lengths = vec![0u64; CHUNK];
-            let mut buf = vec![0u8; CHUNK * stride];
-            'read: loop {
+            let mut buf = vec![0u8; CHUNK * raw.stride];
+            loop {
                 let mut count = 0u64;
                 let rc = unsafe {
                     wav_fsdb_read_changes(
@@ -445,33 +528,21 @@ fn read_changes(
                         buf.as_mut_ptr(),
                         lengths.as_mut_ptr(),
                         CHUNK as u64,
-                        stride as u64,
+                        raw.stride as u64,
                         &mut count,
                     )
                 };
                 if rc != 0 || count == 0 {
                     break;
                 }
-                for k in 0..count as usize {
-                    let start = k * stride;
-                    let bytes = &buf[start..start + lengths[k] as usize];
-                    if let Some(value) = decode_value(bytes_per_bit, bits, bytes) {
-                        if !changes.last().map(|c| c.v == value).unwrap_or(false) {
-                            changes.push(Change {
-                                t: times[k],
-                                v: value,
-                            });
-                        }
-                    }
-                    if changes.len() >= MAX_CHANGES_READ_PER_SIGNAL {
-                        warnings.push(format!(
-                            "{}: value changes truncated at {} while reading",
-                            var.name, MAX_CHANGES_READ_PER_SIGNAL
-                        ));
-                        break 'read;
-                    }
+                let count = count as usize;
+                raw.times.extend_from_slice(&times[..count]);
+                raw.data.extend_from_slice(&buf[..count * raw.stride]);
+                if raw.times.len() >= MAX_CHANGES_READ_PER_SIGNAL {
+                    raw.truncated = true;
+                    break;
                 }
-                if count < CHUNK as u64 {
+                if count < CHUNK {
                     break;
                 }
             }
@@ -479,8 +550,48 @@ fn read_changes(
     }
     unsafe { wav_fsdb_free_handle(vc) };
 
-    let mut changes =
-        crate::dump::limit_changes(&var.name, changes, MAX_CHANGES_PER_SIGNAL, budget, warnings);
+    *budget = budget.saturating_sub(raw.times.len() as u64);
+    if *budget == 0 {
+        warnings.push(format!(
+            "value changes are limited to {MAX_TOTAL_CHANGES} in total; remaining signals are loaded without values"
+        ));
+    }
+    (raw, warnings)
+}
+
+/// Decode the raw bytes of [`collect_raw_changes`] into value changes. Runs
+/// on the loader's compute pool: the reader thread only copied bytes, so the
+/// FFR lock is not held for the value math. Consecutive equal values are
+/// dropped, and lists past [`MAX_CHANGES_PER_SIGNAL`] are decimated exactly
+/// like [`crate::dump::limit_changes`] would (the global budget was already
+/// charged at collect time, so it is not touched here).
+pub(crate) fn decode_raw(raw: RawChanges, name: &str, warnings: &mut Vec<String>) -> Vec<Change> {
+    if raw.no_budget {
+        return Vec::new();
+    }
+    let mut changes: Vec<Change> = Vec::new();
+    for (k, &t) in raw.times.iter().enumerate() {
+        let start = k * raw.stride;
+        let bytes = &raw.data[start..start + raw.stride];
+        if let Some(value) = decode_value(raw.bytes_per_bit, raw.bits, bytes) {
+            if !changes.last().map(|c| c.v == value).unwrap_or(false) {
+                changes.push(Change { t, v: value });
+            }
+        }
+    }
+    if raw.truncated {
+        warnings.push(format!(
+            "{name}: value changes truncated at {MAX_CHANGES_READ_PER_SIGNAL} while reading"
+        ));
+    }
+    if changes.len() > MAX_CHANGES_PER_SIGNAL {
+        let before = changes.len();
+        changes = crate::dump::decimate(changes, MAX_CHANGES_PER_SIGNAL);
+        warnings.push(format!(
+            "{name}: {before} value changes decimated to {} for display",
+            changes.len()
+        ));
+    }
     changes.shrink_to_fit();
     changes
 }
@@ -734,6 +845,70 @@ mod tests {
         assert!(out.wf.signals.iter().any(|s| !s.changes.is_empty()));
     }
 
+    /// A batch read must serve every signal in one FFR pass with the same
+    /// values as the single-signal path, in the order it was asked; unknown
+    /// indices stay empty.
+    #[test]
+    fn batched_reads_match_single_reads() {
+        let Some(path) = verdi_demo() else {
+            return;
+        };
+        let (_, mut session) =
+            parse_fsdb_lazy(&path, &mut |_| true).expect("demo fsdb should open");
+        if session.var_count() < 2 {
+            return;
+        }
+        // The first signals may legitimately have no values (memories,
+        // constants); the batch must return the same tuples in the requested
+        // order either way.
+        let indexes = [0usize, 1usize];
+        let singles: Vec<(Vec<Change>, Vec<String>)> = indexes
+            .iter()
+            .map(|&index| session.read_signal(index))
+            .collect();
+
+        let batched = session.read_signals(&indexes);
+        assert_eq!(batched.len(), indexes.len());
+        for (batched, single) in batched.iter().zip(&singles) {
+            assert_eq!(batched.0, single.0, "batch differs from the single reads");
+        }
+        // A reversed batch returns the values in the requested order.
+        let reversed = session.read_signals(&[indexes[1], indexes[0]]);
+        assert_eq!(reversed[0].0, singles[1].0);
+        assert_eq!(reversed[1].0, singles[0].0);
+        // An unknown index yields empty results without disturbing the
+        // valid signals of the same batch.
+        let missing = session.read_signals(&[session.var_count(), indexes[0]]);
+        assert!(missing[0].0.is_empty() && missing[0].1.is_empty());
+        assert_eq!(missing[1].0, singles[0].0);
+    }
+
+    /// The pool path reads raw bytes and decodes them off the reader thread;
+    /// it must produce exactly the same changes as the synchronous reader.
+    #[test]
+    fn raw_decode_matches_read_signal() {
+        let Some(path) = verdi_demo() else {
+            return;
+        };
+        let (_, mut session) =
+            parse_fsdb_lazy(&path, &mut |_| true).expect("demo fsdb should open");
+        // Find the first signal that actually has values.
+        for index in 0..session.var_count() {
+            let (expected, _) = session.read_signal(index);
+            if expected.is_empty() {
+                continue;
+            }
+            let (raw, mut warnings) = session
+                .read_signals_raw(&[index])
+                .pop()
+                .expect("a requested index yields one result");
+            assert!(!raw.times.is_empty(), "raw read of signal {index} is empty");
+            let changes = decode_raw(raw, "", &mut warnings);
+            assert_eq!(changes, expected, "raw decode differs at signal {index}");
+            return;
+        }
+    }
+
     /// Cross-check the FFR based reader against Verdi's own `fsdb2vcd`
     /// converter: both must produce exactly the same signal values.
     #[test]
@@ -788,7 +963,7 @@ mod tests {
                 vcd_signal.changes.len(),
                 "change count differs for {name}"
             );
-            for (a, b) in fsdb_signal.changes.iter().zip(&vcd_signal.changes) {
+            for (a, b) in fsdb_signal.changes.iter().zip(vcd_signal.changes.iter()) {
                 assert_eq!(a.t, b.t, "time differs for {name}");
                 assert_eq!(a.v, b.v, "value differs for {name} at {}", a.t);
             }

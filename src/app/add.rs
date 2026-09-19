@@ -470,9 +470,24 @@ impl App {
         }
     }
 
+    /// Cycle the type filter through the ones the backend can fill. Dumps
+    /// without recorded port directions (VCD/FST) skip input/output/inout, so
+    /// their picker only shows all/net/reg. The walk is bounded by the cycle
+    /// length, so it always terminates.
     pub fn add_cycle_filter(&mut self) {
+        let directions = self.backend_caps.directions;
         if let Some(add) = &mut self.add_signals {
-            add.filter = add.filter.next();
+            for _ in 0..AddFilter::CYCLE.len() {
+                add.filter = add.filter.next();
+                if directions
+                    || !matches!(
+                        add.filter,
+                        AddFilter::Inputs | AddFilter::Outputs | AddFilter::Inouts
+                    )
+                {
+                    break;
+                }
+            }
             add.signal_sel = 0;
             add.signal_scroll = 0;
         }
@@ -602,5 +617,47 @@ impl App {
             add.selected.clear();
         }
         self.msg(format!("added {count} signal(s) to the waveform"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AddFilter;
+    use crate::app::tests::app_with;
+
+    /// Dumps without port directions must never cycle onto input/output/inout
+    /// (they would always show an empty list), while a backend that records
+    /// directions brings them back.
+    #[test]
+    fn filter_cycle_respects_backend_capabilities() {
+        let mut app =
+            app_with("$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n#0\n0!\n");
+        app.open_add_signals();
+        assert!(!app.backend_caps.directions, "VCD carries no directions");
+
+        let filter = |app: &crate::app::App| app.add_signals.as_ref().unwrap().filter;
+        let (mut saw_net, mut saw_reg) = (false, false);
+        for _ in 0..AddFilter::CYCLE.len() {
+            app.add_cycle_filter();
+            assert!(
+                !matches!(
+                    filter(&app),
+                    AddFilter::Inputs | AddFilter::Outputs | AddFilter::Inouts
+                ),
+                "unsupported filter reached: {:?}",
+                filter(&app)
+            );
+            saw_net |= filter(&app) == AddFilter::Nets;
+            saw_reg |= filter(&app) == AddFilter::Regs;
+        }
+        assert!(saw_net && saw_reg, "net and reg stay reachable");
+
+        app.backend_caps.directions = true;
+        let mut saw_input = false;
+        for _ in 0..AddFilter::CYCLE.len() {
+            app.add_cycle_filter();
+            saw_input |= filter(&app) == AddFilter::Inputs;
+        }
+        assert!(saw_input, "input is reachable with directions recorded");
     }
 }

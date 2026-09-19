@@ -4,6 +4,7 @@ use crate::waveform::{
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 pub fn parse_vcd(path: &Path) -> Result<ParseOut, String> {
     let data = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -186,6 +187,8 @@ impl Parser {
                 end: 0,
                 signals: Vec::new(),
                 tree: ScopeTree::new(),
+                radix: HashMap::new(),
+                value_times_cache: Vec::new(),
             },
             idmap: HashMap::new(),
             stack: vec![0],
@@ -263,7 +266,7 @@ impl Parser {
                         dir: String::new(),
                         scope: self.cur_scope.clone(),
                         kind,
-                        changes: Vec::new(),
+                        changes: Arc::new(Vec::new()),
                         min: f64::INFINITY,
                         max: f64::NEG_INFINITY,
                         parent: None,
@@ -327,11 +330,13 @@ impl Parser {
             sig.min = sig.min.min(r);
             sig.max = sig.max.max(r);
         }
-        sig.changes.push(Change {
+        // Parsing builds the list in place and nothing shares it yet.
+        let changes = Arc::make_mut(&mut sig.changes);
+        changes.push(Change {
             t: self.cur_time,
             v,
         });
-        if sig.changes.len() >= crate::dump::MAX_CHANGES_READ_PER_SIGNAL {
+        if changes.len() >= crate::dump::MAX_CHANGES_READ_PER_SIGNAL {
             let name = sig.name.clone();
             self.truncated.insert(idx);
             self.warn(

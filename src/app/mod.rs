@@ -23,6 +23,7 @@ pub use load::{LoadEvent, LoadJob};
 pub use mouse::handle_mouse;
 pub use nav::{Group, ListRow};
 
+use crate::dump::source::Capabilities;
 use crate::rtl::{RtlDb, SourceSet, SourceView};
 use crate::theme::{Theme, ThemeKind, UiSetting, WaveSetting};
 use crate::ui::layout::{compute_layout, Layout, Splits};
@@ -30,6 +31,7 @@ use crate::waveform::{Radix, Ticks, TimeBase, Waveform};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -213,6 +215,9 @@ pub struct App {
     pub sources_explicit: bool,
     /// Background waveform load in flight (progress shown in the status line).
     pub load: Option<LoadJob>,
+    /// What the open dump backend provides (lazy values, port directions);
+    /// the UI gates features on it instead of guessing per format.
+    pub backend_caps: Capabilities,
     /// Open "Add Signals" picker state.
     pub add_signals: Option<AddSignals>,
     pending_fit: bool,
@@ -280,6 +285,7 @@ impl App {
             last_source_trace: None,
             sources_explicit: false,
             load: None,
+            backend_caps: Capabilities::default(),
             add_signals: None,
             pending_fit: false,
         };
@@ -392,6 +398,7 @@ impl App {
             wf.signals[index].state = crate::waveform::SigState::Loading;
         } else if wf.recompute_aggregate(index) {
             // Aggregates of eager dumps whose members are already loaded.
+            wf.cache_value_times(index);
         } else {
             self.msg("waveform backend is no longer available for this dump");
         }
@@ -438,6 +445,9 @@ impl App {
                     if let Some(job) = &mut self.load {
                         job.progress = progress;
                     }
+                }
+                LoadEvent::Capabilities(caps) => {
+                    self.backend_caps = caps;
                 }
                 LoadEvent::Waveform(out) => {
                     let path = self
@@ -487,14 +497,18 @@ impl App {
         }
     }
 
-    /// Install value changes that arrived from a lazy backend.
-    fn apply_signal_changes(&mut self, updates: Vec<(usize, Vec<crate::waveform::Change>)>) {
+    /// Install value changes that arrived from a lazy backend. The Arc moves
+    /// straight into the signal: the worker and the UI share one allocation.
+    fn apply_signal_changes(&mut self, updates: Vec<(usize, Arc<Vec<crate::waveform::Change>>)>) {
         let Some(wf) = self.wf.as_mut() else { return };
         for (index, changes) in updates {
             if let Some(signal) = wf.signals.get_mut(index) {
                 signal.changes = changes;
                 signal.state = crate::waveform::SigState::Ready;
             }
+            // A synthesized signal that just became ready computes its
+            // transition times once, off the draw path.
+            wf.cache_value_times(index);
         }
     }
 
@@ -606,7 +620,13 @@ impl App {
     }
 
     /// Install an already grouped waveform and reset the view state.
-    pub fn apply_waveform(&mut self, path: String, wf: Waveform, warnings: Vec<String>) {
+    pub fn apply_waveform(&mut self, path: String, mut wf: Waveform, warnings: Vec<String>) {
+        // A manual install has no session behind it and starts from a clean
+        // backend description; the loader reports the real capabilities just
+        // before this waveform, so they must survive the reset.
+        if self.load.is_none() {
+            self.backend_caps = Capabilities::default();
+        }
         self.msg(format!("Loaded {}", wf.summary()));
         for warning in warnings {
             self.msg(format!("  warn: {warning}"));
@@ -644,6 +664,9 @@ impl App {
         self.find_sel = 0;
         self.value_query = None;
         self.cursor = wf.start;
+        // Eagerly parsed dumps arrive with every member value present: fill
+        // the synthesized transition-time caches once instead of per draw.
+        wf.refresh_value_times();
         self.wf = Some(wf);
         self.dialog = None;
         self.dialog_scroll = 0;
@@ -1524,16 +1547,15 @@ impl App {
     /// Re-format the brace values of array signals with the current radixes.
     fn refresh_arrays(&mut self) {
         let radix = std::mem::take(&mut self.radix);
-        // With a live backend the whole rebuild runs off the UI thread.
-        let sent = self
-            .load
-            .as_ref()
-            .map(|job| job.request_rebuild(radix.clone()))
-            .unwrap_or(false);
-        if !sent {
-            if let Some(wf) = self.wf.as_mut() {
-                wf.rebuild_array_texts(&radix);
-            }
+        // Brace values are synthesized on demand, so the local refresh only
+        // records the overrides (the UI computes them from its own members)
+        // and drops the cached transition times. A live backend additionally
+        // refreshes the shared waveform off the UI thread.
+        if let Some(wf) = self.wf.as_mut() {
+            wf.rebuild_array_texts(&radix);
+        }
+        if let Some(job) = &self.load {
+            job.request_rebuild(radix.clone());
         }
         self.radix = radix;
     }
@@ -1881,6 +1903,8 @@ endmodule
             end: 10,
             signals: Vec::new(),
             tree: ScopeTree::new(),
+            radix: HashMap::new(),
+            value_times_cache: Vec::new(),
         };
         let root = wf.tree.root;
         let tb = wf.tree.add_scope(root, "tb".to_string(), "tb".to_string());
@@ -2069,6 +2093,8 @@ endmodule
             end: 10,
             signals: vec![],
             tree: ScopeTree::new(),
+            radix: HashMap::new(),
+            value_times_cache: Vec::new(),
         };
         let tb = wf
             .tree
@@ -2092,10 +2118,10 @@ endmodule
             dir: "input".to_string(),
             scope: vec!["tb".to_string(), "dprx_if".to_string()],
             kind: SigKind::Bits,
-            changes: vec![Change {
+            changes: Arc::new(vec![Change {
                 t: 0,
                 v: Value::compact(vec![0]),
-            }],
+            }]),
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             parent: None,
@@ -2185,13 +2211,12 @@ endmodule
             "aggregate"
         );
         app.add_signal(aggregate);
-        let signal = &app.wf.as_ref().unwrap().signals[aggregate];
+        let wf = app.wf.as_ref().unwrap();
+        let signal = &wf.signals[aggregate];
         assert_eq!(signal.state, crate::waveform::SigState::Ready);
-        assert!(
-            signal.display_value(0, Radix::Hex).starts_with('{'),
-            "{}",
-            signal.display_value(0, Radix::Hex)
-        );
+        let text = wf.display_value(aggregate, 0, Radix::Hex);
+        assert!(text.starts_with('{'), "{text}");
+        assert!(signal.changes.is_empty(), "brace texts stay lazy");
         // The members can still be added on their own.
         app.add_signal(aggregate);
         let children = app.wf.as_ref().unwrap().children(aggregate);
@@ -2224,7 +2249,11 @@ endmodule
         assert_eq!(instances, vec![sub]);
         app.add_navigate(sub);
 
-        // Both signals listed; the filters narrow them down.
+        // Both signals listed; the filters narrow them down. This test covers
+        // the whole cycle, so claim a backend that records directions: VCD
+        // itself cycles only through all/net/reg (see the filter-cycle test
+        // in `app::add`).
+        app.backend_caps.directions = true;
         assert_eq!(app.add_signal_list().len(), 2);
         app.add_cycle_filter(); // -> input
         assert!(app.add_signal_list().is_empty());
@@ -2260,10 +2289,10 @@ endmodule
             dir: String::new(),
             scope: scope.iter().map(|part| part.to_string()).collect(),
             kind: SigKind::Bits,
-            changes: vec![Change {
+            changes: Arc::new(vec![Change {
                 t: 0,
                 v: Value::compact(vec![0]),
-            }],
+            }]),
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             parent: None,
@@ -2279,6 +2308,8 @@ endmodule
                 leaf("mst", &["tb", "rom_if"]),
             ],
             tree: ScopeTree::new(),
+            radix: HashMap::new(),
+            value_times_cache: Vec::new(),
         };
         let root = wf.tree.root;
         let tb = wf.tree.add_scope(root, "tb".to_string(), "m".to_string());
@@ -2363,6 +2394,9 @@ endmodule
         assert_eq!(wf.signals[0].name, "clk");
         assert_eq!(wf.signals[0].state, crate::waveform::SigState::Ready);
         assert_eq!(app.path, vcd.display().to_string());
+        // The backend described itself before the hierarchy arrived and the
+        // description survived the waveform install.
+        assert!(!app.backend_caps.lazy, "eager VCD backend must be reported");
         assert!(
             app.load.as_ref().is_some_and(|job| job.finished),
             "loader marked finished after Done"

@@ -3,6 +3,7 @@ mod dump;
 mod fst;
 mod picker;
 mod rtl;
+mod session;
 mod theme;
 mod ui;
 mod vcd;

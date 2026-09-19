@@ -338,19 +338,16 @@ impl App {
 
     /// Width (in characters) of the widest Value column text at the cursor.
     pub fn value_content_width(&self) -> usize {
+        let Some(wf) = &self.wf else {
+            return 0;
+        };
         self.display
             .iter()
             .map(|&sig| {
                 let radix = self.radix_for(sig);
-                self.wf
-                    .as_ref()
-                    .map(|wf| {
-                        wf.signals[sig]
-                            .display_value(self.cursor, radix)
-                            .chars()
-                            .count()
-                    })
-                    .unwrap_or(0)
+                // Synthesized brace values must be joined at the cursor; the
+                // signal itself stores no text.
+                wf.display_value(sig, self.cursor, radix).chars().count()
             })
             .max()
             .unwrap_or(0)

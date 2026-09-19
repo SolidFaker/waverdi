@@ -17,6 +17,27 @@
 use crate::waveform::{Change, Waveform};
 use std::path::Path;
 
+/// What a dump format can provide; the UI uses this to gate features
+/// uniformly instead of guessing per format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capabilities {
+    /// Values arrive on request instead of with the hierarchy.
+    pub lazy: bool,
+    /// Signals carry port directions (FSDB does, VCD/FST do not).
+    pub directions: bool,
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        // Sources that do not describe themselves are assumed to be lazy
+        // (the safe pipeline) and to have no direction information.
+        Self {
+            lazy: true,
+            directions: false,
+        }
+    }
+}
+
 /// One dump format as seen by the loader. Reads are serialized by the loader
 /// (FFR cannot be used from two threads), so implementations may assume
 /// `read_signal` is called from a single thread; the trait is deliberately
@@ -28,6 +49,15 @@ pub trait DumpSource {
     fn is_lazy(&self) -> bool {
         true
     }
+    /// What this source can provide; the UI gates format-specific features on
+    /// it (e.g. it hides the direction filters when `directions` is false)
+    /// instead of probing the dump format itself.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            lazy: self.is_lazy(),
+            directions: false,
+        }
+    }
     /// Number of variables the source can serve.
     fn var_count(&self) -> usize;
     /// Take the parsed hierarchy (signals may be lazy). Called once.
@@ -38,6 +68,24 @@ pub trait DumpSource {
     }
     /// Read one signal's value changes on demand.
     fn read_signal(&mut self, index: usize) -> (Vec<Change>, Vec<String>);
+    /// Read several signals in one pass; the results are in the input order.
+    fn read_signals(&mut self, indexes: &[usize]) -> Vec<(Vec<Change>, Vec<String>)> {
+        indexes
+            .iter()
+            .map(|&index| self.read_signal(index))
+            .collect()
+    }
+    /// Read several signals without decoding their values, for formats that
+    /// can hand over raw bytes (FSDB). The loader decodes them on its compute
+    /// pool instead of on the single reader thread. `None` means the source
+    /// has no raw path and [`Self::read_signals`] must be used.
+    #[cfg(fsdb_sdk)]
+    fn read_signals_raw(
+        &mut self,
+        _indexes: &[usize],
+    ) -> Option<Vec<(crate::fsdb::RawChanges, Vec<String>)>> {
+        None
+    }
 }
 
 /// Lazy FSDB source backed by an open Verdi FFR session.
@@ -50,6 +98,15 @@ struct FsdbSource {
 
 #[cfg(fsdb_sdk)]
 impl DumpSource for FsdbSource {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            lazy: true,
+            // Directions are only claimed when the session really recorded
+            // some; an FSDB without them must not show empty port filters.
+            directions: self.session.has_directions(),
+        }
+    }
+
     fn var_count(&self) -> usize {
         self.session.var_count()
     }
@@ -64,6 +121,17 @@ impl DumpSource for FsdbSource {
 
     fn read_signal(&mut self, index: usize) -> (Vec<Change>, Vec<String>) {
         self.session.read_signal(index)
+    }
+
+    fn read_signals(&mut self, indexes: &[usize]) -> Vec<(Vec<Change>, Vec<String>)> {
+        self.session.read_signals(indexes)
+    }
+
+    fn read_signals_raw(
+        &mut self,
+        indexes: &[usize],
+    ) -> Option<Vec<(crate::fsdb::RawChanges, Vec<String>)>> {
+        Some(self.session.read_signals_raw(indexes))
     }
 }
 
@@ -80,6 +148,13 @@ struct EagerSource {
 impl DumpSource for EagerSource {
     fn is_lazy(&self) -> bool {
         false
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            lazy: false,
+            directions: false,
+        }
     }
 
     fn var_count(&self) -> usize {
@@ -148,6 +223,13 @@ mod tests {
         };
 
         assert!(!source.is_lazy());
+        assert_eq!(
+            source.capabilities(),
+            Capabilities {
+                lazy: false,
+                directions: false,
+            }
+        );
         assert_eq!(source.var_count(), signals);
         let hierarchy = source.take_hierarchy();
         assert_eq!(hierarchy.signals.len(), signals);

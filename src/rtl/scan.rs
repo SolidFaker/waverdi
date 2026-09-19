@@ -3704,6 +3704,8 @@ endmodule
             end: 0,
             signals: vec![],
             tree: crate::waveform::ScopeTree::new(),
+            radix: std::collections::HashMap::new(),
+            value_times_cache: Vec::new(),
         };
         let top = wf
             .tree

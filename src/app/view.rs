@@ -1,5 +1,5 @@
 use super::{App, ListRow};
-use crate::waveform::{SigKind, Signal, Ticks, Value};
+use crate::waveform::{SigKind, Ticks, Value, Waveform};
 
 impl App {
     pub(crate) fn clamp_view(&mut self) {
@@ -112,7 +112,7 @@ impl App {
         let cursor = self.cursor;
         let target = candidates
             .iter()
-            .filter_map(|&idx| edge_time(&wf.signals[idx], cursor, forward, polarity))
+            .filter_map(|&idx| edge_time(wf, idx, cursor, forward, polarity))
             .reduce(|a, b| if forward { a.min(b) } else { a.max(b) });
         if let Some(t) = target {
             self.cursor = t;
@@ -122,8 +122,24 @@ impl App {
 }
 
 /// Time of the next/previous edge of a signal, optionally filtered to one
-/// polarity for single-bit signals.
-fn edge_time(sig: &Signal, cursor: Ticks, forward: bool, polarity: Option<u8>) -> Option<Ticks> {
+/// polarity for single-bit signals, and read from the synthesized times for
+/// arrays/aggregates (which store no change list).
+fn edge_time(
+    wf: &Waveform,
+    index: usize,
+    cursor: Ticks,
+    forward: bool,
+    polarity: Option<u8>,
+) -> Option<Ticks> {
+    let sig = wf.signals.get(index)?;
+    if wf.is_synthesized(index) {
+        let times = wf.value_times(index);
+        return if forward {
+            times.into_iter().find(|&t| t > cursor)
+        } else {
+            times.into_iter().rev().find(|&t| t < cursor)
+        };
+    }
     let one_bit = sig.kind == SigKind::Bits && sig.bits <= 1;
     let want = if one_bit { polarity } else { None };
     let matches = |value: &Value| match want {

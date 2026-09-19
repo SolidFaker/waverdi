@@ -1,6 +1,7 @@
 use super::{App, Dialog};
 use crate::waveform::{Change, Radix, SigKind, SigState, Signal, Ticks, Value};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CtxItem {
@@ -433,7 +434,7 @@ impl App {
             let hi = (offset + width).min(source.bits);
             let chunk_bits = (hi - offset) as usize;
             let mut changes: Vec<Change> = Vec::new();
-            for change in &source.changes {
+            for change in source.changes.iter() {
                 let Some(bits) = change.v.to_bits_vec() else {
                     continue;
                 };
@@ -463,7 +464,7 @@ impl App {
                 dir: source.dir.clone(),
                 scope: source.scope.clone(),
                 kind: SigKind::Bits,
-                changes,
+                changes: Arc::new(changes),
                 min: f64::INFINITY,
                 max: f64::NEG_INFINITY,
                 parent: Some(idx),
@@ -544,7 +545,7 @@ impl App {
             let Some(wf) = self.wf.as_ref() else { return };
             let mut times: BTreeSet<Ticks> = BTreeSet::new();
             for item in items {
-                for change in &wf.signals[item.sig].changes {
+                for change in wf.signals[item.sig].changes.iter() {
                     times.insert(change.t);
                 }
             }
@@ -588,7 +589,7 @@ impl App {
             dir: String::new(),
             scope,
             kind: SigKind::Bits,
-            changes,
+            changes: Arc::new(changes),
             min,
             max,
             parent: None,

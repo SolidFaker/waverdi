@@ -1,5 +1,5 @@
-﻿use super::{App, Dialog};
-use crate::waveform::{fmt_real, format_time, Radix, SigKind, Value};
+use super::{App, Dialog};
+use crate::waveform::{fmt_real, format_time, Radix, SigKind, Ticks, Value};
 
 impl App {
     /// Open the "Find Value" dialog, pre-filled with the last query.
@@ -47,33 +47,66 @@ impl App {
             ));
             return;
         }
-        let Some(signal) = self.wf.as_ref().map(|wf| &wf.signals[index]) else {
+        let Some(wf) = self.wf.as_ref() else { return };
+        let Some(signal) = wf.signals.get(index) else {
             return;
         };
         let radix = self.radix_for(index);
-        let count = signal.changes.len();
+        let cursor = self.cursor;
+        let count = wf.value_len(index);
         if count == 0 {
             self.msg(format!("{}: no value changes", signal.full_name()));
             return;
         }
-        let start = if forward {
-            signal.changes.partition_point(|c| c.t <= self.cursor)
+        // Synthesized brace values are joined per time, so they are matched
+        // against the computed text instead of a stored change list.
+        let found: Option<Ticks> = if wf.is_synthesized(index) {
+            let times = wf.value_times(index);
+            let start = if forward {
+                times.partition_point(|&t| t <= cursor)
+            } else {
+                times.partition_point(|&t| t < cursor)
+            };
+            let at = |k: usize| wf.value_at(index, times[k]);
+            if forward {
+                (start..count)
+                    .chain(0..start)
+                    .find(|&k| {
+                        at(k).is_some_and(|value| value_matches(&value, signal.kind, radix, &query))
+                    })
+                    .map(|k| times[k])
+            } else {
+                (0..start)
+                    .rev()
+                    .chain((start..count).rev())
+                    .find(|&k| {
+                        at(k).is_some_and(|value| value_matches(&value, signal.kind, radix, &query))
+                    })
+                    .map(|k| times[k])
+            }
         } else {
-            signal.changes.partition_point(|c| c.t < self.cursor)
-        };
-        let found = if forward {
-            (start..count)
-                .chain(0..start)
-                .find(|&k| value_matches(&signal.changes[k].v, signal.kind, radix, &query))
-        } else {
-            (0..start)
-                .rev()
-                .chain((start..count).rev())
-                .find(|&k| value_matches(&signal.changes[k].v, signal.kind, radix, &query))
+            let start = if forward {
+                signal.changes.partition_point(|c| c.t <= cursor)
+            } else {
+                signal.changes.partition_point(|c| c.t < cursor)
+            };
+            let matches =
+                |k: usize| value_matches(&signal.changes[k].v, signal.kind, radix, &query);
+            if forward {
+                (start..count)
+                    .chain(0..start)
+                    .find(|&k| matches(k))
+                    .map(|k| signal.changes[k].t)
+            } else {
+                (0..start)
+                    .rev()
+                    .chain((start..count).rev())
+                    .find(|&k| matches(k))
+                    .map(|k| signal.changes[k].t)
+            }
         };
         match found {
-            Some(k) => {
-                let t = signal.changes[k].t;
+            Some(t) => {
                 let name = signal.full_name();
                 self.cursor = t;
                 self.reveal_cursor();
