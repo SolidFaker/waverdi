@@ -7,6 +7,7 @@ use crate::waveform::{self, Signal, Value, Waveform};
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Widget as _};
+use std::rc::Rc;
 
 const VLINE: &str = "│";
 /// High / low level traces (thin lines at the top / bottom of the cell).
@@ -291,24 +292,23 @@ fn draw_bus_row(
 ) {
     let radix = app.radix_for(idx);
     if wf.is_synthesized(idx) {
+        // The cached Arc is walked in place; the joined labels are cached per
+        // zoom window so a cursor-only redraw does not re-join the members.
         let times = wf.value_times(idx);
-        draw_bus_trace(
-            buf,
-            l,
-            app,
-            row_bg,
-            y,
-            BusTimes::Merged(&times),
-            |j| match wf.value_at(idx, times[j]) {
+        draw_bus_trace(buf, l, app, row_bg, y, BusTimes::Merged(&times), |j| {
+            let time = times[j];
+            app.wave_label(idx, time, || match wf.value_at(idx, time) {
                 Some(value) => waveform::fmt_value(&value, radix),
                 None => "x".to_string(),
-            },
-        );
+            })
+        });
         return;
     }
     let changes = &wf.signals[idx].changes;
     draw_bus_trace(buf, l, app, row_bg, y, BusTimes::Changes(changes), |j| {
-        waveform::fmt_value(&changes[j].v, radix)
+        let text = waveform::fmt_value(&changes[j].v, radix);
+        let width = text.chars().count();
+        (Rc::from(text), width)
     });
 }
 
@@ -336,8 +336,9 @@ impl BusTimes<'_> {
 }
 
 /// Shared drawing of a bus row over a virtual, time-ordered change list. The
-/// text of a change is provided lazily so plain signals keep their zero-copy
-/// change list while synthesized signals join their members.
+/// text of a change and its display width are provided lazily so plain
+/// signals keep their zero-copy change list while synthesized signals reuse
+/// the labels cached for the current zoom window.
 fn draw_bus_trace(
     buf: &mut Buffer,
     l: &Layout,
@@ -345,7 +346,7 @@ fn draw_bus_trace(
     row_bg: Color,
     y: u16,
     times: BusTimes<'_>,
-    text_at: impl Fn(usize) -> String,
+    text_at: impl Fn(usize) -> (Rc<str>, usize),
 ) {
     let t = &app.theme;
     let (t0, scale) = (app.t0, app.scale);
@@ -383,8 +384,8 @@ fn draw_bus_trace(
         };
         let c0 = (((cs - t0) / scale).round() as i64).clamp(0, width);
         let c1 = (((ce - t0) / scale).round() as i64).clamp(0, width);
-        let value = text_at(j);
-        let len = value.chars().count() as i64;
+        let (value, len) = text_at(j);
+        let len = len as i64;
         if c1 - c0 >= len + 2 {
             text::put(
                 buf,

@@ -39,6 +39,27 @@ use std::time::Instant;
 /// Cached flattened pane rows, rebuilt when [`App::panes_version`] changed.
 type PaneCache<T> = RefCell<Option<(u64, Rc<Vec<T>>)>>;
 
+/// Formatted Value column texts of the displayed signals for one cursor /
+/// radix / waveform / pane key. The Signal List rows and the value-column
+/// scrollbar both read it, so each signal is formatted once per key.
+struct ListValueCache {
+    key: (Ticks, u64, u64, u64),
+    values: Vec<Option<(Rc<str>, usize)>>,
+}
+
+/// Brace labels of one synthesized waveform row, valid for one zoom window.
+struct WaveRowLabels {
+    key: (u64, u64, u16, u64, u64),
+    labels: HashMap<Ticks, (Rc<str>, usize)>,
+}
+
+/// Match list of the Find dialog, keyed by the query text and the waveform.
+struct FindCache {
+    query: String,
+    version: u64,
+    matches: Rc<[usize]>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Tree,
@@ -231,6 +252,23 @@ pub struct App {
     panes_version: u64,
     list_cache: PaneCache<ListRow>,
     tree_cache: PaneCache<TreeNode>,
+    /// Bumped whenever the per-signal radix map changes.
+    radix_version: u64,
+    /// Bumped whenever the waveform's signal values change (install or lazy
+    /// load); keys every value-text cache.
+    waveform_version: u64,
+    /// Bumped whenever a new RTL database is installed.
+    rtl_version: u64,
+    list_value_cache: RefCell<Option<ListValueCache>>,
+    wave_labels: RefCell<HashMap<usize, WaveRowLabels>>,
+    find_cache: RefCell<Option<FindCache>>,
+    /// Inputs of the last `sync_source` resolution: selected tree row, tree
+    /// shape and RTL version. Skipping same-key redraws avoids the per-frame
+    /// hierarchy walk for VCD/FST.
+    source_key: Option<(usize, u64, u64)>,
+    /// Inputs of the last source-trace computation: selected signal, source
+    /// module / line and RTL version.
+    trace_key: Option<(Option<usize>, Option<String>, usize, u64)>,
     pending_fit: bool,
 }
 
@@ -302,6 +340,14 @@ impl App {
             panes_version: 0,
             list_cache: RefCell::new(None),
             tree_cache: RefCell::new(None),
+            radix_version: 0,
+            waveform_version: 0,
+            rtl_version: 0,
+            list_value_cache: RefCell::new(None),
+            wave_labels: RefCell::new(HashMap::new()),
+            find_cache: RefCell::new(None),
+            source_key: None,
+            trace_key: None,
             pending_fit: false,
         };
         app.msg("waverdi 0.1 — press 'o' to open a waveform dump, F1/? for key bindings");
@@ -320,6 +366,16 @@ impl App {
     /// `expanded` changed. A spurious bump only costs one rebuild.
     pub(crate) fn touch_panes(&mut self) {
         self.panes_version = self.panes_version.wrapping_add(1);
+    }
+
+    /// Invalidate the value-text caches after the radix map changed.
+    pub(crate) fn touch_radix(&mut self) {
+        self.radix_version = self.radix_version.wrapping_add(1);
+    }
+
+    /// Invalidate the value-text caches after signal values changed.
+    pub(crate) fn touch_waveform(&mut self) {
+        self.waveform_version = self.waveform_version.wrapping_add(1);
     }
 
     /// True while a mouse drag is in progress; the event loop then polls
@@ -389,10 +445,15 @@ impl App {
         // The old dump is about to be replaced: stop any lazy loads for it so
         // their requests cannot be routed to the new backend.
         if let Some(wf) = &mut self.wf {
+            let mut forced = false;
             for signal in &mut wf.signals {
                 if signal.state != crate::waveform::SigState::Ready {
                     signal.state = crate::waveform::SigState::Ready;
+                    forced = true;
                 }
+            }
+            if forced {
+                self.touch_waveform();
             }
         }
         self.msg(format!("Loading {path} ..."));
@@ -428,9 +489,11 @@ impl App {
             .unwrap_or(false);
         if sent {
             wf.signals[index].state = crate::waveform::SigState::Loading;
+            self.touch_waveform();
         } else if wf.recompute_aggregate(index) {
             // Aggregates of eager dumps whose members are already loaded.
             wf.cache_value_times(index);
+            self.touch_waveform();
         } else {
             self.msg("waveform backend is no longer available for this dump");
         }
@@ -500,6 +563,7 @@ impl App {
                     ));
                     self.sources = Some(*set);
                     self.rtl = Some(*db);
+                    self.rtl_version = self.rtl_version.wrapping_add(1);
                     self.source_view = None;
                     self.last_source_trace = None;
                     self.merge_generate_scopes();
@@ -544,6 +608,7 @@ impl App {
             // transition times once, off the draw path.
             wf.cache_value_times(index);
         }
+        self.touch_waveform();
     }
 
     /// Load a VCS-style RTL filelist into the Source pane.
@@ -689,6 +754,7 @@ impl App {
         self.tree_scroll = 0;
         self.range = None;
         self.radix.clear();
+        self.touch_radix();
         self.analog.clear();
         self.highlight.clear();
         self.source_highlight.clear();
@@ -703,6 +769,8 @@ impl App {
         // the synthesized transition-time caches once instead of per draw.
         wf.refresh_value_times();
         self.wf = Some(wf);
+        self.touch_waveform();
+        self.wave_labels.borrow_mut().clear();
         self.dialog = None;
         self.dialog_scroll = 0;
         self.time_menu = None;
@@ -727,6 +795,7 @@ impl App {
     /// Parse the current source set into the RTL database.
     fn rebuild_rtl(&mut self) {
         self.rtl = self.sources.as_ref().map(RtlDb::parse_sources);
+        self.rtl_version = self.rtl_version.wrapping_add(1);
         if let Some(db) = &self.rtl {
             if !db.modules.is_empty() {
                 self.msg(format!(
@@ -775,8 +844,15 @@ impl App {
         self.focus = Focus::Source;
     }
 
-    /// Reload the Source pane when the selected instance changed.
+    /// Reload the Source pane when the selected instance changed. The
+    /// resolution walks the RTL hierarchy for VCD/FST, so it is gated on the
+    /// selected row and the tree/RTL versions instead of running per frame.
     pub fn sync_source(&mut self) {
+        let key = (self.tree_sel, self.panes_version, self.rtl_version);
+        if self.source_key == Some(key) {
+            return;
+        }
+        self.source_key = Some(key);
         let module = self.selected_module_name();
         if module == self.source_view.as_ref().map(|view| view.module.clone()) {
             return;
@@ -842,8 +918,20 @@ impl App {
         ))
     }
 
-    /// Append the source trace to the message log when it changes.
+    /// Append the source trace to the message log when it changes. The trace
+    /// walks every assign / always block of the module, so it is gated on the
+    /// selected signal, the Source cursor and the RTL version.
     pub fn sync_source_trace(&mut self) {
+        let key = (
+            self.selected_signal(),
+            self.source_view.as_ref().map(|view| view.module.clone()),
+            self.source_view.as_ref().map(|view| view.line).unwrap_or(0),
+            self.rtl_version,
+        );
+        if self.trace_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.trace_key = Some(key);
         let trace = self.source_trace_line();
         if trace != self.last_source_trace {
             if let Some(trace) = &trace {
@@ -1572,6 +1660,7 @@ impl App {
     /// Record the radix on a signal and its array/aggregate children without
     /// rebuilding yet; callers that touch several signals refresh once.
     fn set_radix_tree(&mut self, idx: usize, radix: Radix) {
+        self.touch_radix();
         let mut stack = vec![idx];
         while let Some(node) = stack.pop() {
             self.radix.insert(node, radix);
@@ -1936,6 +2025,80 @@ mod tests {
         // With no load in flight the idle poll must not request a frame.
         app.poll_load();
         assert!(!app.take_needs_redraw());
+    }
+
+    #[test]
+    fn source_pane_resolution_is_gated_on_its_key() {
+        use crate::rtl::{RtlDb, SourceSet};
+
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $scope module dut $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let dir = std::env::temp_dir().join(format!("waverdi_sync_key_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tb.sv");
+        std::fs::write(&file, "module tb;\n    logic clk;\nendmodule\n").unwrap();
+        let mut app = app_with(vcd);
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "tb".to_string();
+        app.expanded.insert(1);
+        app.touch_panes();
+        app.tree_sel = 1;
+        app.sync_source();
+        assert!(app.source_view.is_some());
+
+        // Same key: the resolution is skipped, so a manually dropped view
+        // stays dropped (the module comparison alone would reload it).
+        app.source_view = None;
+        app.sync_source();
+        assert!(app.source_view.is_none());
+        // A pane/tree change invalidates the key and reloads the view.
+        app.touch_panes();
+        app.sync_source();
+        assert!(app.source_view.is_some());
+    }
+
+    #[test]
+    fn source_trace_is_gated_on_its_key() {
+        use crate::rtl::{RtlDb, SourceSet};
+
+        let vcd = "$timescale 1ns $end\n\
+            $scope module tb $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let dir = std::env::temp_dir().join(format!("waverdi_trace_key_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tb.sv");
+        std::fs::write(&file, "module tb;\n    logic clk;\nendmodule\n").unwrap();
+        let mut app = app_with(vcd);
+        app.sources = Some(SourceSet::from_files(vec![file], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.wf.as_mut().unwrap().tree.nodes[1].module = "tb".to_string();
+        app.expanded.insert(1);
+        app.touch_panes();
+        app.tree_sel = 1;
+        app.set_display(vec![0]);
+        app.sel_row = Some(1);
+        app.sync_source();
+        app.sync_source_trace();
+        assert!(app.last_source_trace.is_some());
+
+        // Same key: the cached trace is not recomputed (a poisoned memo would
+        // be overwritten if the gate leaked).
+        app.last_source_trace = Some("stale".to_string());
+        app.sync_source_trace();
+        assert_eq!(app.last_source_trace.as_deref(), Some("stale"));
+        // Moving the Source cursor changes the line part of the key.
+        app.move_source_cursor(1, 0);
+        app.sync_source_trace();
+        assert_ne!(app.last_source_trace.as_deref(), Some("stale"));
     }
 
     #[test]

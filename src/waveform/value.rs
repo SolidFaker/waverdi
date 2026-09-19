@@ -122,11 +122,92 @@ pub fn value_number(value: &Value) -> Option<u64> {
     }
 }
 
+/// Format a packed logic value without materializing its byte-per-bit
+/// vector: `Value::Small` values are formatted thousands of times per frame,
+/// so the intermediate allocation shows up in profiles.
 fn fmt_packed(packed: u64, width: usize, radix: Radix) -> String {
-    let bits: Vec<u8> = (0..width)
-        .map(|i| ((packed >> (2 * i)) & 3) as u8)
-        .collect();
-    fmt_bits(&bits, radix)
+    let bit = |i: usize| ((packed >> (2 * i)) & 3) as u8;
+    match radix {
+        Radix::Bin => {
+            let mut s = String::with_capacity(width + 1);
+            s.push('b');
+            for i in (0..width).rev() {
+                s.push(match bit(i) {
+                    0 => '0',
+                    1 => '1',
+                    2 => 'x',
+                    _ => 'z',
+                });
+            }
+            s
+        }
+        Radix::Hex => group_packed(packed, width, 4, "0123456789abcdef", 'h'),
+        Radix::Oct => group_packed(packed, width, 3, "01234567", 'o'),
+        Radix::Dec => {
+            let mut s = String::new();
+            s.push('d');
+            if (0..width).any(|i| bit(i) >= 2) {
+                s.push('x');
+            } else {
+                let mut v: u128 = 0;
+                for i in (0..width).rev() {
+                    v = (v << 1) | (bit(i) as u128);
+                }
+                s.push_str(&v.to_string());
+            }
+            s
+        }
+        Radix::Ascii => {
+            let mut s = String::new();
+            let mut i = width;
+            while i > 0 {
+                let lo = i.saturating_sub(8);
+                let mut v: u8 = 0;
+                for j in (lo..i).rev() {
+                    v = (v << 1) | (bit(j) & 1);
+                }
+                s.push(if (0x20..=0x7e).contains(&v) {
+                    v as char
+                } else {
+                    '.'
+                });
+                i = lo;
+            }
+            s
+        }
+    }
+}
+
+/// Packed counterpart of `group`: same digit / unknown rules, read straight
+/// from the two-bit codes.
+fn group_packed(packed: u64, width: usize, grp: usize, digits: &str, prefix: char) -> String {
+    let ngrp = width.div_ceil(grp);
+    let mut s = String::with_capacity(ngrp + 1);
+    s.push(prefix);
+    for gi in (0..ngrp).rev() {
+        let lo = gi * grp;
+        let hi = ((gi + 1) * grp).min(width);
+        let mut v: u64 = 0;
+        let mut x = false;
+        let mut z = false;
+        for j in (lo..hi).rev() {
+            let b = ((packed >> (2 * j)) & 3) as u8;
+            v = (v << 1) | (b as u64 & 1);
+            if b == 2 {
+                x = true;
+            } else if b == 3 {
+                z = true;
+            }
+        }
+        if x {
+            s.push('x');
+        } else if z {
+            s.push('z');
+        } else {
+            s.push(digits.as_bytes()[v as usize] as char);
+        }
+    }
+    s
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -307,6 +388,29 @@ mod tests {
             r = r.next();
         }
         assert_eq!(r, Radix::Bin);
+    }
+
+    #[test]
+    fn packed_formatting_matches_the_bit_slice() {
+        // `Value::Small` formatting must stay byte-identical to `fmt_bits`
+        // for every width, radix and unknown/z mix (the fast path only skips
+        // the intermediate Vec).
+        for width in 0..=SMALL_MAX_BITS {
+            for shift in 0..4u8 {
+                let bits: Vec<u8> = (0..width).map(|i| (i as u8 + shift) % 4).collect();
+                let mut packed = 0u64;
+                for (i, &b) in bits.iter().enumerate() {
+                    packed |= ((b & 3) as u64) << (2 * i);
+                }
+                for radix in Radix::CYCLE {
+                    assert_eq!(
+                        fmt_packed(packed, width, radix),
+                        fmt_bits(&bits, radix),
+                        "width={width} shift={shift} radix={radix:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

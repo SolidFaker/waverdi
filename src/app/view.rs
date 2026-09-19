@@ -1,5 +1,7 @@
 use super::{App, ListRow};
 use crate::waveform::{SigKind, Ticks, Value, Waveform};
+use std::collections::HashMap;
+use std::rc::Rc;
 
 impl App {
     pub(crate) fn clamp_view(&mut self) {
@@ -119,6 +121,41 @@ impl App {
             self.reveal_cursor();
         }
     }
+
+    /// Brace label of a synthesized waveform row at `time`, cached for the
+    /// current zoom window, radix and waveform. Consecutive redraws (cursor
+    /// moves, selection changes) reuse the joined member texts; `compute` is
+    /// only called on a miss.
+    pub(crate) fn wave_label(
+        &self,
+        index: usize,
+        time: Ticks,
+        compute: impl FnOnce() -> String,
+    ) -> (Rc<str>, usize) {
+        let key = (
+            self.t0.to_bits(),
+            self.scale.to_bits(),
+            self.cols() as u16,
+            self.radix_version,
+            self.waveform_version,
+        );
+        let mut rows = self.wave_labels.borrow_mut();
+        let row = rows.entry(index).or_insert_with(|| super::WaveRowLabels {
+            key,
+            labels: HashMap::new(),
+        });
+        if row.key != key {
+            row.key = key;
+            row.labels.clear();
+        }
+        if let Some(label) = row.labels.get(&time) {
+            return label.clone();
+        }
+        let text: Rc<str> = Rc::from(compute());
+        let width = text.chars().count();
+        row.labels.insert(time, (text.clone(), width));
+        (text, width)
+    }
 }
 
 /// Time of the next/previous edge of a signal, optionally filtered to one
@@ -135,9 +172,9 @@ fn edge_time(
     if wf.is_synthesized(index) {
         let times = wf.value_times(index);
         return if forward {
-            times.into_iter().find(|&t| t > cursor)
+            times.iter().copied().find(|&t| t > cursor)
         } else {
-            times.into_iter().rev().find(|&t| t < cursor)
+            times.iter().copied().rev().find(|&t| t < cursor)
         };
     }
     let one_bit = sig.kind == SigKind::Bits && sig.bits <= 1;
@@ -172,6 +209,50 @@ mod tests {
         #10\n1!\n\
         #20\n0!\n1\"\n\
         #30\n1!\n";
+
+    #[test]
+    fn synthesized_wave_labels_are_cached_per_zoom_window() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 8 ! m0 [7:0] $end\n\
+            $var wire 8 \" m1 [7:0] $end\n\
+            $enddefinitions $end\n#0\nb1 !\nb10 \"\n";
+        let mut app = app_with(vcd);
+        {
+            let signals = &mut app.wf.as_mut().unwrap().signals;
+            signals[0].name = "mem[0][7:0]".to_string();
+            signals[1].name = "mem[1][7:0]".to_string();
+        }
+        app.wf.as_mut().unwrap().build_arrays();
+        let root = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .signals
+            .iter()
+            .position(|signal| signal.name == "mem")
+            .unwrap();
+
+        let calls = Cell::new(0);
+        let compute = || {
+            calls.set(calls.get() + 1);
+            "{1, 2}".to_string()
+        };
+        let first = app.wave_label(root, 0, compute);
+        let hit = app.wave_label(root, 0, compute);
+        assert_eq!(calls.get(), 1, "a cached label must not be recomputed");
+        assert!(Rc::ptr_eq(&first.0, &hit.0));
+        assert_eq!(&*first.0, "{1, 2}");
+        assert_eq!(first.1, 6);
+
+        // A zoom change moves the window key and drops the labels.
+        app.zoom_in();
+        let zoomed = app.wave_label(root, 0, compute);
+        assert!(!Rc::ptr_eq(&first.0, &zoomed.0));
+        assert_eq!(calls.get(), 2);
+    }
 
     #[test]
     fn next_and_prev_transition_with_selection() {

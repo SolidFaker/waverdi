@@ -396,20 +396,30 @@ impl super::Waveform {
     /// time is emitted at the first multiple of the stride), so the list
     /// never grows past [`crate::dump::MAX_AGGREGATE_CHANGES`] values for a
     /// huge interface.
-    pub fn value_times(&self, index: usize) -> Vec<Ticks> {
+    ///
+    /// The cached `Arc` is handed out directly: the draw path walks up to
+    /// `MAX_AGGREGATE_CHANGES` times per row per frame and must not copy the
+    /// slice first.
+    pub fn value_times(&self, index: usize) -> Arc<[Ticks]> {
         let Some(signal) = self.signals.get(index) else {
-            return Vec::new();
+            return Arc::from(Vec::new());
         };
         if !is_synthesized(signal) {
-            return signal.changes.iter().map(|change| change.t).collect();
+            return Arc::from(
+                signal
+                    .changes
+                    .iter()
+                    .map(|change| change.t)
+                    .collect::<Vec<_>>(),
+            );
         }
         if signal.state != SigState::Ready {
-            return Vec::new();
+            return Arc::from(Vec::new());
         }
         if let Some(times) = self.cached_value_times(index) {
-            return times.to_vec();
+            return times;
         }
-        self.compute_value_times(index).to_vec()
+        self.compute_value_times(index)
     }
 
     /// Number of transitions of a signal, used by width and search code.
@@ -809,10 +819,11 @@ mod tests {
         let updated = wf.rebuild_array_texts(&std::collections::HashMap::new());
         assert!(updated.contains(&2), "{updated:?}");
         // The merged transition times of both elements, in time order.
-        assert_eq!(wf.value_times(2), vec![0, 1, 2]);
+        assert_eq!(&wf.value_times(2)[..], &[0, 1, 2][..]);
         let values: Vec<String> = wf
             .value_times(2)
-            .into_iter()
+            .iter()
+            .copied()
             .map(|t| match wf.value_at(2, t) {
                 Some(Value::Str(text)) => text,
                 other => panic!("not text: {other:?}"),
@@ -855,7 +866,7 @@ mod tests {
         assert!(wf.signals[root].changes.is_empty());
         assert_eq!(wf.value_at(root, 0), Some(Value::Str("{0, 1}".into())));
         assert_eq!(wf.value_at(root, 5), Some(Value::Str("{1, 1}".into())));
-        assert_eq!(wf.value_times(root), vec![0, 5]);
+        assert_eq!(&wf.value_times(root)[..], &[0, 5][..]);
         assert_eq!(wf.value_len(root), 2);
         // The UI fills the cache when the signal turns ready (or on install);
         // a later radix change invalidates and immediately refreshes it
@@ -864,7 +875,24 @@ mod tests {
         assert!(wf.value_times_cache[root].is_some());
         wf.rebuild_array_texts(&HashMap::new());
         assert!(wf.value_times_cache[root].is_some());
-        assert_eq!(wf.value_times(root), vec![0, 5]);
+        assert_eq!(&wf.value_times(root)[..], &[0, 5][..]);
+    }
+
+    /// The cached `Arc` must be shared, not copied, so the waveform pane can
+    /// walk the merged times without reallocating them every frame.
+    #[test]
+    fn transition_times_are_shared_not_copied() {
+        let mut wf = waveform(vec![
+            leaf("a[0][1:0]", &[0, 0], 0),
+            leaf("a[1][1:0]", &[1, 0], 0),
+        ]);
+        wf.build_arrays();
+        let root = wf.signals.iter().position(|s| s.name == "a").unwrap();
+        wf.refresh_value_times();
+        let first = wf.value_times(root);
+        let second = wf.value_times(root);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(&first[..], &[0][..]);
     }
 
     #[test]
@@ -1053,7 +1081,7 @@ mod tests {
         };
         assert_eq!(text, "{80, c0}");
         assert_eq!(wf.display_value(mem, cursor, Radix::Hex), "{80, c0}");
-        assert_eq!(wf.value_times(mem), vec![0, 20]);
+        assert_eq!(&wf.value_times(mem)[..], &[0, 20][..]);
         // A later change moves both the joined value and the wave segment.
         assert_eq!(wf.display_value(mem, 20, Radix::Hex), "{80, 0}");
     }
@@ -1080,7 +1108,8 @@ mod tests {
         let root = wf.signals.iter().position(|s| s.name == "a").unwrap();
         let values: Vec<String> = wf
             .value_times(root)
-            .into_iter()
+            .iter()
+            .copied()
             .map(|t| match wf.value_at(root, t) {
                 Some(Value::Str(text)) => text,
                 other => panic!("not text: {other:?}"),

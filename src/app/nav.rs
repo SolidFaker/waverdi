@@ -358,19 +358,55 @@ impl App {
 
     /// Width (in characters) of the widest Value column text at the cursor.
     pub fn value_content_width(&self) -> usize {
-        let Some(wf) = &self.wf else {
+        if self.wf.is_none() {
             return 0;
-        };
+        }
         self.display
             .iter()
-            .map(|&sig| {
-                let radix = self.radix_for(sig);
-                // Synthesized brace values must be joined at the cursor; the
-                // signal itself stores no text.
-                wf.display_value(sig, self.cursor, radix).chars().count()
-            })
+            .map(|&sig| self.list_display_value(sig).1)
             .max()
             .unwrap_or(0)
+    }
+
+    /// `(text, display width)` of a displayed signal's value at the cursor.
+    /// Both the Signal List rows and the value-column scrollbar read it, so
+    /// each signal is formatted once per `(cursor, radix, waveform, panes)`
+    /// key instead of once per reader. The returned `Rc` makes the hit path
+    /// free of string copies.
+    pub fn list_display_value(&self, sig: usize) -> (Rc<str>, usize) {
+        let key = (
+            self.cursor,
+            self.radix_version,
+            self.waveform_version,
+            self.panes_version,
+        );
+        let mut cache = self.list_value_cache.borrow_mut();
+        match cache.as_mut() {
+            Some(cached) if cached.key == key => {}
+            _ => {
+                *cache = Some(super::ListValueCache {
+                    key,
+                    values: Vec::new(),
+                });
+            }
+        }
+        let cache = cache.as_mut().unwrap();
+        if cache.values.len() <= sig {
+            cache.values.resize_with(sig + 1, || None);
+        }
+        if let Some(entry) = &cache.values[sig] {
+            return entry.clone();
+        }
+        // Synthesized brace values must be joined at the cursor; the signal
+        // itself stores no text.
+        let text: Rc<str> = match &self.wf {
+            Some(wf) => Rc::from(wf.display_value(sig, self.cursor, self.radix_for(sig))),
+            None => Rc::from(""),
+        };
+        let width = text.chars().count();
+        let entry = (text, width);
+        cache.values[sig] = Some(entry.clone());
+        entry
     }
 
     /// Width (in characters) of the widest Hierarchy label (indent + arrow).
@@ -1040,23 +1076,65 @@ impl App {
         }
     }
 
-    pub fn find_matches(&self) -> Vec<usize> {
+    /// Signals matching the Find dialog query, in dump order, capped at 200.
+    /// The list is cached per query text and waveform version: typing
+    /// recomputes, a redraw of the open dialog does not.
+    pub fn find_matches(&self) -> Rc<[usize]> {
+        let query = self.input.as_string();
+        {
+            let cache = self.find_cache.borrow();
+            if let Some(cached) = cache.as_ref() {
+                if cached.query == query && cached.version == self.waveform_version {
+                    return cached.matches.clone();
+                }
+            }
+        }
+        let matches: Rc<[usize]> = Rc::from(self.compute_find_matches(&query));
+        *self.find_cache.borrow_mut() = Some(super::FindCache {
+            query,
+            version: self.waveform_version,
+            matches: matches.clone(),
+        });
+        matches
+    }
+
+    /// Scan every signal once for the lowercased query. The full name is
+    /// built into a reused buffer and only lowercased for non-ASCII names,
+    /// so the 90k-signal dump does not allocate two strings per signal.
+    fn compute_find_matches(&self, raw: &str) -> Vec<usize> {
         let Some(wf) = &self.wf else {
             return Vec::new();
         };
-        let query = self.input.as_string().to_lowercase();
+        let query = raw.to_lowercase();
         if query.is_empty() {
             return Vec::new();
         }
-        wf.signals
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| {
-                s.var_type != "aggregate" && s.full_name().to_lowercase().contains(&query)
-            })
-            .map(|(i, _)| i)
-            .take(200)
-            .collect()
+        let ascii = query.is_ascii();
+        let mut full = String::new();
+        let mut matches = Vec::new();
+        for (i, s) in wf.signals.iter().enumerate() {
+            if s.var_type == "aggregate" {
+                continue;
+            }
+            full.clear();
+            for part in &s.scope {
+                full.push_str(part);
+                full.push('.');
+            }
+            full.push_str(&s.name);
+            let hit = if ascii && full.is_ascii() {
+                contains_ascii_case_insensitive(&full, &query)
+            } else {
+                full.to_lowercase().contains(&query)
+            };
+            if hit {
+                matches.push(i);
+                if matches.len() == 200 {
+                    break;
+                }
+            }
+        }
+        matches
     }
 
     pub(crate) fn apply_goto(&mut self) {
@@ -1078,6 +1156,19 @@ impl App {
 
 fn parse_time(spec: &str) -> Result<f64, ()> {
     super::parse_time_spec(spec)
+}
+
+/// Allocation-free case-insensitive `contains` for ASCII text; `query` must
+/// already be lowercase. Non-ASCII names keep the exact Unicode semantics via
+/// `str::to_lowercase` in the caller.
+fn contains_ascii_case_insensitive(haystack: &str, query: &str) -> bool {
+    let needle = query.as_bytes();
+    let hay = haystack.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    hay.windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 #[cfg(test)]
@@ -1258,7 +1349,74 @@ mod tests {
         app.input.insert('s');
         app.input.insert('u');
         app.input.insert('b');
-        assert_eq!(app.find_matches(), vec![1]);
+        assert_eq!(app.find_matches().to_vec(), vec![1]);
+    }
+
+    #[test]
+    fn find_matches_are_cached_until_the_query_changes() {
+        use std::rc::Rc;
+
+        let mut app = app_with(VCD);
+        app.input.insert('c');
+        let first = app.find_matches();
+        let hit = app.find_matches();
+        assert!(Rc::ptr_eq(&first, &hit));
+        assert_eq!(first.to_vec(), vec![0]);
+
+        // Typing replaces the query text; the cache must not serve the old
+        // list (even though the result happens to stay the same here).
+        app.input.insert('l');
+        let narrowed = app.find_matches();
+        assert!(!Rc::ptr_eq(&first, &narrowed));
+        assert_eq!(narrowed.to_vec(), vec![0]);
+
+        // A new waveform invalidates by version even with the same query.
+        let out = crate::vcd::parse_bytes(
+            b"$timescale 1ns $end\n$var wire 1 ! x $end\n$enddefinitions $end\n#0\n1!\n",
+        )
+        .unwrap();
+        app.apply_waveform("<other>".to_string(), out.wf, out.warnings);
+        let fresh = app.find_matches();
+        assert!(!Rc::ptr_eq(&narrowed, &fresh));
+        assert!(fresh.is_empty());
+        assert!(Rc::ptr_eq(&fresh, &app.find_matches()));
+    }
+
+    #[test]
+    fn list_values_are_cached_until_the_key_changes() {
+        use std::rc::Rc;
+
+        let mut app = app_with(
+            "$timescale 1ns $end\n\
+             $var wire 1 ! clk $end\n\
+             $var wire 4 \" data $end\n\
+             $enddefinitions $end\n#0\n0!\nb0000 \"\n#10\n1!\nb1111 \"\n",
+        );
+        app.set_display(vec![0, 1]);
+        let (text, width) = app.list_display_value(0);
+        assert_eq!(&*text, "b0");
+        assert_eq!(width, 2);
+        assert!(Rc::ptr_eq(&text, &app.list_display_value(0).0));
+        // The Value column width comes from the same cached entries.
+        assert_eq!(app.value_content_width(), app.list_display_value(1).1);
+
+        // A cursor move invalidates the whole cache.
+        app.move_cursor(10);
+        let moved = app.list_display_value(0);
+        assert!(!Rc::ptr_eq(&text, &moved.0));
+        assert_eq!(&*moved.0, "b1");
+
+        // A radix change invalidates it as well.
+        app.apply_radix(0, crate::waveform::Radix::Dec);
+        let radix = app.list_display_value(0);
+        assert!(!Rc::ptr_eq(&moved.0, &radix.0));
+        assert_eq!(&*radix.0, "d1");
+
+        // Adding a signal bumps the pane version; the next read rebuilds.
+        let before = app.list_display_value(0);
+        app.add_signal(1);
+        let after = app.list_display_value(0);
+        assert!(!Rc::ptr_eq(&before.0, &after.0));
     }
 
     #[test]

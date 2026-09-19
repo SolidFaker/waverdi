@@ -6,6 +6,7 @@ use crate::waveform::Waveform;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use std::rc::Rc;
 
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     let t = &app.theme;
@@ -162,9 +163,13 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                 // column; `Waveform` handles both plain and synthesized rows.
                 let transition = wf.display_change_in(*sig, from, to, radix);
                 let on_edge = transition.is_some();
+                // The fallback text is shared with the value-column scrollbar
+                // through the per-frame cache; only the edge text is local.
                 let value = match transition {
-                    Some(text_value) if text_value.chars().count() <= value_w => text_value,
-                    _ => wf.display_value(*sig, app.cursor, radix),
+                    Some(text_value) if text_value.chars().count() <= value_w => {
+                        Rc::from(text_value)
+                    }
+                    _ => app.list_display_value(*sig).0,
                 };
                 let value_style = if on_edge {
                     Style::new()

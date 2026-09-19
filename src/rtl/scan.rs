@@ -5,9 +5,11 @@
 //! instantiations together with their source lines — enough to browse RTL and
 //! to trace a signal to its declaration, drivers and loads.
 
-use std::collections::{BTreeMap, HashSet};
+use std::cell::{OnceCell, RefCell};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::SourceSet;
 use crate::waveform::Waveform;
@@ -465,6 +467,17 @@ pub struct SignalTrace {
     pub loads: Vec<Location>,
 }
 
+/// Memoized `scope_info` result. It owns everything the returned
+/// [`ScopeMatch`] needs, so the cache can live behind a `RefCell` while the
+/// match itself borrows the `ModuleDef` out of `RtlDb::modules`.
+#[derive(Clone, Debug)]
+struct CachedScope {
+    module: String,
+    env: Arc<ParamEnv>,
+    instance_scope: Vec<String>,
+    line: Option<usize>,
+}
+
 /// All modules found in the RTL sources.
 #[derive(Clone, Debug, Default)]
 pub struct RtlDb {
@@ -473,6 +486,11 @@ pub struct RtlDb {
     /// Evaluated parameters of every `package`, by package name. Package
     /// parameters are visible to modules as `pkg::NAME` (and via `import`).
     pub package_params: BTreeMap<String, BTreeMap<String, i64>>,
+    /// Lazily filled caches. `parse_sources` starts from `RtlDb::default`,
+    /// so a new database naturally starts with empty caches.
+    top_modules: OnceCell<Vec<String>>,
+    default_envs: RefCell<HashMap<String, Arc<ParamEnv>>>,
+    scope_cache: RefCell<HashMap<Vec<String>, CachedScope>>,
 }
 
 impl RtlDb {
@@ -552,6 +570,16 @@ impl RtlDb {
         self.modules.get(name)
     }
 
+    /// Cache fill state, used by the memoization regression test.
+    #[cfg(test)]
+    fn cache_sizes(&self) -> (bool, usize, usize) {
+        (
+            self.top_modules.get().is_some(),
+            self.default_envs.borrow().len(),
+            self.scope_cache.borrow().len(),
+        )
+    }
+
     /// Fill in labeled generate scopes that the RTL knows about but the dump
     /// does not record (VCS only stores generate blocks that contain dumped
     /// objects). Verdi lists them; this does the same for the Instance pane.
@@ -625,23 +653,40 @@ impl RtlDb {
     }
 
     /// Modules that no other parsed module instantiates: the roots of the
-    /// elaborated design hierarchy.
+    /// elaborated design hierarchy. Computed once; every hierarchy lookup
+    /// starts from this list.
     pub fn top_modules(&self) -> Vec<String> {
-        let mut instantiated: HashSet<&str> = HashSet::new();
-        for module in self.modules.values() {
-            for instance in &module.instances {
-                instantiated.insert(instance.module.as_str());
-            }
-        }
-        self.modules
-            .keys()
-            .filter(|name| !instantiated.contains(name.as_str()))
-            .cloned()
-            .collect()
+        self.top_modules
+            .get_or_init(|| {
+                let mut instantiated: HashSet<&str> = HashSet::new();
+                for module in self.modules.values() {
+                    for instance in &module.instances {
+                        instantiated.insert(instance.module.as_str());
+                    }
+                }
+                self.modules
+                    .keys()
+                    .filter(|name| !instantiated.contains(name.as_str()))
+                    .cloned()
+                    .collect()
+            })
+            .clone()
     }
 
     /// Known parameter/genvar values of a module (default overrides).
     pub(crate) fn default_env(&self, def: &ModuleDef) -> ParamEnv {
+        if let Some(env) = self.default_envs.borrow().get(&def.name) {
+            return (**env).clone();
+        }
+        let env = self.compute_default_env(def);
+        self.default_envs
+            .borrow_mut()
+            .insert(def.name.clone(), Arc::new(env.clone()));
+        env
+    }
+
+    /// Uncached `default_env` body; called once per module.
+    fn compute_default_env(&self, def: &ModuleDef) -> ParamEnv {
         let mut env = ParamEnv::new();
         // `pkg::NAME` is visible everywhere; `import pkg::*` also binds the
         // plain name (module-local parameters win).
@@ -737,8 +782,53 @@ impl RtlDb {
     /// parameter/genvar bindings along the path and the dump scope of the
     /// instance that owns the module's signals (trailing generate-block
     /// segments removed), e.g. `tb.u_proc.genblk1[1]` -> `tb.u_proc` with
-    /// `i = 1`.
+    /// `i = 1`. Results are memoized per scope path: the UI re-resolves the
+    /// selected instance on every selection change, and the walk enumerates
+    /// generate loops.
     pub(crate) fn scope_info(&self, steps: &[String]) -> Option<ScopeMatch<'_>> {
+        if steps.is_empty() {
+            return None;
+        }
+        if let Some(found) = self.cached_scope(steps) {
+            return Some(found);
+        }
+        let found = self.compute_scope_info(steps)?;
+        let module = found.module.name.clone();
+        let env = Arc::new(found.env);
+        let instance_scope = found.instance_scope;
+        let line = found.line;
+        self.scope_cache.borrow_mut().insert(
+            steps.to_vec(),
+            CachedScope {
+                module: module.clone(),
+                env: env.clone(),
+                instance_scope: instance_scope.clone(),
+                line,
+            },
+        );
+        Some(ScopeMatch {
+            module: self.modules.get(&module)?,
+            env: (*env).clone(),
+            instance_scope,
+            line,
+        })
+    }
+
+    /// Rebuild a memoized match, borrowing the module out of `self.modules`
+    /// so the returned reference outlives the cache borrow.
+    fn cached_scope(&self, steps: &[String]) -> Option<ScopeMatch<'_>> {
+        let cache = self.scope_cache.borrow();
+        let hit = cache.get(steps)?;
+        Some(ScopeMatch {
+            module: self.modules.get(&hit.module)?,
+            env: (*hit.env).clone(),
+            instance_scope: hit.instance_scope.clone(),
+            line: hit.line,
+        })
+    }
+
+    /// Uncached `scope_info` body.
+    fn compute_scope_info(&self, steps: &[String]) -> Option<ScopeMatch<'_>> {
         if steps.is_empty() {
             return None;
         }
@@ -3322,6 +3412,49 @@ endmodule
             .expect("loop instance inside an index-less generate block");
         assert_eq!(found.module.name, "leaf");
         assert_eq!(found.instance_scope, steps(&["top", "a[0]", "u_leaf"]));
+    }
+
+    /// The hierarchy caches memoize `top_modules`, `default_env` and
+    /// `scope_info`: a repeated query must reuse them instead of walking the
+    /// design again, and a fresh database starts empty.
+    #[test]
+    fn hierarchy_lookups_are_memoized() {
+        let dir = std::env::temp_dir().join(format!("waverdi_rtl_memo_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("mem.sv");
+        fs::write(
+            &file,
+            "module top;\n\
+             logic clk;\n\
+             leaf u_leaf(.clk(clk));\n\
+             endmodule\n\
+             module leaf;\n\
+             logic x;\n\
+             endmodule\n",
+        )
+        .unwrap();
+        let set = SourceSet::from_files(vec![file], "test");
+        let db = RtlDb::parse_sources(&set);
+        assert_eq!(db.cache_sizes(), (false, 0, 0));
+
+        let steps = vec!["top".to_string(), "u_leaf".to_string()];
+        let first = db.scope_info(&steps).expect("leaf instance");
+        assert_eq!(first.module.name, "leaf");
+        let (has_tops, envs, scopes) = db.cache_sizes();
+        assert!(has_tops, "top_modules must be memoized");
+        assert!(envs > 0 && scopes == 1, "{envs} {scopes}");
+
+        // The second query returns the same match without new cache entries.
+        let second = db.scope_info(&steps).expect("memoized leaf instance");
+        assert_eq!(second.module.name, first.module.name);
+        assert_eq!(second.instance_scope, first.instance_scope);
+        assert_eq!(db.cache_sizes(), (has_tops, envs, scopes));
+
+        // `default_env` is memoized per module as well.
+        let top = db.module("top").unwrap();
+        assert_eq!(db.default_env(top), db.default_env(top));
+        assert_eq!(db.cache_sizes().1, envs);
     }
 
     #[test]
