@@ -420,6 +420,7 @@ mod tests {
         app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
         app.wf.as_mut().unwrap().tree.nodes[1].module = "tb".to_string();
         app.expanded.insert(1);
+        app.touch_panes();
         app.tree_sel = 1;
         app.sync_source();
         app.add_signal(0);
@@ -846,6 +847,7 @@ mod tests {
         app.apply_parsed("<test>", out);
         app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
         app.expanded.insert(1);
+        app.touch_panes();
         let screen = render_app(&mut app, 100, 30);
         assert!(screen.contains("Hierarchy"), "{screen}");
         assert!(screen.contains("Module"), "{screen}");
@@ -881,6 +883,7 @@ mod tests {
         app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
         app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
         app.expanded.insert(1);
+        app.touch_panes();
         app.tree_sel = 2;
         app.sync_source();
         let col = {
@@ -938,6 +941,7 @@ mod tests {
         app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
         app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
         app.expanded.insert(1);
+        app.touch_panes();
         app.tree_sel = 2;
         app.sync_source();
         let (expanded, scroll, count_col, gutter) = {
@@ -1296,6 +1300,7 @@ endmodule
         app.apply_parsed("<test>", out);
         let nodes = app.wf.as_ref().unwrap().tree.nodes.len();
         app.expanded.extend(0..nodes);
+        app.touch_panes();
         for id in 1..nodes {
             app.wf.as_mut().unwrap().tree.nodes[id].module = "counter_pipeline_stage".to_string();
         }
@@ -1352,6 +1357,7 @@ endmodule
         app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
         app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
         app.expanded.insert(1);
+        app.touch_panes();
         app.tree_sel = 2;
         app.sync_source();
         // The old header/footer lines are logged instead of drawn.

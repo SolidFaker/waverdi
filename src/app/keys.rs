@@ -7,6 +7,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if key.kind == KeyEventKind::Release {
         return false;
     }
+    // Any key may change visible state (and a no-op still costs one frame).
+    app.needs_redraw = true;
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'q'))
     {
         return true;
@@ -1056,6 +1058,7 @@ mod tests {
         app.wf.as_mut().unwrap().signals[0].name = "count[3:0]".to_string();
         app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
         app.expanded.insert(1);
+        app.touch_panes();
         app.tree_sel = 2;
         app.sync_source();
         assert!(app.source_view.is_some());
@@ -1115,6 +1118,7 @@ mod tests {
         app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
         app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
         app.expanded.insert(1);
+        app.touch_panes();
         app.tree_sel = 2;
         app.sync_source();
 
@@ -1184,6 +1188,7 @@ mod tests {
         // The AST infers the modules (`tb` top, `dut` -> `counter`); no
         // dump module names are needed.
         app.expanded.insert(1);
+        app.touch_panes();
 
         let add_from = |app: &mut crate::app::App, needle: &str| {
             let (line, col) = {
@@ -1259,6 +1264,7 @@ mod tests {
         app.sources = Some(SourceSet::from_files(vec![file], "test"));
         app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
         app.expanded.insert(1);
+        app.touch_panes();
         let node_id = |app: &crate::app::App, name: &str| {
             app.wf
                 .as_ref()
@@ -1372,6 +1378,7 @@ mod tests {
         app.sources = Some(SourceSet::from_files(vec![file], "test"));
         app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
         app.expanded.insert(1);
+        app.touch_panes();
 
         let genblk = app
             .wf
@@ -1432,6 +1439,7 @@ mod tests {
         // Signals declared in the generated instance itself use its scope.
         app.clear_all();
         app.expanded.insert(genblk);
+        app.touch_panes();
         let nodes = app.tree_visible();
         let cluster = app
             .wf
@@ -1515,6 +1523,7 @@ mod tests {
         app.sources = Some(SourceSet::from_files(vec![file], "test"));
         app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
         app.expanded.insert(1);
+        app.touch_panes();
         let genblk = app
             .wf
             .as_ref()

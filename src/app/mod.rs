@@ -29,10 +29,15 @@ use crate::theme::{Theme, ThemeKind, UiSetting, WaveSetting};
 use crate::ui::layout::{compute_layout, Layout, Splits};
 use crate::waveform::{Radix, Ticks, TimeBase, Waveform};
 use ratatui::layout::Rect;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Cached flattened pane rows, rebuilt when [`App::panes_version`] changed.
+type PaneCache<T> = RefCell<Option<(u64, Rc<Vec<T>>)>>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
@@ -122,6 +127,8 @@ pub enum BrowserMode {
 }
 
 pub struct App {
+    /// Set by every state change; the event loop draws only when it is set.
+    pub needs_redraw: bool,
     pub path: String,
     pub wf: Option<Waveform>,
     pub display: Vec<usize>,
@@ -220,12 +227,17 @@ pub struct App {
     pub backend_caps: Capabilities,
     /// Open "Add Signals" picker state.
     pub add_signals: Option<AddSignals>,
+    /// Bumped by every mutation of `display`, `groups` or `expanded`.
+    panes_version: u64,
+    list_cache: PaneCache<ListRow>,
+    tree_cache: PaneCache<TreeNode>,
     pending_fit: bool,
 }
 
 impl App {
     pub fn new() -> Self {
         let mut app = Self {
+            needs_redraw: true,
             path: String::new(),
             wf: None,
             display: Vec::new(),
@@ -287,9 +299,12 @@ impl App {
             load: None,
             backend_caps: Capabilities::default(),
             add_signals: None,
+            panes_version: 0,
+            list_cache: RefCell::new(None),
+            tree_cache: RefCell::new(None),
             pending_fit: false,
         };
-        app.msg("waverdi 0.1 鈥攑ress 'o' to open a waveform dump, F1/? for key bindings");
+        app.msg("waverdi 0.1 — press 'o' to open a waveform dump, F1/? for key bindings");
         app
     }
 
@@ -299,6 +314,23 @@ impl App {
         if n > 200 {
             self.messages.drain(..n - 200);
         }
+    }
+
+    /// Invalidate the flattened pane caches after `display`, `groups` or
+    /// `expanded` changed. A spurious bump only costs one rebuild.
+    pub(crate) fn touch_panes(&mut self) {
+        self.panes_version = self.panes_version.wrapping_add(1);
+    }
+
+    /// True while a mouse drag is in progress; the event loop then polls
+    /// faster and forwards `Moved` events instead of dropping them.
+    pub fn is_dragging(&self) -> bool {
+        self.dragging.is_some()
+    }
+
+    /// Consume the redraw request; called by the event loop after a draw.
+    pub fn take_needs_redraw(&mut self) -> bool {
+        std::mem::take(&mut self.needs_redraw)
     }
 
     /// Called once per frame before drawing so view math uses current geometry.
@@ -423,7 +455,7 @@ impl App {
             String::new()
         };
         Some(format!(
-            "loading {}: {items}{changes} 鈥擡sc cancels",
+            "loading {}: {items}{changes} — Esc cancels",
             job.path
         ))
     }
@@ -440,6 +472,8 @@ impl App {
                 }
                 None => break,
             };
+            // Progress and load results change the status line and panes.
+            self.needs_redraw = true;
             match event {
                 LoadEvent::Progress(progress) => {
                     if let Some(job) = &mut self.load {
@@ -636,6 +670,7 @@ impl App {
         self.expanded.insert(wf.tree.root);
         self.display.clear();
         self.groups = vec![Group::new(0)];
+        self.touch_panes();
         self.sel_row = None;
         self.show_full_names = false;
         self.selection.clear();
@@ -684,6 +719,8 @@ impl App {
         if let (Some(wf), Some(db)) = (self.wf.as_mut(), self.rtl.as_ref()) {
             db.merge_generate_scopes(wf);
         }
+        // Generate scopes add nodes to the hierarchy tree.
+        self.touch_panes();
         self.clamp_tree_scroll();
     }
 
@@ -1017,6 +1054,7 @@ impl App {
                 .map(|view| view.scroll)
                 .unwrap_or(0);
             self.extend_source_selection_to(line, 0);
+            self.needs_redraw = true;
         } else if drag.row >= rect.bottom() as usize {
             self.scroll_source(1);
             let line = self
@@ -1025,6 +1063,7 @@ impl App {
                 .map(|view| view.scroll + rows as usize - 1)
                 .unwrap_or(0);
             self.extend_source_selection_to(line, usize::MAX);
+            self.needs_redraw = true;
         }
     }
 
@@ -1373,6 +1412,7 @@ impl App {
             (node, ancestors)
         };
         self.expanded.extend(ancestors);
+        self.touch_panes();
         let Some(index) = self
             .tree_visible()
             .iter()
@@ -1812,6 +1852,7 @@ impl App {
             group.count = 0;
         }
         self.groups[0].count = self.display.len();
+        self.touch_panes();
     }
 }
 
@@ -1860,6 +1901,41 @@ mod tests {
         // After sync_layout the pending fit ran, so the full range is visible.
         let wf = app.wf.as_ref().unwrap();
         assert!((app.scale - wf.total_ticks() as f64 / app.cols() as f64).abs() < 1e-9);
+    }
+
+    #[test]
+    fn redraw_flag_tracks_input_and_loader_events() {
+        use crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+
+        let mut app =
+            app_with("$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n#0\n0!\n");
+        // The first frame is always drawn.
+        assert!(app.take_needs_redraw());
+        assert!(!app.take_needs_redraw());
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+        );
+        assert!(app.take_needs_redraw());
+        assert!(!app.take_needs_redraw());
+
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(app.take_needs_redraw());
+
+        // With no load in flight the idle poll must not request a frame.
+        app.poll_load();
+        assert!(!app.take_needs_redraw());
     }
 
     #[test]
@@ -1917,6 +1993,7 @@ endmodule
         wf.tree.nodes[fetch].group = true;
         app.wf = Some(wf);
         app.expanded.extend([root, tb, dut]);
+        app.touch_panes();
         let set = SourceSet::from_files(vec![file], "test");
         app.rtl = Some(RtlDb::parse_sources(&set));
         app.tree_sel = app
@@ -2138,6 +2215,7 @@ endmodule
         app.wf.as_mut().unwrap().build_scope_aggregates();
         app.expanded.insert(app.wf.as_ref().unwrap().tree.root);
         app.expanded.insert(tb);
+        app.touch_panes();
         app.tree_sel = app
             .tree_visible()
             .iter()

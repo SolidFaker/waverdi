@@ -122,15 +122,12 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
         .map(|_| code.right().saturating_sub(1))
         .unwrap_or(code.right());
     let text_w = (text_right.saturating_sub(code.x + gutter)) as usize;
-    let content_w = view
-        .lines
-        .iter()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0);
+    let content_w = view.max_width;
     let max_h = content_w.saturating_sub(text_w);
     let h = app.source_h_scroll.min(max_h);
     let rows = code.height.saturating_sub(1) as usize;
+    // Highlight lookups are per-name and do not change between rows.
+    let highlights = app.highlighted_source_names();
     for row in 0..rows {
         let index = view.scroll + row;
         let Some(spans) = view.spans.get(index) else {
@@ -153,7 +150,6 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
         let mut col = 0usize;
         let active = view.module_at_line(index) == view.module;
         let inactive = view.inactive.get(index).copied().unwrap_or(false);
-        let highlights = app.highlighted_source_names();
         'line: for span in spans {
             // Code of other modules in the same file, and code in generate
             // branches that are not instantiated, is shown dimmed.
@@ -171,6 +167,8 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
                 }
             };
             let highlight_bg = highlights.get(span.text.as_str()).copied();
+            // One stack buffer per span: encoding a char must not allocate.
+            let mut enc = [0u8; 4];
             for ch in span.text.chars() {
                 let column = col;
                 col += 1;
@@ -196,7 +194,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
                 } else {
                     (fg, bg)
                 };
-                text::set_cell(buf, x, y, &ch.to_string(), fg, bg);
+                text::set_cell(buf, x, y, ch.encode_utf8(&mut enc), fg, bg);
                 x += 1;
             }
         }

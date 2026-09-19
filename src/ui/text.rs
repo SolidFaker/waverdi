@@ -1,17 +1,19 @@
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Style};
+use std::borrow::Cow;
 
 /// Truncate to `width` terminal cells, adding an ellipsis when clipped.
-pub fn trunc(s: &str, width: usize) -> String {
+/// Borrows `s` unchanged when it already fits.
+pub fn trunc(s: &str, width: usize) -> Cow<'_, str> {
     if width == 0 {
-        return String::new();
+        return Cow::Borrowed("");
     }
     if s.chars().count() <= width {
-        s.to_string()
+        Cow::Borrowed(s)
     } else {
         let mut out: String = s.chars().take(width.saturating_sub(1)).collect();
         out.push('…');
-        out
+        Cow::Owned(out)
     }
 }
 
@@ -74,14 +76,14 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 /// Slice `s` for a horizontally scrolled viewport: `offset` characters are
 /// skipped and the result is at most `width` cells. A leading ellipsis is
 /// only added when actual content (not just indentation) is hidden on the
-/// left.
-pub fn scroll_slice(s: &str, offset: usize, width: usize) -> String {
+/// left. Borrows `s` unchanged when nothing is clipped.
+pub fn scroll_slice(s: &str, offset: usize, width: usize) -> Cow<'_, str> {
     if width == 0 {
-        return String::new();
+        return Cow::Borrowed("");
     }
     let len = s.chars().count();
     if offset == 0 && len <= width {
-        return s.to_string();
+        return Cow::Borrowed(s);
     }
     let left = s.chars().take(offset).any(|c| !c.is_whitespace());
     let room = width.saturating_sub(usize::from(left));
@@ -90,7 +92,7 @@ pub fn scroll_slice(s: &str, offset: usize, width: usize) -> String {
         out.push('…');
     }
     out.extend(s.chars().skip(offset).take(room));
-    out
+    Cow::Owned(out)
 }
 
 /// Draw a string, clipped to the buffer's right edge.
@@ -100,7 +102,12 @@ pub fn put(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style) {
         return;
     }
     let width = (area.right() - x) as usize;
-    buf.set_string(x, y, trunc(text, width), style);
+    // The common case is unclipped: write the borrowed text directly.
+    if text.chars().count() <= width {
+        buf.set_string(x, y, text, style);
+    } else {
+        buf.set_string(x, y, trunc(text, width), style);
+    }
 }
 
 /// Set a single cell's symbol, foreground and background.
@@ -115,6 +122,13 @@ pub fn set_cell(buf: &mut Buffer, x: u16, y: u16, symbol: &str, fg: Color, bg: C
 #[cfg(test)]
 mod tests {
     use super::{scroll_slice, trunc, trunc_left, wrap};
+    use std::borrow::Cow;
+
+    #[test]
+    fn unclipped_text_is_borrowed_instead_of_allocated() {
+        assert!(matches!(trunc("abc", 8), Cow::Borrowed("abc")));
+        assert!(matches!(scroll_slice("abc", 0, 8), Cow::Borrowed("abc")));
+    }
 
     #[test]
     fn wrap_breaks_at_spaces_and_splits_long_words() {

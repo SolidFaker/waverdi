@@ -1,6 +1,7 @@
 use super::{App, Focus, TreeNode};
 use crate::waveform::{Ticks, Waveform};
 use std::collections::HashSet;
+use std::rc::Rc;
 
 /// A row of the Signal List / waveform pane: a user group header or a signal.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,8 +43,21 @@ impl Group {
 }
 
 impl App {
-    /// Flatten the groups and their signals into rows.
-    pub fn list_rows(&self) -> Vec<ListRow> {
+    /// Flatten the groups and their signals into rows. The result is cached
+    /// until `panes_version` changes, so draw code can call it freely.
+    pub fn list_rows(&self) -> Rc<Vec<ListRow>> {
+        let version = self.panes_version;
+        if let Some((cached, rows)) = self.list_cache.borrow().as_ref() {
+            if *cached == version {
+                return rows.clone();
+            }
+        }
+        let rows = Rc::new(self.build_list_rows());
+        *self.list_cache.borrow_mut() = Some((version, rows.clone()));
+        rows
+    }
+
+    fn build_list_rows(&self) -> Vec<ListRow> {
         let mut rows = Vec::new();
         let mut start = 0usize;
         for (index, group) in self.groups.iter().enumerate() {
@@ -111,6 +125,7 @@ impl App {
     /// Insert a signal at `at` and hand it to `group`. Lazily loaded signals
     /// request their value changes from the backend as soon as they are added.
     pub(crate) fn display_insert(&mut self, group: usize, at: usize, sig: usize) {
+        self.touch_panes();
         let at = at.min(self.display.len());
         self.display.insert(at, sig);
         self.groups[group].count += 1;
@@ -121,12 +136,14 @@ impl App {
     pub(crate) fn grow_groups(&mut self, group: usize) {
         if group + 1 == self.groups.len() {
             self.groups.push(Group::new(self.next_group_id()));
+            self.touch_panes();
         }
     }
 
     /// Move a displayed signal from one slot to another; the signal joins the
     /// group that owns the drop position.
     pub fn move_signal(&mut self, from: usize, to: usize) {
+        self.touch_panes();
         if from == to || from >= self.display.len() || to >= self.display.len() {
             return;
         }
@@ -145,6 +162,7 @@ impl App {
     /// Returns the signal's new display position.
     #[cfg(test)]
     pub fn move_signal_to(&mut self, from: usize, group: usize, to: usize) -> Option<usize> {
+        self.touch_panes();
         if from >= self.display.len() || group >= self.groups.len() {
             return None;
         }
@@ -172,12 +190,14 @@ impl App {
         {
             let id = self.next_group_id();
             self.groups.push(Group::new(id));
+            self.touch_panes();
         }
     }
 
     /// Move a group up / down (`J`/`K` on a group row or a header drag).
     /// Groups keep their ids; only their order (and display blocks) changes.
     pub fn move_group(&mut self, index: usize, delta: i64) {
+        self.touch_panes();
         let target = index as i64 + delta;
         if delta == 0
             || target < 0
@@ -239,7 +259,7 @@ impl App {
 
     pub fn selected_row(&self) -> Option<ListRow> {
         let row = self.sel_row?;
-        self.list_rows().into_iter().nth(row)
+        self.list_rows().get(row).cloned()
     }
 
     pub fn selected_signal(&self) -> Option<usize> {
@@ -270,8 +290,8 @@ impl App {
 
     /// Signal index shown on a row, if the row is a signal.
     pub fn row_signal(&self, row: usize) -> Option<usize> {
-        match self.list_rows().into_iter().nth(row)? {
-            ListRow::Signal { sig, .. } => Some(sig),
+        match self.list_rows().get(row)? {
+            ListRow::Signal { sig, .. } => Some(*sig),
             ListRow::Group { .. } => None,
         }
     }
@@ -388,6 +408,7 @@ impl App {
     /// every selected signal moves as one block; movement crosses group
     /// boundaries. On a group row, the group itself is moved.
     pub fn move_selected_signal(&mut self, delta: i64) {
+        self.touch_panes();
         if let Some(ListRow::Group { index, .. }) = self.selected_row() {
             self.move_group(index, delta);
             return;
@@ -440,6 +461,7 @@ impl App {
 
     /// Move every selected signal one step up / down as one block.
     pub fn move_selection(&mut self, delta: i64) {
+        self.touch_panes();
         let mut positions: Vec<usize> = self
             .display
             .iter()
@@ -490,6 +512,7 @@ impl App {
     /// Double-click on a signal row: expand a multi-bit signal into its bits,
     /// or collapse the bit rows created earlier (also those of `Split Bus`).
     pub fn toggle_signal_expand(&mut self, sig: usize) {
+        self.touch_panes();
         let children: Vec<usize> = match &self.wf {
             Some(wf) => wf.children(sig),
             None => return,
@@ -686,6 +709,7 @@ impl App {
 
     /// Remove the `rank`-th displayed occurrence of a signal.
     fn remove_occurrence(&mut self, sig: usize, rank: usize) {
+        self.touch_panes();
         let mut seen = 0usize;
         let mut position = None;
         for (index, &s) in self.display.iter().enumerate() {
@@ -706,6 +730,7 @@ impl App {
     }
 
     pub fn remove_signal(&mut self, sig: usize) {
+        self.touch_panes();
         if let Some(position) = self.display.iter().position(|&s| s == sig) {
             let group = self.group_of_pos(position);
             self.display.remove(position);
@@ -717,6 +742,7 @@ impl App {
     /// Remove a group together with the signals it owns. Removing the last
     /// group leaves a fresh empty `G0` behind.
     pub fn remove_group(&mut self, index: usize) {
+        self.touch_panes();
         if index >= self.groups.len() {
             return;
         }
@@ -731,6 +757,7 @@ impl App {
 
     /// Rename a group; its id (and therefore its number) does not change.
     pub fn rename_group(&mut self, id: u32, name: String) {
+        self.touch_panes();
         let name = name.trim().to_string();
         if name.is_empty() {
             self.msg("group name must not be empty");
@@ -744,6 +771,7 @@ impl App {
 
     /// Create an empty group after `index`, numbered from the highest id + 1.
     pub fn insert_group_after(&mut self, index: usize) {
+        self.touch_panes();
         let id = self.next_group_id();
         let at = (index + 1).min(self.groups.len());
         self.groups.insert(at, Group::new(id));
@@ -752,6 +780,7 @@ impl App {
     }
 
     pub fn clear_all(&mut self) {
+        self.touch_panes();
         self.display.clear();
         self.groups = vec![Group::new(0)];
         self.sel_row = None;
@@ -761,6 +790,7 @@ impl App {
     }
 
     pub fn toggle_group(&mut self, index: usize) {
+        self.touch_panes();
         if let Some(group) = self.groups.get_mut(index) {
             group.collapsed = !group.collapsed;
         }
@@ -768,6 +798,7 @@ impl App {
     }
 
     pub fn set_group_collapsed(&mut self, index: usize, collapsed: bool) {
+        self.touch_panes();
         if let Some(group) = self.groups.get_mut(index) {
             group.collapsed = collapsed;
         }
@@ -775,6 +806,7 @@ impl App {
     }
 
     pub fn collapse_all(&mut self) {
+        self.touch_panes();
         for group in &mut self.groups {
             group.collapsed = true;
         }
@@ -786,6 +818,7 @@ impl App {
     }
 
     pub fn expand_all(&mut self) {
+        self.touch_panes();
         for group in &mut self.groups {
             group.collapsed = false;
         }
@@ -861,8 +894,21 @@ impl App {
         }
     }
 
-    /// Flatten the hierarchy according to the expanded scopes.
-    pub fn tree_visible(&self) -> Vec<TreeNode> {
+    /// Flatten the hierarchy according to the expanded scopes. The result is
+    /// cached until `panes_version` changes, so draw code can call it freely.
+    pub fn tree_visible(&self) -> Rc<Vec<TreeNode>> {
+        let version = self.panes_version;
+        if let Some((cached, nodes)) = self.tree_cache.borrow().as_ref() {
+            if *cached == version {
+                return nodes.clone();
+            }
+        }
+        let nodes = Rc::new(self.build_tree_visible());
+        *self.tree_cache.borrow_mut() = Some((version, nodes.clone()));
+        nodes
+    }
+
+    fn build_tree_visible(&self) -> Vec<TreeNode> {
         fn rec(
             wf: &Waveform,
             id: usize,
@@ -935,6 +981,7 @@ impl App {
     }
 
     pub fn toggle_scope(&mut self, id: usize) {
+        self.touch_panes();
         if !self.expanded.remove(&id) {
             self.expanded.insert(id);
         }
@@ -1063,6 +1110,28 @@ mod tests {
         assert_eq!(app.tree_visible().len(), 3); // expanding sub adds nothing
         app.toggle_scope(0);
         assert_eq!(app.tree_visible().len(), 1);
+    }
+
+    #[test]
+    fn pane_caches_rebuild_only_after_mutations() {
+        use std::rc::Rc;
+
+        let mut app = app_with(VCD);
+        let rows = app.list_rows();
+        assert!(Rc::ptr_eq(&rows, &app.list_rows()));
+
+        app.add_signal(0);
+        let grown = app.list_rows();
+        assert!(!Rc::ptr_eq(&rows, &grown));
+        // The signal row plus the fresh trailing group row.
+        assert_eq!(grown.len(), rows.len() + 2);
+
+        let nodes = app.tree_visible();
+        assert!(Rc::ptr_eq(&nodes, &app.tree_visible()));
+        app.toggle_scope(1);
+        let toggled = app.tree_visible();
+        assert!(!Rc::ptr_eq(&nodes, &toggled));
+        assert_eq!(toggled.len(), nodes.len() + 1);
     }
 
     #[test]

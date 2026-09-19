@@ -11,6 +11,9 @@ const WHEEL_STEP: usize = 3;
 
 /// Handle one mouse event. Returns `true` when the application should quit.
 pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
+    // Any mouse event may change visible state (idle moves are filtered out
+    // by the event loop unless a drag is running).
+    app.needs_redraw = true;
     let (col, row) = (m.column, m.row);
     // Some terminals (e.g. Windows Terminal) consume Shift+click for text
     // selection, so Alt+click is accepted as an alias for multi-select.
@@ -511,8 +514,8 @@ fn mouse_down(
             let row_in_list = (row - l.list.y - 2) as usize;
             let list_row = app
                 .list_rows()
-                .into_iter()
-                .nth(app.row_scroll + row_in_list)
+                .get(app.row_scroll + row_in_list)
+                .cloned()
                 .filter(|_| row_in_list < app.rows_h());
             if let Some(list_row) = list_row {
                 let index = app.row_scroll + row_in_list;
@@ -611,8 +614,8 @@ fn mouse_down(
         let row_in_wave = (row - l.rows.y) as usize;
         let list_row = app
             .list_rows()
-            .into_iter()
-            .nth(app.row_scroll + row_in_wave)
+            .get(app.row_scroll + row_in_wave)
+            .cloned()
             .filter(|_| row_in_wave < app.rows_h());
         // Ctrl+drag pans the time window; multi-selection stays a Signal List
         // gesture.
@@ -848,6 +851,7 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
                             // last row: hand the signal over without moving.
                             app.groups[group].count = app.groups[group].count.saturating_sub(1);
                             app.groups[index].count += 1;
+                            app.touch_panes();
                             return;
                         }
                         // Step toward the end first, then hand over.
@@ -1341,6 +1345,7 @@ mod tests {
         app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
         app.wf.as_mut().unwrap().tree.nodes[2].module = "counter".to_string();
         app.expanded.insert(1);
+        app.touch_panes();
         app.tree_sel = 2;
         app.sync_source();
 
@@ -2005,6 +2010,7 @@ mod tests {
         vcd.push_str("$upscope $end\n$enddefinitions $end\n#0\n");
         let mut app = app_with(&vcd);
         app.expanded.insert(1); // tb
+        app.touch_panes();
         let l = app.layout();
         let inner = crate::ui::layout::tree_inner(&l);
         let col = inner.right() - 1;
@@ -2119,6 +2125,7 @@ mod tests {
         let mut app = app_with(&vcd);
         let nodes = app.wf.as_ref().unwrap().tree.nodes.len();
         app.expanded.extend(0..nodes);
+        app.touch_panes();
         for id in 1..nodes {
             app.wf.as_mut().unwrap().tree.nodes[id].module = "counter_pipeline_stage".to_string();
         }

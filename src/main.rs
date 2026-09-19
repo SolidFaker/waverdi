@@ -14,6 +14,7 @@ mod fsdb;
 
 use app::App;
 use clap::Parser;
+use crossterm::event::{Event, MouseEventKind};
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -125,14 +126,40 @@ fn run_tui(mut app: App) -> io::Result<()> {
 fn run_loop(term: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()> {
     crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
     loop {
-        term.draw(|f| ui::render(f, app))?;
-        if !crossterm::event::poll(Duration::from_millis(50))? {
+        let loading = app.load.as_ref().is_some_and(|job| !job.finished);
+        // Idle frames are skipped: the dirty flag is set by every input event,
+        // by loader events and by the idle tick when it changes state.
+        if app.needs_redraw || loading || app.is_dragging() {
+            // Draw also resizes the terminal buffer after a Resize event.
+            term.draw(|f| ui::render(f, app))?;
+            app.take_needs_redraw();
+        }
+        // Poll faster while something is moving (load progress, drag, scroll
+        // auto-repeat) and slower when the app is fully idle.
+        let timeout = if loading || app.is_dragging() {
+            50
+        } else {
+            250
+        };
+        if !crossterm::event::poll(Duration::from_millis(timeout))? {
             app::tick(app);
             continue;
         }
         let quit = match crossterm::event::read()? {
-            crossterm::event::Event::Key(k) => app::handle_key(app, k),
-            crossterm::event::Event::Mouse(m) => app::handle_mouse(app, m),
+            Event::Key(k) => app::handle_key(app, k),
+            Event::Mouse(m) => {
+                // 1003h reports every pointer move; without a drag there is
+                // nothing to update, so those events must not force a frame.
+                if m.kind == MouseEventKind::Moved && !app.is_dragging() {
+                    false
+                } else {
+                    app::handle_mouse(app, m)
+                }
+            }
+            Event::Resize(..) => {
+                app.needs_redraw = true;
+                false
+            }
             _ => false,
         };
         if quit {

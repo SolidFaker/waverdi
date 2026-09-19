@@ -647,7 +647,8 @@ fn draw_find(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) -> O
     text::put(buf, x, area.y + 1, "Query: ", Style::new().fg(t.text));
     let input_x = x + 7;
     let avail = area.right().saturating_sub(input_x) as usize;
-    let shown = text::trunc(&app.input.as_string(), width.min(avail));
+    let input = app.input.as_string();
+    let shown = text::trunc(&input, width.min(avail));
     text::put(
         buf,
         input_x,

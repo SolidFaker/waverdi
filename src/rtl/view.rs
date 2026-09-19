@@ -33,6 +33,9 @@ pub struct SourceView {
     pub module: String,
     pub file: PathBuf,
     pub lines: Vec<String>,
+    /// Width in characters of the widest line; precomputed because the pane
+    /// needs it every frame for the horizontal scrollbar.
+    pub max_width: usize,
     /// Module that owns each line; the active module outside module regions.
     pub line_modules: Vec<String>,
     pub spans: Vec<Vec<Span>>,
@@ -86,6 +89,11 @@ impl SourceView {
         if lines.is_empty() {
             return None;
         }
+        let max_width = lines
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0);
         let line_modules = module_lines(&lines, def, db);
         let names_by_module = module_signal_names(db);
         let qualified = qualified_references(&lines, &line_modules, db);
@@ -117,6 +125,7 @@ impl SourceView {
             module: def.name.clone(),
             file: def.file.clone(),
             lines,
+            max_width,
             line_modules,
             spans,
             inactive,
