@@ -637,19 +637,35 @@ impl App {
     }
 
     pub fn add_signal(&mut self, idx: usize) {
-        // The same signal may be added repeatedly; every add appends a row.
+        self.add_signals(&[idx]);
+    }
+
+    /// Add a batch of signals to the group under the cursor. The target group
+    /// is resolved once for the whole batch: recomputing it per signal would
+    /// send later signals into the empty group appended by the first insert
+    /// (or into the group of an earlier occurrence), so one action would be
+    /// spread over several groups. The same signal may be added repeatedly;
+    /// every add appends a row.
+    pub(crate) fn add_signals(&mut self, signals: &[usize]) {
+        let Some(&last) = signals.last() else {
+            return;
+        };
         let group = self.active_group();
-        let at = self.group_range(group).end.min(self.display.len());
-        self.display_insert(group, at, idx);
+        let mut at = self.group_range(group).end.min(self.display.len());
+        for &idx in signals {
+            self.display_insert(group, at, idx);
+            at += 1;
+        }
         self.grow_groups(group);
         // Select the occurrence that was just inserted.
+        let at = at - 1;
         let occurrence = self.display[..=at]
             .iter()
-            .filter(|&&sig| sig == idx)
+            .filter(|&&sig| sig == last)
             .count();
         let mut seen = 0usize;
         self.sel_row = self.list_rows().iter().position(|row| match row {
-            ListRow::Signal { sig, .. } if *sig == idx => {
+            ListRow::Signal { sig, .. } if *sig == last => {
                 seen += 1;
                 seen == occurrence
             }

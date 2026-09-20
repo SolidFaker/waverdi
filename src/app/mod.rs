@@ -1238,11 +1238,8 @@ impl App {
             self.msg("source: select signal names first (drag or Shift+arrows)");
             return;
         }
-        let mut added = 0usize;
-        for index in signals {
-            self.add_signal(index);
-            added += 1;
-        }
+        let added = signals.len();
+        self.add_signals(&signals);
         self.focus = Focus::Source;
         if !missing.is_empty() {
             self.msg(format!(

@@ -671,9 +671,7 @@ impl App {
             return;
         }
         let count = chosen.len();
-        for index in chosen {
-            self.add_signal(index);
-        }
+        self.add_signals(&chosen);
         if close {
             self.close_add_signals();
         } else if let Some(add) = &mut self.add_signals {
@@ -768,5 +766,97 @@ mod tests {
         let (_, filtered) = app.add_pane(AddFocus::Signals);
         assert!(!Rc::ptr_eq(&first, &filtered), "filter change must rebuild");
         assert_eq!(filtered.len(), 2, "both wires pass the net filter");
+    }
+
+    const PICKER_VCD: &str = "$timescale 1ns $end\n\
+        $var wire 1 ! a $end\n\
+        $var wire 1 \" b $end\n\
+        $var wire 1 # c $end\n\
+        $enddefinitions $end\n#0\n0!\n0\"\n0#\n";
+
+    /// Put the Signal List cursor on the header of the group with `id`.
+    fn select_group(app: &mut crate::app::App, id: u32) {
+        let row = app
+            .list_rows()
+            .iter()
+            .position(|row| matches!(row, crate::app::ListRow::Group { id: i, .. } if *i == id))
+            .expect("group row");
+        app.select_row(row);
+    }
+
+    /// One Apply action is one batch: all chosen signals land in the group
+    /// under the cursor, and only that group's own growth appends a trailing
+    /// group. Resolving the target per signal would spread the batch over the
+    /// empty groups the earlier inserts appended.
+    #[test]
+    fn applying_many_signals_onto_a_new_group_creates_one_group() {
+        let mut app = app_with(PICKER_VCD);
+        app.add_signal(0); // G0 = [a], trailing G1 is the new group
+        app.toggle_group(1); // collapse it and put the cursor on its header
+        app.open_add_signals();
+        app.add_toggle_signal_at(1);
+        app.add_toggle_signal_at(2);
+        app.apply_add_signals(true);
+
+        assert_eq!(app.display, vec![0, 1, 2]);
+        assert_eq!(app.groups.len(), 3, "one group appended, not one per add");
+        assert_eq!(app.groups[1].count, 2, "the new group holds all of them");
+        assert_eq!(app.groups[2].name, "G2", "a single add would name it G2");
+        assert_eq!(app.groups[2].count, 0);
+    }
+
+    /// A signal already displayed in an older group must not drag the rest of
+    /// the batch back into that group.
+    #[test]
+    fn applying_a_displayed_signal_again_keeps_the_batch_together() {
+        let mut app = app_with(PICKER_VCD);
+        app.add_signal(0); // G0 = [a]
+        select_group(&mut app, 1); // the new empty group
+        app.open_add_signals();
+        app.add_toggle_signal_at(0); // already displayed in G0
+        app.add_toggle_signal_at(1);
+        app.apply_add_signals(true);
+
+        assert_eq!(app.display, vec![0, 0, 1]);
+        assert_eq!(app.groups.len(), 3);
+        assert_eq!(app.groups[0].count, 1, "the older occurrence stays put");
+        assert_eq!(
+            app.groups[1].count, 2,
+            "the whole batch joins the cursor group"
+        );
+        assert_eq!(app.groups[2].name, "G2");
+    }
+
+    /// Adding into an existing (non-newest) group must not append a group.
+    #[test]
+    fn applying_many_signals_into_an_existing_group_creates_no_group() {
+        let mut app = app_with(PICKER_VCD);
+        app.add_signal(0); // the cursor is left on G0's signal
+        app.open_add_signals();
+        app.add_toggle_signal_at(1);
+        app.add_toggle_signal_at(2);
+        app.apply_add_signals(true);
+
+        assert_eq!(app.display, vec![0, 1, 2]);
+        assert_eq!(app.groups.len(), 2, "G0 grew, the trailing G1 was kept");
+        assert_eq!(app.groups[0].count, 3);
+        assert_eq!(app.groups[1].count, 0);
+    }
+
+    /// A single picker add onto the new group still appends exactly one group.
+    #[test]
+    fn applying_a_single_signal_onto_a_new_group_creates_one_group() {
+        let mut app = app_with(PICKER_VCD);
+        app.add_signal(0); // G0 = [a]
+        select_group(&mut app, 1);
+        app.open_add_signals();
+        app.add_toggle_signal_at(1);
+        app.apply_add_signals(true);
+
+        assert_eq!(app.display, vec![0, 1]);
+        assert_eq!(app.groups.len(), 3);
+        assert_eq!(app.groups[1].count, 1);
+        assert_eq!(app.groups[2].name, "G2");
+        assert_eq!(app.groups[2].count, 0);
     }
 }
