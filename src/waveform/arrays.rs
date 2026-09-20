@@ -389,6 +389,34 @@ impl super::Waveform {
         Some(Value::Str(self.element_text(index, t, None)))
     }
 
+    /// Unknown kind of signal `index` at `t` with x precedence: `Some(2)`
+    /// when any bit is x, `Some(3)` when only z bits are unknown, `None` when
+    /// every bit is known. Real/string values carry no bits. Synthesized rows
+    /// classify every member, because their brace text is joined on demand
+    /// and collapses each unknown member; a member without a value yet reads
+    /// as unknown `x`, exactly like its brace text.
+    pub fn unknown_kind_at(&self, index: usize, t: Ticks) -> Option<u8> {
+        let signal = self.signals.get(index)?;
+        if !is_synthesized(signal) {
+            if signal.kind != SigKind::Bits {
+                return None;
+            }
+            return match signal.value_at(t) {
+                Some(value) => value.unknown_kind(),
+                None => Some(2),
+            };
+        }
+        let mut any_z = false;
+        for &child in &signal.members {
+            match self.unknown_kind_at(child, t) {
+                Some(2) => return Some(2),
+                Some(3) => any_z = true,
+                _ => {}
+            }
+        }
+        any_z.then_some(3)
+    }
+
     /// Transition times of a signal. Synthesized signals merge their members'
     /// times once the signal is `Ready` (unloaded ones keep an empty list,
     /// like their old empty change list); the union is thinned with the same

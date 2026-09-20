@@ -380,6 +380,18 @@ fn run_cell(summary: u8) -> WaveCell {
     }
 }
 
+/// Ink of a bus span from its value's unknown kind (2 = x, 3 = z, `None` =
+/// known): the whole span between two transitions is tinted like the value it
+/// holds, while known values keep the ordinary bus ink. x wins over z, like
+/// the per-digit colouring of the value text.
+fn unknown_ink(kind: Option<u8>) -> WaveInk {
+    match kind {
+        Some(2) => WaveInk::X,
+        Some(3) => WaveInk::Z,
+        _ => WaveInk::Bus,
+    }
+}
+
 /// Index of the first change that does not precede `col_end` (i.e. its time is
 /// `>= col_end`), searched from `from`.
 ///
@@ -469,20 +481,30 @@ fn sample_bit_row(changes: &[Change], t0: f64, scale: f64, cols: usize) -> Vec<W
 
 /// Sample a bus row: change markers use the same rounding as the cursor
 /// column, and the time list is searched from the last drawn column instead
-/// of binary-searching it per column.
-fn sample_bus_row(times: &BusTimes<'_>, t0: f64, scale: f64, cols: usize) -> Vec<WaveCell> {
+/// of binary-searching it per column. `ink_at` classifies the value held
+/// during a span (`None` before the first change), so unknown spans carry the
+/// x/z ink while known ones keep the bus ink.
+fn sample_bus_row(
+    times: &BusTimes<'_>,
+    t0: f64,
+    scale: f64,
+    cols: usize,
+    ink_at: impl Fn(Option<usize>) -> WaveInk,
+) -> Vec<WaveCell> {
     let cut = t0 - 0.5 * scale;
     let mut i = time_partition_point(times, |time| (time as f64) < cut);
+    let mut ink = ink_at(i.checked_sub(1));
     let mut cells = Vec::with_capacity(cols);
     for col in 0..cols {
         let col_end = t0 + (col as f64 + 0.5) * scale;
         let before = i;
         i = first_not_before(times.len(), i, col_end, |k| times.time_at(k) as f64);
+        if i > before {
+            // The column's marker and rail belong to the new value.
+            ink = ink_at(Some(i - 1));
+        }
         let glyph = if i > before { BUS_CROSS } else { BUS_LINE };
-        cells.push(WaveCell {
-            glyph,
-            ink: WaveInk::Bus,
-        });
+        cells.push(WaveCell { glyph, ink });
     }
     cells
 }
@@ -579,20 +601,50 @@ fn draw_bus_row(
     y: u16,
 ) {
     let radix = app.radix_for(idx);
+    // Logic rows (including the brace values of synthesized arrays and
+    // aggregates) colour unknown digits; plain string rows do not, so a
+    // literal 'x'/'z' in their text keeps the bus colour.
+    let unknown_colors = wf.is_synthesized(idx) || wf.signals[idx].kind == waveform::SigKind::Bits;
+    // A grouped radix hides the bits behind digits, so an unknown value is
+    // only visible as the tint of its span; a binary row prints every bit
+    // itself and keeps the plain bus colour.
+    let classify = unknown_colors && radix != waveform::Radix::Bin;
     if wf.is_synthesized(idx) {
         // The cached Arc is walked in place; the joined labels are cached per
         // zoom window so a cursor-only redraw does not re-join the members.
         let times = wf.value_times(idx);
-        draw_bus_trace(buf, l, app, idx, row_bg, y, BusTimes::Merged(&times), |j| {
-            let time = times[j];
-            app.wave_label(idx, time, || match wf.value_at(idx, time) {
-                Some(value) => waveform::fmt_value(&value, radix),
-                None => "x".to_string(),
-            })
-        });
+        let ink_at = |j: Option<usize>| match (classify, j) {
+            (true, Some(j)) => unknown_ink(wf.unknown_kind_at(idx, times[j])),
+            // Before the first member change the brace text reads `x`.
+            (true, None) => WaveInk::X,
+            _ => WaveInk::Bus,
+        };
+        draw_bus_trace(
+            buf,
+            l,
+            app,
+            idx,
+            row_bg,
+            y,
+            unknown_colors,
+            BusTimes::Merged(&times),
+            ink_at,
+            |j| {
+                let time = times[j];
+                app.wave_label(idx, time, || match wf.value_at(idx, time) {
+                    Some(value) => waveform::fmt_value(&value, radix),
+                    None => "x".to_string(),
+                })
+            },
+        );
         return;
     }
     let changes = &wf.signals[idx].changes;
+    let ink_at = |j: Option<usize>| match (classify, j) {
+        (true, Some(j)) => unknown_ink(changes[j].v.unknown_kind()),
+        (true, None) => WaveInk::X,
+        _ => WaveInk::Bus,
+    };
     draw_bus_trace(
         buf,
         l,
@@ -600,7 +652,9 @@ fn draw_bus_row(
         idx,
         row_bg,
         y,
+        unknown_colors,
         BusTimes::Changes(changes),
+        ink_at,
         |j| {
             let text = waveform::fmt_value(&changes[j].v, radix);
             let width = text.chars().count();
@@ -635,7 +689,8 @@ impl BusTimes<'_> {
 /// Shared drawing of a bus row over a virtual, time-ordered change list. The
 /// text of a change and its display width are provided lazily so plain
 /// signals keep their zero-copy change list while synthesized signals reuse
-/// the labels cached for the current zoom window.
+/// the labels cached for the current zoom window; `ink_at` likewise classifies
+/// a span's held value without materializing the values first.
 #[allow(clippy::too_many_arguments)]
 fn draw_bus_trace(
     buf: &mut Buffer,
@@ -644,14 +699,16 @@ fn draw_bus_trace(
     idx: usize,
     row_bg: Color,
     y: u16,
+    unknown_colors: bool,
     times: BusTimes<'_>,
+    ink_at: impl Fn(Option<usize>) -> WaveInk,
     text_at: impl Fn(usize) -> (Rc<str>, usize),
 ) {
     let t = &app.theme;
     let (t0, scale) = (app.t0, app.scale);
     let n = times.len();
     let cells = app.wave_row(idx, l, NO_RANGE, || {
-        sample_bus_row(&times, t0, scale, l.cols)
+        sample_bus_row(&times, t0, scale, l.cols, ink_at)
     });
     paint_cells(buf, l, t, &cells, y, row_bg);
 
@@ -676,13 +733,13 @@ fn draw_bus_trace(
         let (value, len) = text_at(j);
         let len = len as i64;
         if c1 - c0 >= len + 2 {
-            text::put(
-                buf,
-                l.rows.x + (c0 + 1) as u16,
-                y,
-                &value,
-                Style::new().fg(t.bus_text).bg(row_bg),
-            );
+            let x = l.rows.x + (c0 + 1) as u16;
+            let style = Style::new().fg(t.bus_text).bg(row_bg);
+            if unknown_colors {
+                text::put_unknown_digits(buf, x, y, &value, style, t.xcol, t.zcol);
+            } else {
+                text::put(buf, x, y, &value, style);
+            }
             j += 1;
         } else {
             // Segment too narrow for a label: jump to the segment that is
@@ -1026,18 +1083,79 @@ mod tests {
     fn incremental_bus_sampling_matches_the_old_per_column_algorithm() {
         let changes = wide_changes();
         let times: Vec<waveform::Ticks> = changes.iter().map(|c| c.t).collect();
+        // The reference draws no unknown tint; the equivalence tests compare
+        // the transition walk, so both sides keep the plain bus ink.
+        let bus = |_: Option<usize>| WaveInk::Bus;
         for &(t0, scale, cols) in &[(0.0, 0.5, 40), (6.0, 1.9, 27), (-3.0, 2.5, 13)] {
             assert_eq!(
-                sample_bus_row(&BusTimes::Changes(&changes), t0, scale, cols),
+                sample_bus_row(&BusTimes::Changes(&changes), t0, scale, cols, bus),
                 reference_bus_row(&BusTimes::Changes(&changes), t0, scale, cols),
                 "change list differs at t0={t0} scale={scale}"
             );
             assert_eq!(
-                sample_bus_row(&BusTimes::Merged(&times), t0, scale, cols),
+                sample_bus_row(&BusTimes::Merged(&times), t0, scale, cols, bus),
                 reference_bus_row(&BusTimes::Merged(&times), t0, scale, cols),
                 "merged times differ at t0={t0} scale={scale}"
             );
         }
+    }
+
+    /// The span between two transitions carries the ink of the value held in
+    /// it (x over z over known); before the first change the row is x.
+    #[test]
+    fn bus_sampling_tints_unknown_spans_per_held_value() {
+        let changes = vec![
+            Change {
+                t: 0,
+                v: Value::compact(vec![2, 2, 2, 2]),
+            },
+            Change {
+                t: 10,
+                v: Value::compact(vec![3, 3, 3, 3]),
+            },
+            // x and z mixed: x wins, like the digit rule.
+            Change {
+                t: 20,
+                v: Value::compact(vec![3, 2, 3, 2]),
+            },
+            Change {
+                t: 30,
+                v: Value::compact(vec![1, 0, 1, 0]),
+            },
+        ];
+        let ink = |j: Option<usize>| match j {
+            Some(j) => unknown_ink(changes[j].v.unknown_kind()),
+            None => WaveInk::X,
+        };
+        assert_eq!(
+            sample_bus_row(&BusTimes::Changes(&changes), 0.0, 10.0, 4, ink),
+            vec![
+                WaveCell {
+                    glyph: BUS_CROSS,
+                    ink: WaveInk::X,
+                },
+                WaveCell {
+                    glyph: BUS_CROSS,
+                    ink: WaveInk::Z,
+                },
+                WaveCell {
+                    glyph: BUS_CROSS,
+                    ink: WaveInk::X,
+                },
+                WaveCell {
+                    glyph: BUS_CROSS,
+                    ink: WaveInk::Bus,
+                },
+            ]
+        );
+        // A window before the first change holds no value: unknown x.
+        assert_eq!(
+            sample_bus_row(&BusTimes::Changes(&changes), -20.0, 10.0, 1, ink),
+            vec![WaveCell {
+                glyph: BUS_LINE,
+                ink: WaveInk::X,
+            }]
+        );
     }
 
     /// Deterministic LCG for the dense-row equivalence test.
@@ -1070,6 +1188,7 @@ mod tests {
             });
         }
         let times: Vec<waveform::Ticks> = changes.iter().map(|c| c.t).collect();
+        let bus = |_: Option<usize>| WaveInk::Bus;
         for &(t0, scale, cols) in &[
             (0.0, 500.0, 120),          // dense: hundreds of changes per column
             (0.0, 1.0, 60),             // sparse
@@ -1084,12 +1203,12 @@ mod tests {
                 "bit row differs at t0={t0} scale={scale} cols={cols}"
             );
             assert_eq!(
-                sample_bus_row(&BusTimes::Changes(&changes), t0, scale, cols),
+                sample_bus_row(&BusTimes::Changes(&changes), t0, scale, cols, bus),
                 reference_bus_row(&BusTimes::Changes(&changes), t0, scale, cols),
                 "bus row differs at t0={t0} scale={scale} cols={cols}"
             );
             assert_eq!(
-                sample_bus_row(&BusTimes::Merged(&times), t0, scale, cols),
+                sample_bus_row(&BusTimes::Merged(&times), t0, scale, cols, bus),
                 reference_bus_row(&BusTimes::Merged(&times), t0, scale, cols),
                 "merged row differs at t0={t0} scale={scale} cols={cols}"
             );

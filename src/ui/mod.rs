@@ -786,6 +786,129 @@ mod tests {
     }
 
     #[test]
+    fn unknown_bus_digits_use_the_xz_colours() {
+        // 8'bZZZZXXXX renders "hzx" in hex: one all-z and one all-x nibble.
+        let vcd = "$timescale 1ns $end\n\
+            $var reg 8 ! data $end\n\
+            $enddefinitions $end\n\
+            #0\nbZZZZXXXX !\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.set_display(vec![0]);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        let theme = crate::theme::Theme::DARK;
+        let fg = |x: u16, y: u16| buffer.cell((x, y)).unwrap().fg;
+        // Signal List value column: the G0 header row then the data row, the
+        // value starting one cell right of the grip.
+        let y = l.list.y + 3;
+        let x = l.value_grip_x(app.splits.value_pct) + 1;
+        assert_eq!(buffer.cell((x, y)).unwrap().symbol(), "h");
+        assert_eq!(fg(x, y), theme.value);
+        assert_eq!(buffer.cell((x + 1, y)).unwrap().symbol(), "z");
+        assert_eq!(fg(x + 1, y), theme.zcol);
+        assert_eq!(buffer.cell((x + 2, y)).unwrap().symbol(), "x");
+        assert_eq!(fg(x + 2, y), theme.xcol);
+        // Wave pane: the first segment's label starts one column into the row.
+        let wy = l.rows.y + 1;
+        let wx = l.rows.x + 1;
+        assert_eq!(buffer.cell((wx, wy)).unwrap().symbol(), "h");
+        assert_eq!(fg(wx, wy), theme.bus_text);
+        assert_eq!(buffer.cell((wx + 1, wy)).unwrap().symbol(), "z");
+        assert_eq!(fg(wx + 1, wy), theme.zcol);
+        assert_eq!(buffer.cell((wx + 2, wy)).unwrap().symbol(), "x");
+        assert_eq!(fg(wx + 2, wy), theme.xcol);
+    }
+
+    #[test]
+    fn unknown_bus_spans_use_the_xz_colours() {
+        // data is x for 0..10, z for 10..20 and known from 20 on.
+        let vcd = "$timescale 1ns $end\n\
+            $var reg 4 ! data $end\n\
+            $enddefinitions $end\n\
+            #0\nbxxxx !\n#10\nbzzzz !\n#20\nb0101 !\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.set_display(vec![0]);
+        // Two ticks per column: x in columns 0..5, z in 5..10, known after.
+        app.t0 = 0.0;
+        app.scale = 2.0;
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        let theme = crate::theme::Theme::DARK;
+        let y = l.rows.y + 1;
+        let fg = |col: u16| buffer.cell((l.rows.x + col, y)).unwrap().fg;
+        let symbol = |col: u16| {
+            buffer
+                .cell((l.rows.x + col, y))
+                .unwrap()
+                .symbol()
+                .to_string()
+        };
+        // The x and z segments are wide enough for their collapsed labels
+        // ("hx"/"hz" at columns 1/6), so check the plain spans after them.
+        assert_eq!(symbol(3), "─");
+        assert_eq!(fg(3), theme.xcol);
+        assert_eq!(symbol(5), "╳");
+        assert_eq!(fg(5), theme.zcol);
+        assert_eq!(symbol(8), "─");
+        assert_eq!(fg(8), theme.zcol);
+        assert_eq!(symbol(10), "╳");
+        assert_eq!(fg(10), theme.bus);
+        assert_eq!(symbol(15), "─");
+        assert_eq!(fg(15), theme.bus);
+    }
+
+    #[test]
+    fn unknown_array_member_tints_the_aggregate_row() {
+        // mem[0] is x for 10..20, mem[1] is z for 20..30; the synthesized
+        // `mem` row must tint each span like the member's unknown.
+        let vcd = "$timescale 1ns $end\n\
+            $var reg 4 ! mem[0] $end\n\
+            $var reg 4 \" mem[1] $end\n\
+            $enddefinitions $end\n\
+            #0\nb0000 !\nb0001 \"\n#10\nbxxxx !\n\
+            #20\nb0000 !\nbzzzz \"\n#30\nb0001 \"\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        let mem = app
+            .wf
+            .as_ref()
+            .unwrap()
+            .signals
+            .iter()
+            .position(|signal| signal.name == "mem")
+            .expect("synthesized array row");
+        app.set_display(vec![mem]);
+        app.t0 = 0.0;
+        app.scale = 2.0;
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let l = app.layout();
+        let theme = crate::theme::Theme::DARK;
+        let y = l.rows.y + 1;
+        let fg = |col: u16| buffer.cell((l.rows.x + col, y)).unwrap().fg;
+        assert_eq!(fg(2), theme.bus);
+        assert_eq!(fg(7), theme.xcol);
+        assert_eq!(fg(12), theme.zcol);
+        assert_eq!(fg(25), theme.bus);
+    }
+
+    #[test]
     fn light_theme_dialog_uses_a_light_background() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();

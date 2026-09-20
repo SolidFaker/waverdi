@@ -119,6 +119,43 @@ pub fn set_cell(buf: &mut Buffer, x: u16, y: u16, symbol: &str, fg: Color, bg: C
     }
 }
 
+/// Draw a formatted logic value with its unknown digits tinted individually:
+/// `x` takes `x_color`, `z` takes `z_color` and every other character keeps
+/// the `base` style. The Signal List value column and the bus trace labels
+/// use this so a partially unknown value no longer paints the whole text red.
+pub fn put_unknown_digits(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    text: &str,
+    base: Style,
+    x_color: Color,
+    z_color: Color,
+) {
+    let area = *buf.area();
+    if x >= area.right() || y >= area.bottom() {
+        return;
+    }
+    let width = (area.right() - x) as usize;
+    let visible: Cow<'_, str> = if text.chars().count() <= width {
+        Cow::Borrowed(text)
+    } else {
+        trunc(text, width)
+    };
+    for (i, ch) in visible.chars().enumerate() {
+        let style = match ch {
+            'x' => base.fg(x_color),
+            'z' => base.fg(z_color),
+            _ => base,
+        };
+        if let Some(cell) = buf.cell_mut((x.saturating_add(i as u16), y)) {
+            let mut encoded = [0u8; 4];
+            cell.set_symbol(ch.encode_utf8(&mut encoded));
+            cell.set_style(style);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{scroll_slice, trunc, trunc_left, wrap};

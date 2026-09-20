@@ -2,7 +2,7 @@ use crate::app::{App, Focus, ListRow};
 use crate::ui::layout::Layout;
 use crate::ui::scrollbar;
 use crate::ui::text;
-use crate::waveform::Waveform;
+use crate::waveform::{SigKind, Waveform};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -176,21 +176,31 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                         .fg(t.cursor)
                         .bg(bg)
                         .add_modifier(Modifier::BOLD)
-                } else if value.contains('x') || value.contains('z') {
-                    Style::new().fg(t.xcol).bg(bg)
                 } else {
                     Style::new().fg(t.value).bg(bg)
                 };
                 // Keep the value inside its column: never over the divider.
                 let value_max = value_content.saturating_sub(value_w);
                 let value_offset = app.value_h_scroll.min(value_max);
-                text::put(
-                    buf,
-                    grip + 1,
-                    y,
-                    &text::scroll_slice(&value, value_offset, value_w),
-                    value_style,
-                );
+                let visible = text::scroll_slice(&value, value_offset, value_w);
+                // Logic values colour each unknown digit on its own; the
+                // text of real/string values keeps the plain foreground so a
+                // literal 'x' or 'z' in it is not mistaken for an unknown.
+                let unknown_colors =
+                    !on_edge && (wf.is_synthesized(*sig) || signal.kind == SigKind::Bits);
+                if unknown_colors {
+                    text::put_unknown_digits(
+                        buf,
+                        grip + 1,
+                        y,
+                        &visible,
+                        value_style,
+                        t.xcol,
+                        t.zcol,
+                    );
+                } else {
+                    text::put(buf, grip + 1, y, &visible, value_style);
+                }
             }
         }
     }

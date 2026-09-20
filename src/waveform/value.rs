@@ -64,6 +64,48 @@ impl Value {
         }
     }
 
+    /// Unknown kind of a logic value, with x taking precedence: `Some(2)`
+    /// when any bit is x, `Some(3)` when only z bits are unknown and `None`
+    /// when every bit is known (also for real/string values). Matches the
+    /// grouped-digit rule, where a digit holding x and z renders as `x`.
+    pub fn unknown_kind(&self) -> Option<u8> {
+        match self {
+            Value::Small(packed, width) => {
+                let mask = if *width as usize >= SMALL_MAX_BITS {
+                    u64::MAX
+                } else {
+                    (1u64 << (2 * *width as usize)) - 1
+                };
+                // The two-bit codes sit on even positions: `10` is x and `11`
+                // is z, so `pairs & !(pairs >> 1)` marks x and
+                // `pairs & (pairs >> 1)` marks z.
+                let pairs = packed & mask;
+                let even = 0x5555_5555_5555_5555;
+                let any_x = !pairs & (pairs >> 1) & even;
+                let any_z = pairs & (pairs >> 1) & even;
+                if any_x != 0 {
+                    Some(2)
+                } else if any_z != 0 {
+                    Some(3)
+                } else {
+                    None
+                }
+            }
+            Value::Bits(bits) => {
+                let mut any_z = false;
+                for &bit in bits {
+                    match bit {
+                        2 => return Some(2),
+                        3 => any_z = true,
+                        _ => {}
+                    }
+                }
+                any_z.then_some(3)
+            }
+            _ => None,
+        }
+    }
+
     /// Byte-per-bit copy of a logic value.
     pub fn to_bits_vec(&self) -> Option<Vec<u8>> {
         match self {
@@ -146,15 +188,7 @@ fn fmt_packed(packed: u64, width: usize, radix: Radix) -> String {
         Radix::Dec => {
             let mut s = String::new();
             s.push('d');
-            if (0..width).any(|i| bit(i) >= 2) {
-                s.push('x');
-            } else {
-                let mut v: u128 = 0;
-                for i in (0..width).rev() {
-                    v = (v << 1) | (bit(i) as u128);
-                }
-                s.push_str(&v.to_string());
-            }
+            s.push_str(&dec_text((0..width).rev().map(&bit)));
             s
         }
         Radix::Ascii => {
@@ -162,14 +196,11 @@ fn fmt_packed(packed: u64, width: usize, radix: Radix) -> String {
             let mut i = width;
             while i > 0 {
                 let lo = i.saturating_sub(8);
-                let mut v: u8 = 0;
-                for j in (lo..i).rev() {
-                    v = (v << 1) | (bit(j) & 1);
-                }
-                s.push(if (0x20..=0x7e).contains(&v) {
-                    v as char
-                } else {
-                    '.'
+                let (v, marker) = digit_group((lo..i).rev().map(&bit));
+                s.push(match marker {
+                    Some(marker) => marker,
+                    None if (0x20..=0x7e).contains(&v) => v as u8 as char,
+                    None => '.',
                 });
                 i = lo;
             }
@@ -178,34 +209,69 @@ fn fmt_packed(packed: u64, width: usize, radix: Radix) -> String {
     }
 }
 
+/// Decode one digit group from LSB-first 0/1/2/3 codes into its value and,
+/// when the whole group is unknown, the marker that replaces the digit.
+/// Unknown bits inside a partially known group count as zero, so e.g. a
+/// nibble `X1X0` still renders a hex digit; only a group whose bits are all
+/// x/z collapses to `x`/`z` (`x` wins when x and z are mixed).
+fn digit_group(bits: impl Iterator<Item = u8>) -> (u64, Option<char>) {
+    let mut v = 0u64;
+    let mut any_x = false;
+    let mut all_unknown = true;
+    for b in bits {
+        // Only a known `1` sets the bit: x and z contribute zero.
+        v = (v << 1) | u64::from(b == 1);
+        match b {
+            2 => any_x = true,
+            3 => {}
+            _ => all_unknown = false,
+        }
+    }
+    let marker = all_unknown.then_some(if any_x { 'x' } else { 'z' });
+    (v, marker)
+}
+
+/// Decimal text of an LSB-first value (prefix excluded). Decimal digits are
+/// not bit-aligned, so unlike power-of-two radices a partially unknown value
+/// cannot be split into per-digit x/z runs: unknown bits are converted as
+/// zero and only an entirely unknown value degrades to a single marker.
+fn dec_text(bits: impl Iterator<Item = u8>) -> String {
+    let mut v: u128 = 0;
+    let mut count = 0usize;
+    let mut any_x = false;
+    let mut all_unknown = true;
+    for b in bits {
+        // Only a known `1` sets the bit: x and z contribute zero.
+        v = (v << 1) | u128::from(b == 1);
+        match b {
+            2 => any_x = true,
+            3 => {}
+            _ => all_unknown = false,
+        }
+        count += 1;
+    }
+    if count > 0 && all_unknown {
+        if any_x { "x" } else { "z" }.to_string()
+    } else {
+        v.to_string()
+    }
+}
+
 /// Packed counterpart of `group`: same digit / unknown rules, read straight
 /// from the two-bit codes.
 fn group_packed(packed: u64, width: usize, grp: usize, digits: &str, prefix: char) -> String {
+    let bit = |i: usize| ((packed >> (2 * i)) & 3) as u8;
     let ngrp = width.div_ceil(grp);
     let mut s = String::with_capacity(ngrp + 1);
     s.push(prefix);
     for gi in (0..ngrp).rev() {
         let lo = gi * grp;
         let hi = ((gi + 1) * grp).min(width);
-        let mut v: u64 = 0;
-        let mut x = false;
-        let mut z = false;
-        for j in (lo..hi).rev() {
-            let b = ((packed >> (2 * j)) & 3) as u8;
-            v = (v << 1) | (b as u64 & 1);
-            if b == 2 {
-                x = true;
-            } else if b == 3 {
-                z = true;
-            }
-        }
-        if x {
-            s.push('x');
-        } else if z {
-            s.push('z');
-        } else {
-            s.push(digits.as_bytes()[v as usize] as char);
-        }
+        let (v, marker) = digit_group((lo..hi).rev().map(&bit));
+        s.push(match marker {
+            Some(marker) => marker,
+            None => digits.as_bytes()[v as usize] as char,
+        });
     }
     s
 }
@@ -272,15 +338,7 @@ pub fn fmt_bits(bits: &[u8], radix: Radix) -> String {
         Radix::Dec => {
             let mut s = String::new();
             s.push('d');
-            if bits.iter().any(|&b| b >= 2) {
-                s.push('x');
-            } else {
-                let mut v: u128 = 0;
-                for &b in bits.iter().rev() {
-                    v = (v << 1) | (b as u128);
-                }
-                s.push_str(&v.to_string());
-            }
+            s.push_str(&dec_text(bits.iter().rev().copied()));
             s
         }
         Radix::Ascii => {
@@ -288,14 +346,11 @@ pub fn fmt_bits(bits: &[u8], radix: Radix) -> String {
             let mut i = bits.len();
             while i > 0 {
                 let lo = i.saturating_sub(8);
-                let mut v: u8 = 0;
-                for j in (lo..i).rev() {
-                    v = (v << 1) | (bits[j] & 1);
-                }
-                s.push(if (0x20..=0x7e).contains(&v) {
-                    v as char
-                } else {
-                    '.'
+                let (v, marker) = digit_group((lo..i).rev().map(|j| bits[j]));
+                s.push(match marker {
+                    Some(marker) => marker,
+                    None if (0x20..=0x7e).contains(&v) => v as u8 as char,
+                    None => '.',
                 });
                 i = lo;
             }
@@ -313,7 +368,7 @@ pub fn fmt_unknown(width: usize, radix: Radix) -> String {
         Radix::Oct => format!("o{}", "x".repeat(digits(3))),
         Radix::Dec if width == 0 => "d0".to_string(),
         Radix::Dec => "dx".to_string(),
-        Radix::Ascii => ".".repeat(digits(8)),
+        Radix::Ascii => "x".repeat(digits(8)),
     }
 }
 
@@ -325,24 +380,11 @@ fn group(bits: &[u8], grp: usize, digits: &str, prefix: char) -> String {
     for gi in (0..ngrp).rev() {
         let lo = gi * grp;
         let hi = ((gi + 1) * grp).min(n);
-        let mut v: u64 = 0;
-        let mut x = false;
-        let mut z = false;
-        for j in (lo..hi).rev() {
-            v = (v << 1) | (bits[j] as u64 & 1);
-            if bits[j] == 2 {
-                x = true;
-            } else if bits[j] == 3 {
-                z = true;
-            }
-        }
-        if x {
-            s.push('x');
-        } else if z {
-            s.push('z');
-        } else {
-            s.push(digits.as_bytes()[v as usize] as char);
-        }
+        let (v, marker) = digit_group((lo..hi).rev().map(|j| bits[j]));
+        s.push(match marker {
+            Some(marker) => marker,
+            None => digits.as_bytes()[v as usize] as char,
+        });
     }
     s
 }
@@ -358,13 +400,98 @@ mod tests {
         assert_eq!(fmt_bits(&nib, Radix::Bin), "b1010");
         assert_eq!(fmt_bits(&nib, Radix::Oct), "o12");
         assert_eq!(fmt_bits(&nib, Radix::Dec), "d10");
-        // Unknown bits win over z inside a group; otherwise z is preserved.
-        assert_eq!(fmt_bits(&[2, 0, 3, 1], Radix::Hex), "hx");
-        assert_eq!(fmt_bits(&[2, 0, 3, 1, 0, 0, 0, 0], Radix::Hex), "h0x");
-        assert_eq!(fmt_bits(&[3, 1, 0, 0], Radix::Hex), "hz");
+        // Grouped radices read unknown bits as zero; a fully unknown digit
+        // group keeps its x/z marker (covered by the tests below).
+        assert_eq!(fmt_bits(&[2, 0, 3, 1], Radix::Hex), "h8");
+        assert_eq!(fmt_bits(&[2, 0, 3, 1, 0, 0, 0, 0], Radix::Hex), "h08");
+        assert_eq!(fmt_bits(&[3, 1, 0, 0], Radix::Hex), "h2");
         let wide = vec![0, 0, 1, 1, 1, 0, 1, 0]; // 0b01011100 = '\\'
         assert_eq!(fmt_bits(&wide, Radix::Ascii), "\\");
         assert_eq!(fmt_bits(&nib, Radix::Ascii), ".");
+    }
+
+    #[test]
+    fn binary_keeps_per_bit_unknowns() {
+        // Only the grouped radices collapse unknown digits; binary shows
+        // every x/z bit.
+        assert_eq!(
+            fmt_value(&Value::compact(vec![2, 3, 1]), Radix::Bin),
+            "b1zx"
+        );
+    }
+
+    #[test]
+    fn grouped_radices_keep_fully_unknown_digits() {
+        // 16'hF4XZ: the fully unknown nibbles keep their marker (`z` below
+        // `x`), the known ones render as digits.
+        let bits: Vec<u8> = vec![3, 3, 3, 3, 2, 2, 2, 2, 0, 0, 1, 0, 1, 1, 1, 1];
+        assert_eq!(fmt_value(&Value::compact(bits), Radix::Hex), "hf4xz");
+        // 8'hX4 with the high nibble all-x: that nibble is `x`, the low one
+        // keeps its digit.
+        assert_eq!(
+            fmt_value(&Value::compact(vec![0, 0, 1, 0, 2, 2, 2, 2]), Radix::Hex),
+            "hx4"
+        );
+        // A mixed nibble (X1X0) keeps a digit: the unknowns read as 0.
+        assert_eq!(
+            fmt_value(&Value::compact(vec![0, 2, 1, 2]), Radix::Hex),
+            "h4"
+        );
+        // A nibble mixing x and z with no known bit renders `x`; all-z is z.
+        assert_eq!(
+            fmt_value(&Value::compact(vec![3, 2, 3, 2]), Radix::Hex),
+            "hx"
+        );
+        assert_eq!(fmt_value(&Value::compact(vec![3; 4]), Radix::Hex), "hz");
+    }
+
+    #[test]
+    fn oct_groups_unknown_bits_per_triplet() {
+        // Low triplet all unknown (x wins over z), high triplet 0b010 -> 2.
+        assert_eq!(
+            fmt_value(&Value::compact(vec![2, 3, 2, 0, 1, 0]), Radix::Oct),
+            "o2x"
+        );
+        // Three triplets: 1, 7 and a fully z one (MSB first).
+        assert_eq!(
+            fmt_value(&Value::compact(vec![3, 3, 3, 1, 1, 1, 1, 0, 0]), Radix::Oct),
+            "o17z"
+        );
+        // Partial triplet with known bits: unknowns read as 0.
+        assert_eq!(fmt_value(&Value::compact(vec![2, 2, 1]), Radix::Oct), "o4");
+    }
+
+    #[test]
+    fn ascii_keeps_fully_unknown_bytes() {
+        // High byte all-x, low byte 0x41 ('A').
+        let mut bits = vec![1u8, 0, 0, 0, 0, 0, 1, 0];
+        bits.extend([2u8; 8]);
+        assert_eq!(fmt_value(&Value::compact(bits), Radix::Ascii), "xA");
+        // One unknown bit read as 0: 0x41 loses its LSB -> 0x40 '@'.
+        assert_eq!(
+            fmt_value(&Value::compact(vec![2, 0, 0, 0, 0, 0, 1, 0]), Radix::Ascii),
+            "@"
+        );
+        // A fully z byte renders `z`; a known non-printable stays `.`.
+        assert_eq!(fmt_value(&Value::compact(vec![3; 8]), Radix::Ascii), "z");
+        assert_eq!(fmt_value(&Value::compact(vec![0; 8]), Radix::Ascii), ".");
+    }
+
+    #[test]
+    fn decimal_masks_unknown_bits_to_zero() {
+        // Decimal digits are not bit-aligned, so partially unknown values
+        // convert with the unknowns as 0; only an entirely unknown value
+        // shows a single x/z.
+        assert_eq!(
+            fmt_value(&Value::compact(vec![1, 0, 0, 0, 0, 0, 0, 2]), Radix::Dec),
+            "d1"
+        );
+        assert_eq!(fmt_value(&Value::compact(vec![2; 8]), Radix::Dec), "dx");
+        assert_eq!(fmt_value(&Value::compact(vec![3; 8]), Radix::Dec), "dz");
+        assert_eq!(
+            fmt_value(&Value::compact(vec![2, 3, 2, 3]), Radix::Dec),
+            "dx"
+        );
     }
 
     #[test]
@@ -379,6 +506,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn unknown_kind_prefers_x_and_matches_the_bit_scan() {
+        assert_eq!(Value::compact(vec![0, 1, 0, 1]).unknown_kind(), None);
+        assert_eq!(Value::compact(vec![3, 0, 3, 1]).unknown_kind(), Some(3));
+        assert_eq!(Value::compact(vec![2, 3, 0, 1]).unknown_kind(), Some(2));
+        assert_eq!(Value::compact(vec![2]).unknown_kind(), Some(2));
+        assert_eq!(Value::compact(Vec::new()).unknown_kind(), None);
+        assert_eq!(Value::Real(1.5).unknown_kind(), None);
+        assert_eq!(Value::Str("xz".into()).unknown_kind(), None);
+        // The packed fast path must match a byte-per-bit scan at every width.
+        for width in 0..=SMALL_MAX_BITS {
+            for shift in 0..4u8 {
+                let bits: Vec<u8> = (0..width).map(|i| (i as u8 + shift) % 4).collect();
+                let expected = if bits.contains(&2) {
+                    Some(2)
+                } else if bits.contains(&3) {
+                    Some(3)
+                } else {
+                    None
+                };
+                assert_eq!(
+                    Value::compact(bits).unknown_kind(),
+                    expected,
+                    "width={width} shift={shift}"
+                );
+            }
+        }
+        // Wider than the inline limit uses the vector path.
+        let mut wide = vec![0u8; SMALL_MAX_BITS + 4];
+        wide[SMALL_MAX_BITS + 1] = 3;
+        assert_eq!(Value::Bits(wide.clone()).unknown_kind(), Some(3));
+        wide[1] = 2;
+        assert_eq!(Value::Bits(wide).unknown_kind(), Some(2));
     }
 
     #[test]
