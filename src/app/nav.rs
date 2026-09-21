@@ -179,8 +179,10 @@ impl App {
     }
 
     /// Keep an empty group at the end of the list. Called after a drop or a
-    /// keyboard move, never mid-drag, so dragging through the groups does not
-    /// create a trail of empty ones.
+    /// group reorder, never mid-drag, so dragging through the groups does not
+    /// create a trail of empty ones. Keyboard moves deliberately do not call
+    /// it: they may consume the trailing group, and replenishing it there
+    /// would let every `J` hand the selection to yet another fresh group.
     pub(crate) fn ensure_trailing_group(&mut self) {
         if self
             .groups
@@ -442,7 +444,10 @@ impl App {
 
     /// Move the selected signal(s) up / down (`J`/`K`). With a multi-selection
     /// every selected signal moves as one block; movement crosses group
-    /// boundaries. On a group row, the group itself is moved.
+    /// boundaries. On a group row, the group itself is moved. A move never
+    /// appends a group: the trailing empty group is a destination that gets
+    /// consumed once, so repeated `J`/`K` cannot keep growing the list; adds
+    /// and drops restore the trailing group when it is needed again.
     pub fn move_selected_signal(&mut self, delta: i64) {
         self.touch_panes();
         if let Some(ListRow::Group { index, .. }) = self.selected_row() {
@@ -455,7 +460,6 @@ impl App {
             if let Some(sig) = anchor {
                 self.select_signal_row(sig);
             }
-            self.ensure_trailing_group();
             return;
         }
         let Some(sig) = self.selected_signal() else {
@@ -473,7 +477,6 @@ impl App {
                 // No slot below: hand the signal over to the next group.
                 self.groups[group].count = self.groups[group].count.saturating_sub(1);
                 self.groups[group + 1].count += 1;
-                self.grow_groups(group + 1);
             } else {
                 return;
             }
@@ -484,14 +487,12 @@ impl App {
                 // No slot above: hand the signal over to the previous group.
                 self.groups[group].count = self.groups[group].count.saturating_sub(1);
                 self.groups[group - 1].count += 1;
-                self.grow_groups(group - 1);
             } else {
                 return;
             }
         } else {
             return;
         }
-        self.ensure_trailing_group();
         self.scroll_to_row_of(sig);
     }
 
@@ -524,7 +525,11 @@ impl App {
                 }
             }
             for &position in positions.iter().rev() {
-                if position + 1 < self.display.len() {
+                // A swap with another selected row would only shuffle the
+                // block in place; only an unselected slot below moves it.
+                if position + 1 < self.display.len()
+                    && !self.selection.contains(&self.display[position + 1])
+                {
                     self.move_signal(position, position + 1);
                 }
             }
@@ -538,7 +543,7 @@ impl App {
                 }
             }
             for &position in positions.iter() {
-                if position > 0 {
+                if position > 0 && !self.selection.contains(&self.display[position - 1]) {
                     self.move_signal(position, position - 1);
                 }
             }
@@ -1622,5 +1627,61 @@ mod tests {
         app.selection = vec![0, 1];
         assert_eq!(app.action_targets(1), vec![0, 1]);
         assert_eq!(app.action_targets(7), vec![7]);
+    }
+
+    #[test]
+    fn j_moves_a_multi_selection_into_one_group_only() {
+        let mut app = app_with(VCD);
+        app.add_signal(0);
+        app.add_signal(1);
+        app.add_signal(0);
+        // Three signals sit in G0; the empty G1 is the trailing group.
+        assert_eq!(app.groups.len(), 2);
+        app.selection = vec![0, 1, 0];
+        app.sel_row = Some(3);
+
+        app.move_selected_signal(1); // J: the block joins the trailing G1
+        assert_eq!(
+            app.groups.len(),
+            2,
+            "the trailing group is used, not replaced"
+        );
+        assert_eq!(app.groups[0].count, 0);
+        assert_eq!(app.groups[1].count, 3);
+        assert_eq!(app.display, vec![0, 1, 0]);
+        assert_eq!(app.group_of_signal(0), Some(1));
+        assert_eq!(app.group_of_signal(1), Some(1));
+
+        app.move_selected_signal(1); // J: the block is already in the newest group
+        assert_eq!(app.groups.len(), 2, "no extra group is appended");
+        assert_eq!(app.groups[1].count, 3);
+        assert_eq!(app.display, vec![0, 1, 0]);
+        assert_eq!(app.selected_signal(), Some(0));
+
+        app.move_selected_signal(-1); // K: back into G0
+        assert_eq!(app.groups.len(), 2);
+        assert_eq!(app.groups[0].count, 3);
+        assert_eq!(app.groups[1].count, 0);
+        assert_eq!(app.display, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn j_moves_a_single_signal_into_one_group_only() {
+        let mut app = app_with(VCD);
+        app.add_signal(0); // G0 = [clk], trailing G1 is empty
+        app.sel_row = Some(1);
+
+        app.move_selected_signal(1); // J: down into G1
+        assert_eq!(app.groups.len(), 2);
+        assert_eq!(app.groups[0].count, 0);
+        assert_eq!(app.groups[1].count, 1);
+
+        app.move_selected_signal(1); // J: already the newest group
+        assert_eq!(app.groups.len(), 2, "no extra group is appended");
+        assert_eq!(app.groups[1].count, 1);
+
+        app.move_selected_signal(-1); // K: back into G0
+        assert_eq!(app.groups[0].count, 1);
+        assert_eq!(app.groups[1].count, 0);
     }
 }
