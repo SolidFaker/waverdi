@@ -214,28 +214,30 @@ impl FsdbSession {
     }
 
     /// Read the value changes of one dump variable.
-    pub fn read_signal(&mut self, index: usize) -> (Vec<Change>, Vec<String>) {
+    pub fn read_signal(&mut self, index: usize) -> (Arc<Vec<Change>>, Vec<String>) {
         self.read_signals(&[index])
             .pop()
-            .unwrap_or_else(|| (Vec::new(), Vec::new()))
+            .unwrap_or_else(|| (Arc::new(Vec::new()), Vec::new()))
     }
 
     /// Read the value changes of several dump variables in one FFR pass. The
     /// results are in the input order; unknown indices yield empty results.
-    pub fn read_signals(&mut self, indexes: &[usize]) -> Vec<(Vec<Change>, Vec<String>)> {
+    pub fn read_signals(&mut self, indexes: &[usize]) -> Vec<(Arc<Vec<Change>>, Vec<String>)> {
         self.read_signals_raw(indexes)
             .into_iter()
             .zip(indexes)
             .map(|((raw, mut warnings), &index)| {
-                let name = self
-                    .vars
-                    .get(index)
-                    .map(|var| var.name.as_str())
-                    .unwrap_or("");
-                let changes = decode_raw(raw, name, &mut warnings);
-                (changes, warnings)
+                let changes = decode_raw(raw, self.signal_name(index), &mut warnings);
+                (Arc::new(changes), warnings)
             })
             .collect()
+    }
+
+    pub(crate) fn signal_name(&self, index: usize) -> &str {
+        self.vars
+            .get(index)
+            .map(|var| var.name.as_str())
+            .unwrap_or("")
     }
 
     /// Read several dump variables without decoding their values: the caller
@@ -872,7 +874,7 @@ mod tests {
         // constants); the batch must return the same tuples in the requested
         // order either way.
         let indexes = [0usize, 1usize];
-        let singles: Vec<(Vec<Change>, Vec<String>)> = indexes
+        let singles: Vec<_> = indexes
             .iter()
             .map(|&index| session.read_signal(index))
             .collect();
@@ -914,7 +916,11 @@ mod tests {
                 .expect("a requested index yields one result");
             assert!(!raw.times.is_empty(), "raw read of signal {index} is empty");
             let changes = decode_raw(raw, "", &mut warnings);
-            assert_eq!(changes, expected, "raw decode differs at signal {index}");
+            assert_eq!(
+                changes.as_slice(),
+                expected.as_slice(),
+                "raw decode differs at signal {index}"
+            );
             return;
         }
     }

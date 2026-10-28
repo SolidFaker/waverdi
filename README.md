@@ -1,4 +1,4 @@
-﻿# waverdi
+# waverdi
 
 A Verdi-style RTL waveform viewer for the terminal, written in Rust.
 
@@ -362,19 +362,29 @@ ascending/descending, `r` reverse, `Enter` create, `Esc` cancel.
 
 ## Settings
 
-`F2` (or **View ▸ Settings...**) opens the settings dialog:
+`F2` (or **View ▸ Settings...**) opens a two-pane settings dialog. `Tab`
+switches between categories and items; `↑`/`↓` select, `←`/`→` change a value,
+and `Enter` edits. Categories and items can also be clicked. **Reset** restores
+the selected item and **Close** closes the dialog.
 
+- **General** — horizontal sliders for bus split maximum bits and work limit
+  (`changes × bits`), a full-name checkbox, time-base dropdown, vertical
+  top-pane-ratio slider, and waveform-label overflow toggle (`hide` or
+  `ellipsis`). The defaults preserve the original limits, short names,
+  timescale, 60% top pane and hidden overflow labels.
 - **Theme** — `Dark`, `Light` or `Mixed`. Mixed keeps the waveform pane dark
-  while every other window stays light; the waveform has its own background
-  setting, independent of the UI background.
+  while every other window stays light; the waveform has its own background.
 - **UI colours** — the background shared by the windows.
-- **Waveform colours** — its own background (`background (wave)`), high/low
-  level, unknown (x), high-Z (z), bus value and text, cursor, analog and time
-  ticks. `←`/`→` cycle a built-in palette, `Enter` advances, `r` restores the
+- **Waveform colours** — background, levels, unknown/high-Z, bus, cursor,
+  analog and time ticks. `←`/`→` cycle the palette and `r` restores the current
   theme default.
+- **Key Bindings** — edit the ordinary global commands. `Enter` captures a new
+  shortcut, `r` restores the selected one, and `R` restores all defaults.
+  `Backspace`/`Delete` also restores the selected binding during capture.
+  Conflicts with other commands and reserved pane/modal keys are rejected.
 
-Switching themes resets per-colour customisation; the choice lasts for the
-session.
+Switching themes resets per-colour customisation. General options, colours and
+shortcut overrides last for the current session.
 
 ## Project layout
 
@@ -385,16 +395,20 @@ waveform/          demo dumps (counter.vcd, complex.vcd, demo.fst)
 shot/              README screenshot
 src/
 ├── main.rs        CLI, terminal setup, event loop
-├── app/           state machine: input, keys, mouse, view, navigation, actions
-├── ui/            ratatui rendering: layout, tree, source, list, wave, menus
-├── rtl/           RTL sources: filelist/KDB discovery, SV scanner, source view
+├── app/           document state, input, mouse, navigation; keymap.rs binds commands
+├── engine/        background loading, deferred decode, wave sampling and queries
+├── settings/      themes, pane splits, time base and settings rows
+├── ui/            ratatui layout and painting (sampling lives in engine)
+│   └── widgets/   buttons, inputs, choices, dropdowns, sliders, labels and containers
+├── rtl/           filelist/KDB discovery and SourceView
+│   └── scan/      SV lexer, parser, elaboration, trace and waveform adapter
 ├── waveform/      data model: signals, values, time, scope tree, arrays
+├── dump/          format registry, shared limits and per-format source adapters
 ├── vcd.rs         VCD parser
 ├── fst.rs         FST loader (via wellen)
 ├── fsdb.rs        FSDB loader (via the Verdi FFR SDK, Linux)
-├── dump.rs        format detection and dispatcher
-├── picker.rs      native dialog detection / wrapper
-└── theme.rs       color palette
+├── perf.rs        opt-in performance scenarios (test only)
+└── picker.rs      native dialog detection / wrapper
 ```
 
 ## Development
@@ -405,6 +419,7 @@ cargo test fsdb                  # FSDB tests (needs VERDI_HOME; cross-checks fs
 cargo test --no-default-features # pure TUI build
 cargo clippy --all-targets
 cargo fmt --check
+cargo test --release perf:: -- --ignored --nocapture --test-threads=1 # opt-in benchmarks
 ```
 
 ## Todo

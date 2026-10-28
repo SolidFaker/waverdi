@@ -36,8 +36,6 @@ pub enum LoadRequest {
     /// Materialize the value changes of `wf.signals[index]` (and of the array
     /// or aggregate signals that become complete once its members are loaded).
     Signal(usize),
-    /// Re-format array/aggregate brace texts with the given radix overrides.
-    RebuildArrays(std::collections::HashMap<usize, crate::waveform::Radix>),
     Shutdown,
 }
 
@@ -161,18 +159,6 @@ impl LoadJob {
             .unwrap_or(false)
     }
 
-    /// Ask the worker to re-format array/aggregate brace texts off the UI
-    /// thread. Returns false when no lazy backend is alive.
-    pub fn request_rebuild(
-        &self,
-        radix: std::collections::HashMap<usize, crate::waveform::Radix>,
-    ) -> bool {
-        self.requests
-            .as_ref()
-            .map(|tx| tx.send(LoadRequest::RebuildArrays(radix)).is_ok())
-            .unwrap_or(false)
-    }
-
     /// Non-blocking poll of the worker.
     pub fn try_recv(&self) -> Result<LoadEvent, TryRecvError> {
         self.rx.try_recv()
@@ -220,24 +206,35 @@ fn parse_rtl_sources(path: &str, tx: &Sender<LoadEvent>, flag: &AtomicBool) {
     }
 }
 
-/// Values on their way into the shared waveform. The FSDB reader hands over
-/// raw bytes and the pool decodes them, so the FFR lock is not held during
-/// the value math for wide signals.
-enum PendingValues {
-    /// Freshly decoded or already-shared changes; the `Arc` moves into the
-    /// waveform and is cloned (refcount only) on its way to the UI.
-    Decoded(Arc<Vec<crate::waveform::Change>>),
-    #[cfg(fsdb_sdk)]
-    Raw(crate::fsdb::RawChanges),
-}
-
 /// Work that needs no backend access and can run on the compute pool.
 enum ComputeTask {
-    /// Install a batch of freshly read signals into the shared waveform and
-    /// complete the aggregate/array math. One task per batch keeps the pool
-    /// fed while the reader thread moves on to the next signal.
-    Install(Vec<(usize, PendingValues, Vec<String>)>),
-    Rebuild(std::collections::HashMap<usize, crate::waveform::Radix>),
+    /// Decode and install one bounded read pass. The deferred task owns any
+    /// format-specific raw storage, keeping the pool format independent.
+    Install {
+        order: u64,
+        pending: Vec<(usize, crate::dump::source::DeferredDecode)>,
+    },
+}
+
+#[derive(Default)]
+struct InstallOrder {
+    next: std::sync::Mutex<u64>,
+    ready: std::sync::Condvar,
+}
+
+impl InstallOrder {
+    fn wait(&self, order: u64) {
+        let mut next = self.next.lock().unwrap_or_else(|err| err.into_inner());
+        while *next != order {
+            next = self.ready.wait(next).unwrap_or_else(|err| err.into_inner());
+        }
+    }
+
+    fn finish(&self) {
+        let mut next = self.next.lock().unwrap_or_else(|err| err.into_inner());
+        *next += 1;
+        self.ready.notify_all();
+    }
 }
 
 fn pool_size() -> usize {
@@ -262,27 +259,14 @@ const MAX_SIGNALS_PER_PASS: usize = 64;
 /// storage on this thread.
 const INSTALL_QUEUE: usize = 2;
 
-/// Decode a batch of leaves on the reader thread, for sources without a raw
-/// value path. FSDB skips this: its bytes go to the pool undecoded.
-fn decode_batch(
-    session: &mut dyn crate::dump::source::DumpSource,
-    leaves: &[usize],
-) -> Vec<(PendingValues, Vec<String>)> {
-    session
-        .read_signals(leaves)
-        .into_iter()
-        .map(|(changes, warns)| (PendingValues::Decoded(Arc::new(changes)), warns))
-        .collect()
-}
-
 /// Serve on-demand value requests for an open source until the UI drops the
 /// job (the request channel closes) or asks for shutdown.
 ///
 /// Value reads must happen on this thread - FFR cannot be used from several
 /// threads (two simultaneous readers deadlock inside the library) - so the
-/// reads of one batch stay back to back while the compute pool installs the
-/// previous batch, clones the values for the UI and completes the aggregate
-/// math in parallel. Each outer iteration serves at most
+/// reads of one batch stay back to back while the compute pool decodes later
+/// batches in parallel. Installation, UI delivery and aggregate recomputation
+/// retain read order. Each outer iteration serves at most
 /// [`MAX_SIGNALS_PER_PASS`] requests so a large add cannot pin the whole
 /// hierarchy's values before any of them is installed.
 fn serve_session(
@@ -291,23 +275,43 @@ fn serve_session(
     req_rx: &Receiver<LoadRequest>,
     tx: &Sender<LoadEvent>,
 ) {
+    serve_session_with_pool_size(meta, session, req_rx, tx, pool_size());
+}
+
+fn serve_session_with_pool_size(
+    meta: Arc<std::sync::Mutex<Waveform>>,
+    session: &mut dyn crate::dump::source::DumpSource,
+    req_rx: &Receiver<LoadRequest>,
+    tx: &Sender<LoadEvent>,
+    workers: usize,
+) {
     let (task_tx, task_rx) = mpsc::sync_channel::<ComputeTask>(INSTALL_QUEUE);
     let task_rx = Arc::new(std::sync::Mutex::new(task_rx));
     // Signals the UI asked for. Checked by the pool at install time, so a
     // request that arrives while its read is already in flight is honoured.
     let wanted: Arc<std::sync::Mutex<std::collections::HashSet<usize>>> = Arc::default();
-    for _ in 0..pool_size() {
+    let install_order = Arc::new(InstallOrder::default());
+    for _ in 0..workers {
         let rx = Arc::clone(&task_rx);
         let meta = Arc::clone(&meta);
         let tx = tx.clone();
         let wanted = Arc::clone(&wanted);
+        let install_order = Arc::clone(&install_order);
         std::thread::spawn(move || loop {
             let task = rx.lock().unwrap_or_else(|err| err.into_inner()).recv();
             let Ok(task) = task else {
                 break;
             };
             match task {
-                ComputeTask::Install(pending) => {
+                ComputeTask::Install { order, pending } => {
+                    let pending: Vec<_> = pending
+                        .into_iter()
+                        .map(|(leaf, decode)| {
+                            let (changes, warnings) = decode.decode();
+                            (leaf, changes, warnings)
+                        })
+                        .collect();
+                    install_order.wait(order);
                     // Install first so the aggregates below can see the new
                     // values, then clone once for the UI - and only for the
                     // signals the UI actually asked for. The wanted set is
@@ -317,33 +321,15 @@ fn serve_session(
                         let mut wf = meta.lock().unwrap_or_else(|err| err.into_inner());
                         let mut updates = Vec::with_capacity(pending.len());
                         let mut warnings = Vec::new();
-                        for (leaf, values, mut warns) in pending {
+                        for (leaf, changes, mut warns) in pending {
                             let wanted = wanted
                                 .lock()
                                 .unwrap_or_else(|err| err.into_inner())
                                 .contains(&leaf);
-                            // Raw bytes come straight out of FFR; decode them
-                            // here on the pool, not on the reader thread.
-                            #[cfg(fsdb_sdk)]
-                            let changes = match values {
-                                PendingValues::Decoded(changes) => changes,
-                                PendingValues::Raw(raw) => {
-                                    let name = wf
-                                        .signals
-                                        .get(leaf)
-                                        .map(|signal| signal.name.clone())
-                                        .unwrap_or_default();
-                                    Arc::new(crate::fsdb::decode_raw(raw, &name, &mut warns))
-                                }
-                            };
-                            #[cfg(not(fsdb_sdk))]
-                            let PendingValues::Decoded(changes) = values;
                             if let Some(signal) = wf.signals.get_mut(leaf) {
                                 signal.changes = changes;
                                 signal.state = crate::waveform::SigState::Ready;
                                 if wanted {
-                                    // The UI and the worker now share this
-                                    // allocation; only the refcount travels.
                                     updates.push((leaf, Arc::clone(&signal.changes)));
                                 }
                             }
@@ -366,24 +352,14 @@ fn serve_session(
                     if !arrays.is_empty() {
                         let _ = tx.send(LoadEvent::Changes(arrays, Vec::new()));
                     }
-                }
-                ComputeTask::Rebuild(radix) => {
-                    let updates = {
-                        let mut wf = meta.lock().unwrap_or_else(|err| err.into_inner());
-                        wf.rebuild_array_texts(&radix)
-                            .into_iter()
-                            .map(|index| (index, wf.signals[index].changes.clone()))
-                            .collect::<Vec<_>>()
-                    };
-                    if !updates.is_empty() {
-                        let _ = tx.send(LoadEvent::Changes(updates, Vec::new()));
-                    }
+                    install_order.finish();
                 }
             }
         });
     }
     drop(task_rx);
 
+    let mut next_install = 0u64;
     while let Ok(request) = req_rx.recv() {
         match request {
             LoadRequest::Signal(first) => {
@@ -393,7 +369,6 @@ fn serve_session(
                 // the rest of the burst is served by the following passes
                 // instead of being materialized all at once.
                 let mut batch = vec![first];
-                let mut rebuild = None;
                 let mut shutdown = false;
                 loop {
                     match req_rx.try_recv() {
@@ -403,7 +378,6 @@ fn serve_session(
                                 break;
                             }
                         }
-                        Ok(LoadRequest::RebuildArrays(radix)) => rebuild = Some(radix),
                         Ok(LoadRequest::Shutdown) => {
                             shutdown = true;
                             break;
@@ -474,29 +448,23 @@ fn serve_session(
                             if leaf == index {
                                 delivered.insert(index);
                             }
-                            raw.push((leaf, PendingValues::Decoded(changes), Vec::new()));
+                            raw.push((
+                                leaf,
+                                crate::dump::source::DeferredDecode::ready((changes, Vec::new())),
+                            ));
                         }
                     }
                 }
-                // Phase B reads every claimed leaf back to back in one FFR
-                // load pass, in request order. FSDB hands over raw bytes for
-                // the pool to decode; other lazy sources decode inline.
+                // Phase B reads every claimed leaf back to back in request
+                // order. The source decides whether value decoding can leave
+                // this thread; the session only executes the returned tasks.
                 let leaves: Vec<usize> = claimed.iter().map(|&(_, leaf)| leaf).collect();
-                #[cfg(fsdb_sdk)]
-                let reads = match session.read_signals_raw(&leaves) {
-                    Some(reads) => reads
-                        .into_iter()
-                        .map(|(raw, warns)| (PendingValues::Raw(raw), warns))
-                        .collect(),
-                    None => decode_batch(session, &leaves),
-                };
-                #[cfg(not(fsdb_sdk))]
-                let reads = decode_batch(session, &leaves);
-                for (&(requested, leaf), (values, warns)) in claimed.iter().zip(reads) {
+                let reads = session.read_signals_deferred(&leaves);
+                for (&(requested, leaf), decode) in claimed.iter().zip(reads) {
                     if leaf == requested {
                         delivered.insert(requested);
                     }
-                    raw.push((leaf, values, warns));
+                    raw.push((leaf, decode));
                 }
                 // A requested signal that is already complete in the shared
                 // waveform (e.g. an interface whose members were read earlier)
@@ -518,21 +486,22 @@ fn serve_session(
                         })
                     };
                     if let Some(changes) = existing {
-                        raw.push((index, PendingValues::Decoded(changes), Vec::new()));
+                        raw.push((
+                            index,
+                            crate::dump::source::DeferredDecode::ready((changes, Vec::new())),
+                        ));
                     }
                 }
                 if !raw.is_empty() {
-                    let _ = task_tx.send(ComputeTask::Install(raw));
-                }
-                if let Some(radix) = rebuild {
-                    let _ = task_tx.send(ComputeTask::Rebuild(radix));
+                    let _ = task_tx.send(ComputeTask::Install {
+                        order: next_install,
+                        pending: raw,
+                    });
+                    next_install += 1;
                 }
                 if shutdown {
                     break;
                 }
-            }
-            LoadRequest::RebuildArrays(radix) => {
-                let _ = task_tx.send(ComputeTask::Rebuild(radix));
             }
             LoadRequest::Shutdown => break,
         }
@@ -561,9 +530,9 @@ mod tests {
             unreachable!("the session installs into the waveform it was given")
         }
 
-        fn read_signal(&mut self, index: usize) -> (Vec<Change>, Vec<String>) {
+        fn read_signal(&mut self, index: usize) -> crate::dump::source::ReadResult {
             (
-                self.values.get(index).cloned().unwrap_or_default(),
+                Arc::new(self.values.get(index).cloned().unwrap_or_default()),
                 Vec::new(),
             )
         }
@@ -773,16 +742,19 @@ mod tests {
                 unreachable!("the session installs into the waveform it was given")
             }
 
-            fn read_signal(&mut self, _index: usize) -> (Vec<Change>, Vec<String>) {
-                (Vec::new(), Vec::new())
+            fn read_signal(&mut self, _index: usize) -> crate::dump::source::ReadResult {
+                (Arc::new(Vec::new()), Vec::new())
             }
 
-            fn read_signals(&mut self, indexes: &[usize]) -> Vec<(Vec<Change>, Vec<String>)> {
+            fn read_signals(&mut self, indexes: &[usize]) -> Vec<crate::dump::source::ReadResult> {
                 self.reads
                     .lock()
                     .unwrap_or_else(|err| err.into_inner())
                     .push(indexes.len());
-                indexes.iter().map(|_| (Vec::new(), Vec::new())).collect()
+                indexes
+                    .iter()
+                    .map(|_| (Arc::new(Vec::new()), Vec::new()))
+                    .collect()
             }
         }
 
@@ -837,5 +809,134 @@ mod tests {
             reads.iter().all(|&size| size <= MAX_SIGNALS_PER_PASS),
             "a pass read too many signals at once: {reads:?}"
         );
+    }
+
+    #[test]
+    fn deferred_decodes_run_in_parallel_but_install_in_read_order() {
+        #[derive(Default)]
+        struct Probe {
+            arrivals: usize,
+            finished: usize,
+            parallel: bool,
+            timed_out: bool,
+            meta_locked: bool,
+        }
+
+        struct DeferredSource {
+            vars: usize,
+            probe: Arc<(Mutex<Probe>, std::sync::Condvar)>,
+            meta: Arc<Mutex<Waveform>>,
+        }
+
+        impl crate::dump::source::DumpSource for DeferredSource {
+            fn var_count(&self) -> usize {
+                self.vars
+            }
+
+            fn take_hierarchy(&mut self) -> Waveform {
+                unreachable!("the session installs into the waveform it was given")
+            }
+
+            fn read_signal(&mut self, _index: usize) -> crate::dump::source::ReadResult {
+                (Arc::new(Vec::new()), Vec::new())
+            }
+
+            fn read_signals_deferred(
+                &mut self,
+                indexes: &[usize],
+            ) -> Vec<crate::dump::source::DeferredDecode> {
+                indexes
+                    .iter()
+                    .map(|&index| {
+                        let probe = Arc::clone(&self.probe);
+                        let meta = Arc::clone(&self.meta);
+                        crate::dump::source::DeferredDecode::new(move || {
+                            if index == 0 || index == MAX_SIGNALS_PER_PASS {
+                                let (lock, ready) = &*probe;
+                                let mut probe = lock.lock().unwrap_or_else(|err| err.into_inner());
+                                probe.arrivals += 1;
+                                if probe.arrivals == 2 && probe.finished == 0 {
+                                    probe.parallel = true;
+                                }
+                                ready.notify_all();
+                                let (mut probe, timeout) = ready
+                                    .wait_timeout_while(
+                                        probe,
+                                        std::time::Duration::from_secs(5),
+                                        |probe| probe.arrivals < 2,
+                                    )
+                                    .unwrap_or_else(|err| err.into_inner());
+                                if timeout.timed_out() {
+                                    probe.timed_out = true;
+                                }
+                                match meta.try_lock() {
+                                    Ok(guard) => drop(guard),
+                                    Err(_) => probe.meta_locked = true,
+                                }
+                                probe.finished += 1;
+                                ready.notify_all();
+                                let (mut probe, timeout) = ready
+                                    .wait_timeout_while(
+                                        probe,
+                                        std::time::Duration::from_secs(5),
+                                        |probe| probe.finished < 2,
+                                    )
+                                    .unwrap_or_else(|err| err.into_inner());
+                                if timeout.timed_out() {
+                                    probe.timed_out = true;
+                                }
+                            }
+                            (
+                                Arc::new(vec![Change {
+                                    t: index as u64,
+                                    v: Value::Small(0, 1),
+                                }]),
+                                Vec::new(),
+                            )
+                        })
+                    })
+                    .collect()
+            }
+        }
+
+        let count = MAX_SIGNALS_PER_PASS + 1;
+        let wf = Waveform {
+            ts: TimeScale::default(),
+            start: 0,
+            end: count as u64,
+            signals: (0..count)
+                .map(|index| lazy_signal(&format!("s{index}")))
+                .collect(),
+            tree: ScopeTree::new(),
+            radix: std::collections::HashMap::new(),
+            value_times_cache: Vec::new(),
+        };
+        let meta = Arc::new(Mutex::new(wf));
+        let probe = Arc::new((Mutex::new(Probe::default()), std::sync::Condvar::new()));
+        let mut source = DeferredSource {
+            vars: count,
+            probe: Arc::clone(&probe),
+            meta: Arc::clone(&meta),
+        };
+        let (req_tx, req_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        for index in 0..count {
+            req_tx.send(LoadRequest::Signal(index)).expect("queue");
+        }
+        drop(req_tx);
+        serve_session_with_pool_size(Arc::clone(&meta), &mut source, &req_rx, &tx, 2);
+        drop(tx);
+
+        let mut installed = Vec::new();
+        for event in rx {
+            if let LoadEvent::Changes(updates, _) = event {
+                installed.extend(updates.into_iter().map(|(index, _)| index));
+            }
+        }
+        assert_eq!(installed, (0..count).collect::<Vec<_>>());
+        let probe = probe.0.lock().unwrap_or_else(|err| err.into_inner());
+        assert!(probe.parallel, "the two read passes decoded serially");
+        assert!(!probe.timed_out, "deferred decode rendezvous timed out");
+        assert!(!probe.meta_locked, "decode ran while holding the meta lock");
     }
 }

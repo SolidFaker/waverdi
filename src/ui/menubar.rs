@@ -1,4 +1,4 @@
-﻿use crate::app::{Action, App};
+use crate::app::{Action, App};
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use ratatui::buffer::Buffer;
@@ -103,7 +103,7 @@ pub fn dropdown_rect(l: &Layout, idx: usize) -> Rect {
 }
 
 pub fn draw_bar(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     buf.set_style(l.menu, Style::new().bg(t.menubar_bg));
     buf.set_string(
         l.menu.x,
@@ -126,7 +126,7 @@ pub fn draw_bar(buf: &mut Buffer, l: &Layout, app: &App) {
 }
 
 pub fn draw_dropdown(buf: &mut Buffer, l: &Layout, app: &App, idx: usize) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let area = dropdown_rect(l, idx);
     Clear.render(area, buf);
     buf.set_style(area, Style::new().bg(t.popup_bg));

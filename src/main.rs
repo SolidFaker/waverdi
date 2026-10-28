@@ -1,10 +1,12 @@
 mod app;
 mod dump;
+mod engine;
 mod fst;
+#[cfg(test)]
+mod perf;
 mod picker;
 mod rtl;
-mod session;
-mod theme;
+mod settings;
 mod ui;
 mod vcd;
 mod waveform;

@@ -38,7 +38,7 @@ pub fn gutter_width(view: &crate::rtl::SourceView) -> u16 {
 /// Bordered frame of the RTL source pane; the title names the instance and
 /// file, e.g. `Source - tb.u_proc.u_cluster(/path/cluster.sv)`.
 pub fn draw_frame(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let title = match app.source_title() {
         Some(title) => format!(" {title} "),
         None => " Source ".to_string(),
@@ -52,7 +52,7 @@ pub fn draw_frame(buf: &mut Buffer, l: &Layout, app: &App) {
 
 /// Highlighted RTL source of the selected instance's module.
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let inner = inner_rect(l);
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -229,7 +229,7 @@ fn draw_scrollbar(
     l: &Layout,
     view: &crate::rtl::SourceView,
     col: u16,
-    t: &crate::theme::Theme,
+    t: &crate::settings::theme::Theme,
 ) {
     let code = code_rect(l);
     let height = code.height.saturating_sub(1) as usize;

@@ -239,24 +239,38 @@ impl App {
     /// Width (in characters) of the widest displayed signal name; used by the
     /// Signal List horizontal scrollbar.
     pub fn list_content_width(&self) -> usize {
+        if let Some((version, full, width)) = *self.list_name_cache.borrow() {
+            if version == self.panes_version && full == self.show_full_names {
+                return width;
+            }
+        }
         let Some(wf) = &self.wf else {
             return 0;
         };
-        self.list_rows()
+        let full_names = self.show_full_names;
+        let width = self
+            .list_rows()
             .iter()
             .filter_map(|row| match row {
                 ListRow::Signal { sig, .. } => {
                     let signal = &wf.signals[*sig];
-                    Some(if self.show_full_names {
-                        signal.full_name().chars().count()
+                    let scope = if full_names {
+                        signal
+                            .scope
+                            .iter()
+                            .map(|part| part.chars().count() + 1)
+                            .sum()
                     } else {
-                        signal.name.chars().count()
-                    })
+                        0
+                    };
+                    Some(scope + signal.name.chars().count())
                 }
                 ListRow::Group { .. } => None,
             })
             .max()
-            .unwrap_or(0)
+            .unwrap_or(0);
+        *self.list_name_cache.borrow_mut() = Some((self.panes_version, full_names, width));
+        width
     }
 
     pub fn selected_row(&self) -> Option<ListRow> {
@@ -360,14 +374,38 @@ impl App {
 
     /// Width (in characters) of the widest Value column text at the cursor.
     pub fn value_content_width(&self) -> usize {
-        if self.wf.is_none() {
+        if self.wf.is_none() || self.display.is_empty() {
             return 0;
         }
-        self.display
+        let key = (
+            self.cursor,
+            self.radix_version,
+            self.waveform_version,
+            self.panes_version,
+        );
+        if let Some(width) = self
+            .list_value_cache
+            .borrow()
+            .as_ref()
+            .filter(|cached| cached.key == key)
+            .and_then(|cached| cached.max_width)
+        {
+            return width;
+        }
+        for &sig in &self.display {
+            self.list_display_value(sig);
+        }
+        let mut cache = self.list_value_cache.borrow_mut();
+        let cached = cache.as_mut().unwrap();
+        let width = self
+            .display
             .iter()
-            .map(|&sig| self.list_display_value(sig).1)
+            .filter_map(|sig| cached.values.get(sig))
+            .map(|entry| entry.1)
             .max()
-            .unwrap_or(0)
+            .unwrap_or(0);
+        cached.max_width = Some(width);
+        width
     }
 
     /// `(text, display width)` of a displayed signal's value at the cursor.
@@ -388,26 +426,25 @@ impl App {
             _ => {
                 *cache = Some(super::ListValueCache {
                     key,
-                    values: Vec::new(),
+                    values: std::collections::HashMap::new(),
+                    max_width: None,
                 });
             }
         }
-        let cache = cache.as_mut().unwrap();
-        if cache.values.len() <= sig {
-            cache.values.resize_with(sig + 1, || None);
+        if let Some(entry) = cache.as_ref().unwrap().values.get(&sig).cloned() {
+            return entry;
         }
-        if let Some(entry) = &cache.values[sig] {
-            return entry.clone();
-        }
-        // Synthesized brace values must be joined at the cursor; the signal
-        // itself stores no text.
+        drop(cache);
         let text: Rc<str> = match &self.wf {
             Some(wf) => Rc::from(wf.display_value(sig, self.cursor, self.radix_for(sig))),
             None => Rc::from(""),
         };
         let width = text.chars().count();
         let entry = (text, width);
-        cache.values[sig] = Some(entry.clone());
+        let mut cache = self.list_value_cache.borrow_mut();
+        let cached = cache.as_mut().unwrap();
+        cached.values.insert(sig, entry.clone());
+        cached.max_width = None;
         entry
     }
 

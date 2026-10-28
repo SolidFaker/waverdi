@@ -1,3 +1,4 @@
+use super::keymap;
 use super::{App, Dialog, Focus, ListRow};
 use crate::ui::menubar;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -47,8 +48,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if app.menu.open.is_some() {
         return menu_key(app, key);
     }
+    if let Some(action) = keymap::resolve(key, app.wf.is_some(), &app.settings.keys) {
+        return action.run(app);
+    }
     match key.code {
-        KeyCode::Char('q') => true,
         KeyCode::Esc => {
             if app.load.is_some() {
                 app.cancel_load();
@@ -58,78 +61,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.visual = false;
             false
         }
-        KeyCode::Char('o') => {
-            app.open_file_dialog();
-            false
-        }
-        KeyCode::Char('O') => {
-            app.open_tui_browser();
-            false
-        }
-        KeyCode::Char('A') => {
-            app.open_add_signals();
-            false
-        }
-        KeyCode::F(2) => {
-            app.settings_sel = 0;
-            app.open_dialog(Dialog::Settings);
-            false
-        }
-        KeyCode::F(1) | KeyCode::Char('?') => {
-            app.open_dialog(Dialog::Keys);
-            false
-        }
         _ if app.wf.is_none() => false,
-        KeyCode::Char('z') => {
-            app.zoom_in();
-            false
-        }
-        KeyCode::Char('Z') => {
-            app.zoom_out();
-            false
-        }
-        KeyCode::Char('=') | KeyCode::Char('+') => {
-            app.zoom_in();
-            false
-        }
-        KeyCode::Char('-') => {
-            app.zoom_out();
-            false
-        }
-        KeyCode::Char('f') => {
-            app.fit();
-            false
-        }
-        KeyCode::Char('c') => {
-            app.center_cursor();
-            false
-        }
         KeyCode::Char('g') => {
             app.pending_g = true;
             app.msg("g-  (e: previous falling edge, g: first row)");
-            false
-        }
-        KeyCode::Char(':') => {
-            app.open_dialog(Dialog::Goto);
-            app.input.clear();
-            false
-        }
-        KeyCode::Char('s') => {
-            app.open_dialog(Dialog::Find);
-            app.input.clear();
-            app.find_sel = 0;
-            false
-        }
-        KeyCode::Char('v') => {
-            app.find_value_dialog();
-            false
-        }
-        KeyCode::Char('n') => {
-            app.search_value(true);
-            false
-        }
-        KeyCode::Char('N') => {
-            app.search_value(false);
             false
         }
         KeyCode::Char('r') => {
@@ -140,14 +75,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 }
             }
             app.cycle_radix();
-            false
-        }
-        KeyCode::Char(',') => {
-            app.jump_transition(false);
-            false
-        }
-        KeyCode::Char('.') => {
-            app.jump_transition(true);
             false
         }
         KeyCode::Char('0') => {
@@ -474,24 +401,33 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         add_signals_key(app, key);
         return false;
     }
+    if app.dialog == Some(Dialog::BindKey) {
+        app.capture_key(key);
+        return false;
+    }
+    if app.dialog == Some(Dialog::TopSplit) {
+        app.top_split_key(key);
+        return false;
+    }
+    if app.dialog == Some(Dialog::Settings) && app.time_dropdown.open && app.time_dropdown_key(key)
+    {
+        return false;
+    }
     match key.code {
         KeyCode::Esc => {
             app.dialog = None;
             app.renaming_group = None;
         }
-        KeyCode::Up if app.dialog == Some(Dialog::Settings) => {
-            let len = app.settings_len();
-            app.settings_sel = app.settings_sel.checked_sub(1).unwrap_or(len - 1);
-        }
-        KeyCode::Down if app.dialog == Some(Dialog::Settings) => {
-            app.settings_sel = (app.settings_sel + 1) % app.settings_len();
-        }
+        KeyCode::Up if app.dialog == Some(Dialog::Settings) => app.settings_move(-1),
+        KeyCode::Down if app.dialog == Some(Dialog::Settings) => app.settings_move(1),
         KeyCode::Left | KeyCode::Right if app.dialog == Some(Dialog::Settings) => {
             let delta = if key.code == KeyCode::Left { -1 } else { 1 };
-            settings_change(app, delta);
+            app.settings_change(delta);
         }
-        KeyCode::Char('r') if app.dialog == Some(Dialog::Settings) => settings_reset(app),
-        KeyCode::Enter if app.dialog == Some(Dialog::Settings) => settings_change(app, 1),
+        KeyCode::Tab if app.dialog == Some(Dialog::Settings) => app.settings_toggle_pane(),
+        KeyCode::Char('r') if app.dialog == Some(Dialog::Settings) => app.settings_reset(),
+        KeyCode::Char('R') if app.dialog == Some(Dialog::Settings) => app.settings_reset_all(),
+        KeyCode::Enter if app.dialog == Some(Dialog::Settings) => app.settings_activate(),
         KeyCode::Enter => match app.dialog {
             Some(Dialog::Goto) => app.apply_goto(),
             Some(Dialog::FindValue) => app.apply_find_value(),
@@ -507,13 +443,19 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
             }
             _ => app.dialog = None,
         },
-        KeyCode::Char(c) => app.input.insert(c),
-        KeyCode::Backspace => app.input.backspace(),
-        KeyCode::Delete => app.input.delete(),
-        KeyCode::Left => app.input.left(),
-        KeyCode::Right => app.input.right(),
-        KeyCode::Home => app.input.home(),
-        KeyCode::End => app.input.end(),
+        _ if matches!(
+            key.code,
+            KeyCode::Char(_)
+                | KeyCode::Backspace
+                | KeyCode::Delete
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Home
+                | KeyCode::End
+        ) =>
+        {
+            crate::ui::widgets::TextBox::handle_key(&mut app.input, key);
+        }
         KeyCode::Up if app.dialog == Some(Dialog::Keys) => {
             app.dialog_scroll = app.dialog_scroll.saturating_sub(1);
         }
@@ -712,26 +654,6 @@ fn ctx_key(app: &mut App, key: KeyEvent) -> bool {
         _ => {}
     }
     false
-}
-
-/// Change the selected settings row (theme, UI colour or waveform colour).
-fn settings_change(app: &mut App, delta: i64) {
-    if app.settings_sel == 0 {
-        app.cycle_theme(delta);
-    } else if let Some(setting) = app.settings_ui(app.settings_sel) {
-        app.cycle_ui_setting(setting, delta);
-    } else if let Some(setting) = app.settings_setting(app.settings_sel) {
-        app.cycle_wave_setting(setting, delta);
-    }
-}
-
-/// Reset the selected settings row to the active theme's value.
-fn settings_reset(app: &mut App) {
-    if let Some(setting) = app.settings_ui(app.settings_sel) {
-        app.reset_ui_setting(setting);
-    } else if let Some(setting) = app.settings_setting(app.settings_sel) {
-        app.reset_wave_setting(setting);
-    }
 }
 
 /// Keys of the time-base dropdown in the nWave shortcut bar.
@@ -1010,23 +932,37 @@ mod tests {
 
     #[test]
     fn settings_dialog_changes_theme_and_wave_colours() {
-        use crate::theme::{Theme, ThemeKind};
+        use crate::settings::{SettingsCategory, Theme, ThemeKind};
         let mut app = app_with(VCD);
         handle_key(&mut app, key(KeyCode::F(2)));
         assert_eq!(app.dialog, Some(Dialog::Settings));
+        app.set_settings_category(SettingsCategory::Theme);
+        handle_key(&mut app, key(KeyCode::Up));
+        assert_eq!(app.settings_sel, app.settings_len() - 1);
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(app.settings_sel, 0);
         handle_key(&mut app, key(KeyCode::Right)); // theme row: Dark -> Light
-        assert_eq!(app.theme_kind, ThemeKind::Light);
-        handle_key(&mut app, key(KeyCode::Down)); // UI background row
+        assert_eq!(app.settings.theme_kind, ThemeKind::Light);
+
+        app.set_settings_category(SettingsCategory::UiColours);
         handle_key(&mut app, key(KeyCode::Right));
-        assert_ne!(app.theme.bg, Theme::LIGHT.bg);
+        assert_ne!(app.settings.theme.bg, Theme::LIGHT.bg);
         handle_key(&mut app, key(KeyCode::Char('r')));
-        assert_eq!(app.theme.bg, Theme::LIGHT.bg);
-        handle_key(&mut app, key(KeyCode::Down)); // waveform background row
+        assert_eq!(app.settings.theme.bg, Theme::LIGHT.bg);
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_ne!(app.settings.theme.bg, Theme::LIGHT.bg);
+        let after_enter = app.settings.theme.bg;
+        handle_key(&mut app, key(KeyCode::Left));
+        assert_ne!(app.settings.theme.bg, after_enter);
+        handle_key(&mut app, key(KeyCode::Char('r')));
+        assert_eq!(app.settings.theme.bg, Theme::LIGHT.bg);
+
+        app.set_settings_category(SettingsCategory::WaveformColours);
         handle_key(&mut app, key(KeyCode::Right));
-        assert_ne!(app.theme.wave_bg, Theme::LIGHT.wave_bg);
-        assert_eq!(app.theme.bg, Theme::LIGHT.bg); // UI colour untouched
+        assert_ne!(app.settings.theme.wave_bg, Theme::LIGHT.wave_bg);
+        assert_eq!(app.settings.theme.bg, Theme::LIGHT.bg); // UI colour untouched
         handle_key(&mut app, key(KeyCode::Char('r')));
-        assert_eq!(app.theme.wave_bg, Theme::LIGHT.wave_bg);
+        assert_eq!(app.settings.theme.wave_bg, Theme::LIGHT.wave_bg);
         handle_key(&mut app, key(KeyCode::Esc));
         assert_eq!(app.dialog, None);
     }

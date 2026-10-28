@@ -1,7 +1,8 @@
 use super::{App, ListRow};
+use crate::engine::query::edge_time;
+use crate::engine::wave::{WaveCell, WaveKey};
 use crate::ui::layout::Layout;
-use crate::ui::wave::{WaveCell, WaveKey};
-use crate::waveform::{SigKind, Ticks, Value, Waveform};
+use crate::waveform::Ticks;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -124,38 +125,49 @@ impl App {
         }
     }
 
-    /// Brace label of a synthesized waveform row at `time`, cached for the
-    /// current zoom window, radix and waveform. Consecutive redraws (cursor
-    /// moves, selection changes) reuse the joined member texts; `compute` is
-    /// only called on a miss.
     pub(crate) fn wave_label(
         &self,
         index: usize,
         time: Ticks,
         compute: impl FnOnce() -> String,
     ) -> (Rc<str>, usize) {
-        let key = (
-            self.t0.to_bits(),
-            self.scale.to_bits(),
-            self.cols() as u16,
-            self.radix_version,
-            self.waveform_version,
-        );
+        self.wave_label_for(index, super::WaveLabelKey::Time(time), compute)
+    }
+
+    pub(crate) fn wave_change_label(
+        &self,
+        index: usize,
+        change: usize,
+        compute: impl FnOnce() -> String,
+    ) -> (Rc<str>, usize) {
+        self.wave_label_for(index, super::WaveLabelKey::Change(change), compute)
+    }
+
+    fn wave_label_for(
+        &self,
+        index: usize,
+        key: super::WaveLabelKey,
+        compute: impl FnOnce() -> String,
+    ) -> (Rc<str>, usize) {
+        let revision = (self.radix_version, self.waveform_version);
         let mut rows = self.wave_labels.borrow_mut();
         let row = rows.entry(index).or_insert_with(|| super::WaveRowLabels {
-            key,
+            key: revision,
             labels: HashMap::new(),
         });
-        if row.key != key {
-            row.key = key;
+        if row.key != revision {
+            row.key = revision;
             row.labels.clear();
         }
-        if let Some(label) = row.labels.get(&time) {
+        if let Some(label) = row.labels.get(&key) {
             return label.clone();
+        }
+        if row.labels.len() >= 4096 {
+            row.labels.clear();
         }
         let text: Rc<str> = Rc::from(compute());
         let width = text.chars().count();
-        row.labels.insert(time, (text.clone(), width));
+        row.labels.insert(key, (text.clone(), width));
         (text, width)
     }
 
@@ -184,45 +196,6 @@ impl App {
     }
 }
 
-/// Time of the next/previous edge of a signal, optionally filtered to one
-/// polarity for single-bit signals, and read from the synthesized times for
-/// arrays/aggregates (which store no change list).
-fn edge_time(
-    wf: &Waveform,
-    index: usize,
-    cursor: Ticks,
-    forward: bool,
-    polarity: Option<u8>,
-) -> Option<Ticks> {
-    let sig = wf.signals.get(index)?;
-    if wf.is_synthesized(index) {
-        let times = wf.value_times(index);
-        return if forward {
-            times.iter().copied().find(|&t| t > cursor)
-        } else {
-            times.iter().copied().rev().find(|&t| t < cursor)
-        };
-    }
-    let one_bit = sig.kind == SigKind::Bits && sig.bits <= 1;
-    let want = if one_bit { polarity } else { None };
-    let matches = |value: &Value| match want {
-        Some(level) => value.bit(0) == Some(level),
-        None => true,
-    };
-    if forward {
-        sig.changes
-            .iter()
-            .find(|change| change.t > cursor && matches(&change.v))
-            .map(|change| change.t)
-    } else {
-        sig.changes
-            .iter()
-            .rev()
-            .find(|change| change.t < cursor && matches(&change.v))
-            .map(|change| change.t)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::app::tests::app_with;
@@ -237,7 +210,7 @@ mod tests {
         #30\n1!\n";
 
     #[test]
-    fn synthesized_wave_labels_are_cached_per_zoom_window() {
+    fn wave_labels_are_cached_across_viewports_and_invalidated_by_radix() {
         use std::cell::Cell;
         use std::rc::Rc;
 
@@ -273,16 +246,39 @@ mod tests {
         assert_eq!(&*first.0, "{1, 2}");
         assert_eq!(first.1, 6);
 
-        // A zoom change moves the window key and drops the labels.
         app.zoom_in();
         let zoomed = app.wave_label(root, 0, compute);
-        assert!(!Rc::ptr_eq(&first.0, &zoomed.0));
+        assert!(Rc::ptr_eq(&first.0, &zoomed.0));
+        assert_eq!(calls.get(), 1);
+        app.touch_radix();
+        let radixed = app.wave_label(root, 0, compute);
+        assert!(!Rc::ptr_eq(&first.0, &radixed.0));
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn plain_wave_labels_use_change_identity() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let app = app_with(VCD);
+        let calls = Cell::new(0);
+        let compute = |text: &str| {
+            calls.set(calls.get() + 1);
+            text.to_string()
+        };
+        let first = app.wave_change_label(0, 0, || compute("b0"));
+        let hit = app.wave_change_label(0, 0, || compute("b0"));
+        assert!(Rc::ptr_eq(&first.0, &hit.0));
+        assert_eq!(calls.get(), 1);
+        let other = app.wave_change_label(0, 1, || compute("b1"));
+        assert!(!Rc::ptr_eq(&first.0, &other.0));
         assert_eq!(calls.get(), 2);
     }
 
     #[test]
     fn sampled_rows_are_reused_across_cursor_moves() {
-        use crate::ui::wave::{WaveCell, WaveInk};
+        use crate::engine::wave::{WaveCell, WaveInk, LEVEL_LOW};
         use std::rc::Rc;
 
         let mut app = app_with(VCD);
@@ -291,7 +287,7 @@ mod tests {
         let l = app.layout();
         let build = || {
             vec![WaveCell {
-                glyph: "▁",
+                glyph: LEVEL_LOW,
                 ink: WaveInk::Low,
             }]
         };

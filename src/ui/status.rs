@@ -1,5 +1,5 @@
 use crate::app::{App, Focus};
-use crate::theme::Theme;
+use crate::settings::theme::Theme;
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use crate::waveform::{self, Ticks, TimeBase, TimeScale};
@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use std::rc::Rc;
 
 pub fn draw_messages(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     buf.set_style(l.msg, Style::new().bg(t.msg_bg));
     let n = app.messages.len();
     for row in 0..3 {
@@ -94,17 +94,17 @@ impl StatusCache {
             Some(key) => {
                 key.path != app.path
                     || key.status != l.status
-                    || key.theme != app.theme
+                    || key.theme != app.settings.theme
                     || key.ts != ts
             }
             None => true,
         };
         if stale {
-            self.prefix = build_prefix(&app.path, l.status, ts, &app.theme);
+            self.prefix = build_prefix(&app.path, l.status, ts, &app.settings.theme);
             self.prefix_key = Some(PrefixKey {
                 path: app.path.clone(),
                 status: l.status,
-                theme: app.theme,
+                theme: app.settings.theme,
                 ts,
             });
         }
@@ -117,18 +117,18 @@ impl StatusCache {
         };
         let key = CursorKey {
             cursor: app.cursor,
-            base: app.time_base,
+            base: app.settings.time_base,
             ts: wf.ts,
-            theme: app.theme,
+            theme: app.settings.theme,
         };
         if self.cursor_key.as_ref() != Some(&key) {
             self.cursor = vec![(
                 Rc::from(waveform::format_time_base(
                     app.cursor as f64,
                     &wf.ts,
-                    app.time_base,
+                    app.settings.time_base,
                 )),
-                Style::new().fg(app.theme.cursor),
+                Style::new().fg(app.settings.theme.cursor),
             )];
             self.cursor_key = Some(key);
         }
@@ -142,14 +142,14 @@ impl StatusCache {
         let key = SuffixKey {
             range: app.range,
             scale: app.scale,
-            base: app.time_base,
+            base: app.settings.time_base,
             ts: wf.ts,
             display: app.display.len(),
             selection: app.selection.len(),
             visual: app.visual,
             register: app.register.len(),
             focus: app.focus,
-            theme: app.theme,
+            theme: app.settings.theme,
         };
         if self.suffix_key.as_ref() != Some(&key) {
             self.suffix = build_suffix(app, wf.ts);
@@ -160,7 +160,7 @@ impl StatusCache {
 }
 
 pub fn draw_status(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     buf.set_style(l.status, Style::new().bg(t.status_bg));
     let mut x = l.status.x;
 
@@ -227,7 +227,7 @@ fn build_prefix(path: &str, status: Rect, ts: Option<TimeScale>, t: &Theme) -> V
 }
 
 fn build_suffix(app: &App, ts: TimeScale) -> Vec<Segment> {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let sep = Style::new().fg(t.dim);
     let mut out = Vec::new();
     if let Some((a, b)) = app.range {
@@ -237,7 +237,7 @@ fn build_suffix(app: &App, ts: TimeScale) -> Vec<Segment> {
             Rc::from(waveform::format_time_base(
                 (b - a) as f64,
                 &ts,
-                app.time_base,
+                app.settings.time_base,
             )),
             Style::new().fg(t.scope),
         ));
@@ -247,7 +247,7 @@ fn build_suffix(app: &App, ts: TimeScale) -> Vec<Segment> {
     out.push((
         Rc::from(format!(
             "{}/char",
-            waveform::format_time_base(app.scale, &ts, app.time_base)
+            waveform::format_time_base(app.scale, &ts, app.settings.time_base)
         )),
         Style::new().fg(t.text),
     ));

@@ -1,6 +1,3 @@
-//! The background loading runtime moved to [`crate::session`]: it is format
-//! independent and must not know the App. This module only re-exports the
-//! types the App drives, so the existing `crate::app::load::…` paths keep
-//! working.
+//! Format-independent loading runtime re-exported for the App.
 
-pub use crate::session::{LoadEvent, LoadJob};
+pub use crate::engine::session::{LoadEvent, LoadJob};

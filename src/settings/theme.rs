@@ -1,4 +1,4 @@
-﻿use ratatui::style::Color;
+use ratatui::style::Color;
 
 /// Selectable colour scheme.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -31,7 +31,7 @@ impl ThemeKind {
 
 /// All colours used by the UI. Copy so it can be handed to draw functions,
 /// and comparable so caches can be invalidated when a colour changes.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Theme {
     pub bg: Color,
     /// Waveform pane background (mixed theme uses a dark waveform).

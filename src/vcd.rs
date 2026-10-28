@@ -133,11 +133,15 @@ fn parse_group(d: &[u8], grp: usize) -> Vec<u8> {
     bits
 }
 
-/// Parse a decimal value. `None` reports a malformed value (a sign or any
-/// character other than the decimal digits and `x`/`z`), which the caller
-/// warns about; an empty vector means all-`x` digits, padded once the signal
-/// width is known.
-fn parse_dec(d: &[u8]) -> Option<Vec<u8>> {
+#[derive(Clone, Copy)]
+enum Decimal {
+    Number(u128),
+    Unknown,
+}
+
+/// Validate a decimal without allocating its bit vector. `None` is malformed;
+/// `Unknown` covers `x`/`z` and overflow, which are padded after width lookup.
+fn scan_dec(d: &[u8]) -> Option<Decimal> {
     let mut v: u128 = 0;
     let mut ok = true;
     for &c in d {
@@ -158,30 +162,56 @@ fn parse_dec(d: &[u8]) -> Option<Vec<u8>> {
             _ => return None,
         }
     }
-    if !ok {
-        return Some(Vec::new()); // padded to all-x later
+    if ok {
+        Some(Decimal::Number(v))
+    } else {
+        Some(Decimal::Unknown)
     }
+}
+
+fn decimal_bits(decimal: Decimal) -> Vec<u8> {
+    let Decimal::Number(mut v) = decimal else {
+        return Vec::new();
+    };
     let mut bits = Vec::new();
     while v > 0 {
         bits.push((v & 1) as u8);
         v >>= 1;
     }
-    Some(bits)
+    bits
 }
 
-/// One decoded line of the value section. The lexer is shared by the eager
-/// parser and the lazy value scanner, so both read a dump the same way.
+/// One decoded line of the value section. Values borrow the input until the
+/// dispatcher has established that their signal is a collection target.
 enum Decoded<'a> {
-    Change {
-        id: &'a str,
-        value: Value,
-    },
+    Change { id: &'a str, value: LexedValue<'a> },
     BadDecimal(&'a [u8]),
     BadReal(&'a [u8]),
     CharValue,
     Unparsed,
-    /// Empty line or a string value without a closing quote: nothing to do.
     Ignored,
+}
+
+enum LexedValue<'a> {
+    Scalar(u8),
+    Binary(&'a [u8]),
+    Group(&'a [u8], usize),
+    Decimal(Decimal),
+    Real(f64),
+    Str(&'a [u8]),
+}
+
+impl LexedValue<'_> {
+    fn materialize(self) -> Value {
+        match self {
+            Self::Scalar(v) => Value::Small(v as u64, 1),
+            Self::Binary(digits) => Value::Bits(parse_bin(digits)),
+            Self::Group(digits, group) => Value::Bits(parse_group(digits, group)),
+            Self::Decimal(decimal) => Value::Bits(decimal_bits(decimal)),
+            Self::Real(v) => Value::Real(v),
+            Self::Str(value) => Value::Str(String::from_utf8_lossy(value).into_owned()),
+        }
+    }
 }
 
 fn decode_value_line(ln: &[u8]) -> Decoded<'_> {
@@ -198,36 +228,36 @@ fn decode_value_line(ln: &[u8]) -> Decoded<'_> {
             };
             Decoded::Change {
                 id: str(ln[1..].trim_ascii()),
-                value: Value::Bits(vec![v]),
+                value: LexedValue::Scalar(v),
             }
         }
         b'b' | b'B' => {
             let (digits, id) = split_value_id(&ln[1..]);
             Decoded::Change {
                 id: str(id),
-                value: Value::Bits(parse_bin(digits)),
+                value: LexedValue::Binary(digits),
             }
         }
         b'o' | b'O' => {
             let (digits, id) = split_value_id(&ln[1..]);
             Decoded::Change {
                 id: str(id),
-                value: Value::Bits(parse_group(digits, 3)),
+                value: LexedValue::Group(digits, 3),
             }
         }
         b'h' | b'H' | b't' | b'T' => {
             let (digits, id) = split_value_id(&ln[1..]);
             Decoded::Change {
                 id: str(id),
-                value: Value::Bits(parse_group(digits, 4)),
+                value: LexedValue::Group(digits, 4),
             }
         }
         b'd' | b'D' => {
             let (digits, id) = split_value_id(&ln[1..]);
-            match parse_dec(digits) {
-                Some(bits) => Decoded::Change {
+            match scan_dec(digits) {
+                Some(decimal) => Decoded::Change {
                     id: str(id),
-                    value: Value::Bits(bits),
+                    value: LexedValue::Decimal(decimal),
                 },
                 None => Decoded::BadDecimal(digits),
             }
@@ -237,7 +267,7 @@ fn decode_value_line(ln: &[u8]) -> Decoded<'_> {
             match str(num).parse::<f64>() {
                 Ok(v) => Decoded::Change {
                     id: str(id),
-                    value: Value::Real(v),
+                    value: LexedValue::Real(v),
                 },
                 Err(_) => Decoded::BadReal(num),
             }
@@ -253,12 +283,29 @@ fn decode_value_line(ln: &[u8]) -> Decoded<'_> {
             let q1 = q0 + 1 + q1;
             Decoded::Change {
                 id: str(rest[q1 + 1..].trim_ascii()),
-                value: Value::Str(String::from_utf8_lossy(&rest[q0 + 1..q1]).into_owned()),
+                value: LexedValue::Str(&rest[q0 + 1..q1]),
             }
         }
         b'c' | b'C' => Decoded::CharValue,
         _ => Decoded::Unparsed,
     }
+}
+
+fn normalize_width(value: Value, width: usize) -> Value {
+    let mut bits = match value {
+        Value::Bits(bits) => bits,
+        Value::Small(packed, bits) if bits as usize == width => {
+            return Value::Small(packed, bits);
+        }
+        Value::Small(packed, bits) => Value::Small(packed, bits).to_bits_vec().unwrap_or_default(),
+        other => return other,
+    };
+    if bits.len() < width {
+        bits.resize(width, 2);
+    } else if bits.len() > width {
+        bits.truncate(width);
+    }
+    Value::compact(bits)
 }
 
 struct Parser {
@@ -389,7 +436,7 @@ impl Parser {
         }
     }
 
-    fn push_change(&mut self, id: &str, v: Value, line: usize) {
+    fn push_change(&mut self, id: &str, v: LexedValue<'_>, line: usize) {
         let Some(&idx) = self.idmap.get(id) else {
             if !id.is_empty() {
                 self.warn(line, format!("unknown id code '{id}'"));
@@ -403,18 +450,7 @@ impl Parser {
             return;
         }
         let sig = &mut self.wf.signals[idx];
-        let v = match v {
-            Value::Bits(mut b) => {
-                let w = sig.bits as usize;
-                if b.len() < w {
-                    b.resize(w, 2);
-                } else if b.len() > w {
-                    b.truncate(w);
-                }
-                Value::compact(b)
-            }
-            other => other,
-        };
+        let v = normalize_width(v.materialize(), sig.bits as usize);
         if let Some(last) = sig.changes.last() {
             if last.v == v {
                 return;
@@ -758,12 +794,12 @@ impl<'a> VcdScanner<'a> {
     fn run<R: BufRead>(&mut self, lines: &mut LineReader<R>) -> Result<(), String> {
         let mut buf = Vec::new();
         let mut inner = Vec::new();
-        while let Some(line) = lines.next(&mut buf)? {
-            if buf.is_empty() {
+        while let Some((line, ln)) = lines.next(&mut buf)? {
+            if ln.is_empty() {
                 continue;
             }
-            match buf[0] {
-                b'#' => match parse_u64(&buf[1..]) {
+            match ln[0] {
+                b'#' => match parse_u64(&ln[1..]) {
                     Ok(time) => self.cur_time = time,
                     Err(e) => {
                         // A viewer is better served by the part that parsed:
@@ -774,10 +810,10 @@ impl<'a> VcdScanner<'a> {
                     }
                 },
                 b'$' => {
-                    let (kw, _) = split_word(&buf[1..]);
-                    self.directive(kw, &buf, lines, &mut inner)?;
+                    let (kw, _) = split_word(&ln[1..]);
+                    self.directive(kw, ln, lines, &mut inner)?;
                 }
-                _ => self.change(&buf, line),
+                _ => self.change(ln, line),
             }
         }
         Ok(())
@@ -793,20 +829,20 @@ impl<'a> VcdScanner<'a> {
         match kw {
             b"end" => {}
             b"dumpvars" | b"dumpoff" | b"dumpon" | b"dumpall" => {
-                while let Some(line) = lines.next(buf)? {
-                    if contains_end(buf) {
+                while let Some((line, ln)) = lines.next(buf)? {
+                    if contains_end(ln) {
                         break;
                     }
-                    if !buf.is_empty() && buf[0] != b'$' {
-                        self.change(buf, line);
+                    if !ln.is_empty() && ln[0] != b'$' {
+                        self.change(ln, line);
                     }
                 }
             }
             _ => {
                 // Directives may span lines; skip to the closing `$end`.
                 if !contains_end(ln) {
-                    while lines.next(buf)?.is_some() {
-                        if contains_end(buf) {
+                    while let Some((_, ln)) = lines.next(buf)? {
+                        if contains_end(ln) {
                             break;
                         }
                     }
@@ -832,7 +868,7 @@ impl<'a> VcdScanner<'a> {
         }
     }
 
-    fn push_change(&mut self, id: &str, v: Value, line: usize) {
+    fn push_change(&mut self, id: &str, v: LexedValue<'_>, line: usize) {
         let Some(&idx) = self.state.idmap.get(id) else {
             if !id.is_empty() {
                 self.warn(line, format!("unknown id code '{id}'"));
@@ -843,17 +879,7 @@ impl<'a> VcdScanner<'a> {
             return;
         }
         let width = *self.state.bits.get(idx).unwrap_or(&1) as usize;
-        let v = match v {
-            Value::Bits(mut b) => {
-                if b.len() < width {
-                    b.resize(width, 2);
-                } else if b.len() > width {
-                    b.truncate(width);
-                }
-                Value::compact(b)
-            }
-            other => other,
-        };
+        let v = normalize_width(v.materialize(), width);
         let changes = self.changes.entry(idx).or_default();
         if changes.last().map(|c| c.v == v).unwrap_or(false) {
             return;
@@ -874,17 +900,23 @@ impl<'a> VcdScanner<'a> {
     }
 
     fn finish(self) -> VcdScanOut {
-        let changes = self
-            .targets
+        let Self {
+            targets,
+            mut changes,
+            signal_warnings,
+            warnings,
+            ..
+        } = self;
+        let changes = targets
             .iter()
             .enumerate()
             .filter(|(_, &wanted)| wanted)
-            .map(|(index, _)| (index, self.changes.get(&index).cloned().unwrap_or_default()))
+            .map(|(index, _)| (index, changes.remove(&index).unwrap_or_default()))
             .collect();
         VcdScanOut {
             changes,
-            signal_warnings: self.signal_warnings,
-            warnings: self.warnings,
+            signal_warnings,
+            warnings,
         }
     }
 }
@@ -901,7 +933,7 @@ impl<R: BufRead> LineReader<R> {
         Self { reader, line }
     }
 
-    fn next(&mut self, buf: &mut Vec<u8>) -> Result<Option<usize>, String> {
+    fn next<'a>(&mut self, buf: &'a mut Vec<u8>) -> Result<Option<(usize, &'a [u8])>, String> {
         buf.clear();
         let n = self
             .reader
@@ -912,13 +944,11 @@ impl<R: BufRead> LineReader<R> {
         }
         let line = self.line;
         self.line += 1;
-        trim_line(buf);
-        Ok(Some(line))
+        Ok(Some((line, trim_line(buf))))
     }
 }
 
-/// Trim a line like `parse_bytes` does (`trim_ascii`), in place.
-fn trim_line(buf: &mut Vec<u8>) {
+fn trim_line(buf: &[u8]) -> &[u8] {
     let start = buf
         .iter()
         .position(|b| !b.is_ascii_whitespace())
@@ -928,10 +958,7 @@ fn trim_line(buf: &mut Vec<u8>) {
         .rposition(|b| !b.is_ascii_whitespace())
         .map(|i| i + 1)
         .unwrap_or(start);
-    buf.truncate(end);
-    if start > 0 {
-        buf.drain(..start);
-    }
+    &buf[start..end]
 }
 
 #[cfg(test)]
@@ -1284,6 +1311,56 @@ $end
                 .any(|w| w.contains("truncated") && w.contains(&format!("line {line}:"))),
             "{warnings:?}"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn lazy_scan_preserves_non_target_warnings_and_dump_command_lines() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 ! clk $end\n\
+            $var reg 80 \" wide $end\n\
+            $var real 64 # real $end\n\
+            $enddefinitions $end\n\
+            $dumpvars\n\
+            0!\n\
+            b101010 \"\n\
+            r1.0 #\n\
+            b1111 ?\n\
+            d-5 \"\n\
+            rbad #\n\
+            c!\n\
+            qunknown\n\
+            $end\n\
+            #10\n\
+            $dumpall\n\
+            1!\n\
+            b010101 \"\n\
+            r2.0 #\n\
+            $end\n";
+        let path = std::env::temp_dir().join(format!(
+            "waverdi_vcd_scan_{}_{}.vcd",
+            std::process::id(),
+            "warnings"
+        ));
+        std::fs::write(&path, vcd).unwrap();
+
+        let eager = parse_vcd(&path).expect("eager parse");
+        let hierarchy = read_vcd_hierarchy(&path).expect("declarations parse");
+        assert!(hierarchy.out.warnings.is_empty());
+        let scan = scan_vcd_values(&path, &hierarchy.scan, &[0]).expect("scan");
+        assert_eq!(scan.warnings, eager.warnings);
+        assert!(scan.signal_warnings.is_empty());
+        assert_eq!(scan.changes.len(), 1);
+        assert_eq!(scan.changes[0].0, 0);
+        assert_eq!(
+            scan.changes[0].1.as_slice(),
+            eager.wf.signals[0].changes.as_slice()
+        );
+        let unknown_line = vcd.lines().position(|line| line == "b1111 ?").unwrap() + 1;
+        assert!(scan.warnings.iter().any(|warning| {
+            warning.contains("unknown id code '?'")
+                && warning.contains(&format!("line {unknown_line}:"))
+        }));
         let _ = std::fs::remove_file(&path);
     }
 }

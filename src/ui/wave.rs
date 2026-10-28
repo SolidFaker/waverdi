@@ -1,126 +1,30 @@
 use crate::app::App;
-use crate::theme::Theme;
+use crate::engine::wave::{
+    sample_analog_row, sample_bit_row, sample_bus_row, time_partition_point, unknown_ink,
+};
+#[cfg(test)]
+pub(crate) use crate::engine::wave::{summarize, summary_ink};
+pub(crate) use crate::engine::wave::{BusTimes, WaveCell, WaveInk, NO_RANGE, VLINE};
+#[cfg(test)]
+pub(crate) use crate::engine::wave::{
+    WaveKey, WaveRowCache, BUS_CROSS, BUS_LINE, EDGE_FALL, EDGE_RISE, LEVEL_HIGH, LEVEL_LOW,
+};
+use crate::settings::theme::Theme;
+use crate::settings::WaveValueOverflow;
 use crate::ui::layout::Layout;
 use crate::ui::scrollbar;
 use crate::ui::text;
-use crate::waveform::{self, Change, Signal, Value, Waveform};
+use crate::waveform::{self, Signal, Waveform};
+#[cfg(test)]
+use crate::waveform::{Change, Value};
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Widget as _};
-use std::collections::HashMap;
 use std::rc::Rc;
 
-const VLINE: &str = "│";
-/// High / low level traces (thin lines at the top / bottom of the cell).
-const LEVEL_HIGH: &str = "▔";
-const LEVEL_LOW: &str = "▁";
-/// Rising / falling edges. Used when a cell contains a single transition;
-/// dense activity collapses to a vertical bar, so a narrow pulse is never
-/// dropped even at very coarse zoom levels.
-const EDGE_RISE: &str = "/";
-const EDGE_FALL: &str = "\\";
-/// Bus traces and their change markers.
-const BUS_LINE: &str = "─";
-const BUS_CROSS: &str = "╳";
 const RULER_TICK: &str = "┴";
 const SCROLL_THUMB: &str = "█";
 const SCROLL_TRACK: &str = "─";
-const HALF: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-
-/// Logical colour of a sampled cell. Themes are resolved when the cell is
-/// painted, so a theme change never invalidates the sampled columns.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum WaveInk {
-    High,
-    Low,
-    X,
-    Z,
-    Bus,
-    Analog,
-}
-
-/// One sampled waveform column: the glyph plus the ink that colours it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct WaveCell {
-    pub(crate) glyph: &'static str,
-    pub(crate) ink: WaveInk,
-}
-
-/// Range sentinel of rows that have no analog scale. NaN is unreachable as a
-/// real range (`draw_analog_row` normalizes non-finite ranges), so a bit or
-/// bus row can never collide with the analog row of the same signal - not
-/// even when that signal's range is exactly `(0.0, 0.0)`.
-const NO_RANGE: (f64, f64) = (f64::NAN, f64::NAN);
-
-/// Key of a sampled row: the zoom window, the pane width, the value / radix
-/// versions and the analog display range. The cursor and selection are absent
-/// on purpose so overlay-only redraws reuse the sampled columns.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct WaveKey {
-    t0: u64,
-    scale: u64,
-    cols: u16,
-    width: u16,
-    waveform: u64,
-    radix: u64,
-    min: u64,
-    max: u64,
-}
-
-impl WaveKey {
-    /// Key of one drawn row; `range` only matters for analog rows (others
-    /// pass [`NO_RANGE`]).
-    pub(crate) fn new(
-        t0: f64,
-        scale: f64,
-        cols: usize,
-        width: u16,
-        waveform: u64,
-        radix: u64,
-        range: (f64, f64),
-    ) -> Self {
-        Self {
-            t0: t0.to_bits(),
-            scale: scale.to_bits(),
-            cols: cols as u16,
-            width,
-            waveform,
-            radix,
-            min: range.0.to_bits(),
-            max: range.1.to_bits(),
-        }
-    }
-}
-
-/// Sampled columns of waveform rows, keyed per row index. `get_or_compute`
-/// runs the sampler only on a miss, so cursor moves, range highlights and
-/// selection changes only repaint the cached cells.
-#[derive(Default)]
-pub(crate) struct WaveRowCache {
-    rows: HashMap<usize, (WaveKey, Rc<[WaveCell]>)>,
-}
-
-impl WaveRowCache {
-    pub(crate) fn clear(&mut self) {
-        self.rows.clear();
-    }
-
-    pub(crate) fn get_or_compute(
-        &mut self,
-        index: usize,
-        key: WaveKey,
-        compute: impl FnOnce() -> Vec<WaveCell>,
-    ) -> Rc<[WaveCell]> {
-        if let Some((cached, cells)) = self.rows.get(&index) {
-            if *cached == key {
-                return cells.clone();
-            }
-        }
-        let cells: Rc<[WaveCell]> = compute().into();
-        self.rows.insert(index, (key, cells.clone()));
-        cells
-    }
-}
 
 /// Frame of the merged nWave window (Signal List + waveforms).
 pub fn draw_nwave_frame(buf: &mut Buffer, l: &Layout, t: &Theme, focused: bool) {
@@ -142,7 +46,7 @@ pub fn draw_nwave_frame(buf: &mut Buffer, l: &Layout, t: &Theme, focused: bool) 
 }
 
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let canvas = ratatui::layout::Rect {
         x: l.wave.x,
         y: l.wave.y,
@@ -211,7 +115,7 @@ fn draw_group_row(buf: &mut Buffer, l: &Layout, t: &Theme, selected: bool, y: u1
 
 /// Pane label; highlighted while the waveform pane owns the focus.
 fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     if l.cols == 0 || app.scale <= 0.0 {
         return;
     }
@@ -232,7 +136,7 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     // Reserve its space so tick labels never overlap it or the scrollbar.
     let cursor_label = format!(
         " {} ",
-        waveform::format_time_base(app.cursor as f64, &ts, app.time_base)
+        waveform::format_time_base(app.cursor as f64, &ts, app.settings.time_base)
     );
     let cursor_w = cursor_label.chars().count() as u16;
     let cursor_x = l.wave.right().saturating_sub(cursor_w + 1);
@@ -251,7 +155,7 @@ fn draw_ruler(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                     tick_color,
                     t.wave_bg,
                 );
-                let mut label = waveform::format_time_base(tick, &ts, app.time_base);
+                let mut label = waveform::format_time_base(tick, &ts, app.settings.time_base);
                 let mut lw = label.chars().count() as i64;
                 let mut lx = x - lw / 2;
                 // A label that would run under the list/wave divider is clipped
@@ -311,7 +215,7 @@ fn draw_signal_row(
             l.rows.x + 1,
             y,
             label,
-            Style::new().fg(app.theme.dim).bg(row_bg),
+            Style::new().fg(app.settings.theme.dim).bg(row_bg),
         );
         return;
     }
@@ -344,231 +248,15 @@ fn paint_cells(buf: &mut Buffer, l: &Layout, t: &Theme, cells: &[WaveCell], y: u
             WaveInk::Bus => t.bus,
             WaveInk::Analog => t.analog,
         };
-        text::set_cell(buf, l.rows.x + col as u16, y, cell.glyph, fg, row_bg);
+        text::set_cell(
+            buf,
+            l.rows.x + col as u16,
+            y,
+            cell.glyph.as_str(),
+            fg,
+            row_bg,
+        );
     }
-}
-
-/// Ink of a value summary (`summarize` code): 0 low, 1 high, 2 unknown, 3 z.
-fn summary_ink(summary: u8) -> WaveInk {
-    match summary {
-        1 => WaveInk::High,
-        0 => WaveInk::Low,
-        2 => WaveInk::X,
-        _ => WaveInk::Z,
-    }
-}
-
-/// Cell of a column that holds no transition: the level/unknown rail.
-fn run_cell(summary: u8) -> WaveCell {
-    match summary {
-        1 => WaveCell {
-            glyph: LEVEL_HIGH,
-            ink: WaveInk::High,
-        },
-        0 => WaveCell {
-            glyph: LEVEL_LOW,
-            ink: WaveInk::Low,
-        },
-        2 => WaveCell {
-            glyph: BUS_LINE,
-            ink: WaveInk::X,
-        },
-        _ => WaveCell {
-            glyph: BUS_LINE,
-            ink: WaveInk::Z,
-        },
-    }
-}
-
-/// Ink of a bus span from its value's unknown kind (2 = x, 3 = z, `None` =
-/// known): the whole span between two transitions is tinted like the value it
-/// holds, while known values keep the ordinary bus ink. x wins over z, like
-/// the per-digit colouring of the value text.
-fn unknown_ink(kind: Option<u8>) -> WaveInk {
-    match kind {
-        Some(2) => WaveInk::X,
-        Some(3) => WaveInk::Z,
-        _ => WaveInk::Bus,
-    }
-}
-
-/// Index of the first change that does not precede `col_end` (i.e. its time is
-/// `>= col_end`), searched from `from`.
-///
-/// A plain walk would visit every change inside the visible window, which is
-/// O(changes in view) per row and explodes at coarse zoom. Galloping from the
-/// current index costs O(1) for a sparse column and O(log changes in the
-/// column) for a dense one, exactly like the old per-column binary search but
-/// without rescanning the whole list. The result is identical to the walk
-/// (`partition_point` semantics on the time-ordered list).
-fn first_not_before(
-    len: usize,
-    from: usize,
-    col_end: f64,
-    time_at: impl Fn(usize) -> f64,
-) -> usize {
-    if from >= len || time_at(from) >= col_end {
-        return from;
-    }
-    let mut lo = from;
-    let mut span = 1usize;
-    let mut hi = (lo + span).min(len);
-    while hi < len && time_at(hi) < col_end {
-        lo = hi;
-        span = span.saturating_mul(2);
-        hi = lo.saturating_add(span).min(len);
-    }
-    while lo + 1 < hi {
-        let mid = lo + (hi - lo) / 2;
-        if time_at(mid) < col_end {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    hi
-}
-
-/// Sample a single-bit row column by column. The change index only ever
-/// advances with the columns and the value summary is computed once per run
-/// of columns holding the same value, so dense change lists are never
-/// re-scanned or re-summarized per column.
-fn sample_bit_row(changes: &[Change], t0: f64, scale: f64, cols: usize) -> Vec<WaveCell> {
-    // A change belongs to the column its tick rounds to, so an edge symbol
-    // sits exactly under the cursor line at the same time.
-    let cut = t0 - 0.5 * scale;
-    let mut i = changes.partition_point(|c| (c.t as f64) < cut);
-    let mut value: Option<&Value> = if i > 0 { Some(&changes[i - 1].v) } else { None };
-    let mut summary = summarize(value);
-    let mut cells = Vec::with_capacity(cols);
-
-    for col in 0..cols {
-        let col_end = t0 + (col as f64 + 0.5) * scale;
-        let before = i;
-        i = first_not_before(changes.len(), i, col_end, |k| changes[k].t as f64);
-        let transitions = i - before;
-        if transitions > 0 {
-            value = Some(&changes[i - 1].v);
-            summary = summarize(value);
-        }
-        cells.push(match transitions {
-            0 => run_cell(summary),
-            1 => match value.and_then(|v| v.bit(0)) {
-                Some(1) => WaveCell {
-                    glyph: EDGE_RISE,
-                    ink: WaveInk::High,
-                },
-                Some(0) => WaveCell {
-                    glyph: EDGE_FALL,
-                    ink: WaveInk::Low,
-                },
-                _ => WaveCell {
-                    glyph: VLINE,
-                    ink: summary_ink(summary),
-                },
-            },
-            // Several transitions in one cell (a pulse or dense activity):
-            // collapse them to a bar like `____|____`, never dropping the
-            // event from the view.
-            _ => WaveCell {
-                glyph: VLINE,
-                ink: summary_ink(summary),
-            },
-        });
-    }
-    cells
-}
-
-/// Sample a bus row: change markers use the same rounding as the cursor
-/// column, and the time list is searched from the last drawn column instead
-/// of binary-searching it per column. `ink_at` classifies the value held
-/// during a span (`None` before the first change), so unknown spans carry the
-/// x/z ink while known ones keep the bus ink.
-fn sample_bus_row(
-    times: &BusTimes<'_>,
-    t0: f64,
-    scale: f64,
-    cols: usize,
-    ink_at: impl Fn(Option<usize>) -> WaveInk,
-) -> Vec<WaveCell> {
-    let cut = t0 - 0.5 * scale;
-    let mut i = time_partition_point(times, |time| (time as f64) < cut);
-    let mut ink = ink_at(i.checked_sub(1));
-    let mut cells = Vec::with_capacity(cols);
-    for col in 0..cols {
-        let col_end = t0 + (col as f64 + 0.5) * scale;
-        let before = i;
-        i = first_not_before(times.len(), i, col_end, |k| times.time_at(k) as f64);
-        if i > before {
-            // The column's marker and rail belong to the new value.
-            ink = ink_at(Some(i - 1));
-        }
-        let glyph = if i > before { BUS_CROSS } else { BUS_LINE };
-        cells.push(WaveCell { glyph, ink });
-    }
-    cells
-}
-
-/// Sample an analog row. The change index advances with the columns; a column
-/// containing changes keeps spikes visible by drawing the extreme value seen
-/// in it, with the scan capped so dense columns stay cheap.
-fn sample_analog_row(
-    changes: &[Change],
-    t0: f64,
-    scale: f64,
-    cols: usize,
-    min: f64,
-    max: f64,
-) -> Vec<WaveCell> {
-    let cut = t0 - 0.5 * scale;
-    let mut i = changes.partition_point(|c| (c.t as f64) < cut);
-    let mut value = if i > 0 {
-        numeric_value(&changes[i - 1].v).unwrap_or(min)
-    } else {
-        min
-    };
-    if !value.is_finite() {
-        value = min;
-    }
-    let mut cells = Vec::with_capacity(cols);
-
-    for col in 0..cols {
-        let col_end = t0 + (col as f64 + 0.5) * scale;
-        let before = i;
-        i = first_not_before(changes.len(), i, col_end, |k| changes[k].t as f64);
-        if i > before {
-            let count = i - before;
-            let stride = (count / 64).max(1);
-            let mut extreme = value;
-            let mut best = 0.0f64;
-            let mut index = before;
-            while index < i {
-                let candidate = numeric_value(&changes[index].v).unwrap_or(value);
-                let distance = (candidate - value).abs();
-                if distance > best {
-                    best = distance;
-                    extreme = candidate;
-                }
-                index += stride;
-            }
-            let last = numeric_value(&changes[i - 1].v).unwrap_or(value);
-            if (last - value).abs() >= best {
-                extreme = last;
-            }
-            value = extreme;
-        }
-        let level = if max == min {
-            0.5
-        } else {
-            ((value - min) / (max - min)).clamp(0.0, 1.0)
-        };
-        let half = (level * 7.0).round() as usize;
-        cells.push(WaveCell {
-            glyph: HALF[half.min(7)],
-            ink: WaveInk::Analog,
-        });
-    }
-    cells
 }
 
 /// Draw a single-bit signal as a square wave: high/low rails joined by edges.
@@ -584,7 +272,7 @@ fn draw_bit_row(
     let cells = app.wave_row(idx, l, NO_RANGE, || {
         sample_bit_row(&sig.changes, app.t0, app.scale, l.cols)
     });
-    paint_cells(buf, l, &app.theme, &cells, y, row_bg);
+    paint_cells(buf, l, &app.settings.theme, &cells, y, row_bg);
 }
 
 /// Draw a bus (or string) as a horizontal trace, writing the value inside each
@@ -655,42 +343,10 @@ fn draw_bus_row(
         unknown_colors,
         BusTimes::Changes(changes),
         ink_at,
-        |j| {
-            let text = waveform::fmt_value(&changes[j].v, radix);
-            let width = text.chars().count();
-            (Rc::from(text), width)
-        },
+        |j| app.wave_change_label(idx, j, || waveform::fmt_value(&changes[j].v, radix)),
     );
 }
 
-/// Time source of a bus row: the zero-copy change list of a plain signal or
-/// the merged times of a synthesized one.
-enum BusTimes<'a> {
-    Changes(&'a [waveform::Change]),
-    Merged(&'a [waveform::Ticks]),
-}
-
-impl BusTimes<'_> {
-    fn len(&self) -> usize {
-        match self {
-            BusTimes::Changes(changes) => changes.len(),
-            BusTimes::Merged(times) => times.len(),
-        }
-    }
-
-    fn time_at(&self, index: usize) -> waveform::Ticks {
-        match self {
-            BusTimes::Changes(changes) => changes[index].t,
-            BusTimes::Merged(times) => times[index],
-        }
-    }
-}
-
-/// Shared drawing of a bus row over a virtual, time-ordered change list. The
-/// text of a change and its display width are provided lazily so plain
-/// signals keep their zero-copy change list while synthesized signals reuse
-/// the labels cached for the current zoom window; `ink_at` likewise classifies
-/// a span's held value without materializing the values first.
 #[allow(clippy::too_many_arguments)]
 fn draw_bus_trace(
     buf: &mut Buffer,
@@ -704,7 +360,7 @@ fn draw_bus_trace(
     ink_at: impl Fn(Option<usize>) -> WaveInk,
     text_at: impl Fn(usize) -> (Rc<str>, usize),
 ) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let (t0, scale) = (app.t0, app.scale);
     let n = times.len();
     let cells = app.wave_row(idx, l, NO_RANGE, || {
@@ -730,6 +386,10 @@ fn draw_bus_trace(
         };
         let c0 = (((cs - t0) / scale).round() as i64).clamp(0, width);
         let c1 = (((ce - t0) / scale).round() as i64).clamp(0, width);
+        if c1 - c0 < 2 {
+            j += 1;
+            continue;
+        }
         let (value, len) = text_at(j);
         let len = len as i64;
         if c1 - c0 >= len + 2 {
@@ -741,11 +401,18 @@ fn draw_bus_trace(
                 text::put(buf, x, y, &value, style);
             }
             j += 1;
+        } else if app.settings.general.wave_overflow == WaveValueOverflow::Ellipsize {
+            let available = (c1 - c0 - 1).max(0) as usize;
+            let clipped = clip_label(&value, available);
+            let x = l.rows.x + (c0 + 1) as u16;
+            let style = Style::new().fg(t.bus_text).bg(row_bg);
+            if unknown_colors {
+                text::put_unknown_digits(buf, x, y, &clipped, style, t.xcol, t.zcol);
+            } else {
+                text::put(buf, x, y, &clipped, style);
+            }
+            j += 1;
         } else {
-            // Segment too narrow for a label: jump to the segment that is
-            // active at the first column where a label could fit. This skips
-            // long runs of narrow changes without ever skipping a wide
-            // segment that follows them.
             let target_col = (c0 + (len + 2).max(1)).clamp(1, width);
             let target_t = t0 + target_col as f64 * scale;
             let active =
@@ -755,20 +422,18 @@ fn draw_bus_trace(
     }
 }
 
-/// Partition point of a bus row's time list: index of the first entry whose
-/// time makes `pred` false, all earlier entries satisfying it
-/// (`slice::partition_point` needs a real slice).
-fn time_partition_point(times: &BusTimes<'_>, pred: impl Fn(waveform::Ticks) -> bool) -> usize {
-    let (mut lo, mut hi) = (0, times.len());
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if pred(times.time_at(mid)) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
+fn clip_label(value: &str, available: usize) -> String {
+    if value.chars().count() <= available {
+        return value.to_string();
     }
-    lo
+    if available == 0 {
+        return String::new();
+    }
+    if available == 1 {
+        return "…".to_string();
+    }
+    let prefix: String = value.chars().take(available - 1).collect();
+    format!("{prefix}…")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -790,37 +455,11 @@ fn draw_analog_row(
     let cells = app.wave_row(idx, l, (min, max), || {
         sample_analog_row(&sig.changes, app.t0, app.scale, l.cols, min, max)
     });
-    paint_cells(buf, l, &app.theme, &cells, y, row_bg);
-}
-
-/// Numeric view of a change value, used when rendering logic signals as analog.
-fn numeric_value(value: &Value) -> Option<f64> {
-    if let Some(real) = value.as_real() {
-        return Some(real);
-    }
-    waveform::value_number(value).map(|v| v as f64)
-}
-
-fn summarize(value: Option<&Value>) -> u8 {
-    let Some(value) = value else { return 2 };
-    let mut zero = true;
-    for i in 0..value.bits_len() {
-        match value.bit(i) {
-            Some(0) => {}
-            Some(1) => zero = false,
-            Some(2) => return 2,
-            _ => return 3,
-        }
-    }
-    if zero {
-        0
-    } else {
-        1
-    }
+    paint_cells(buf, l, &app.settings.theme, &cells, y, row_bg);
 }
 
 fn draw_range(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let Some((a, b)) = app.range else { return };
     if l.cols == 0 || l.rows_h == 0 {
         return;
@@ -837,7 +476,7 @@ fn draw_range(buf: &mut Buffer, l: &Layout, app: &App) {
 }
 
 fn draw_cursor(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     if l.cols == 0 {
         return;
     }
@@ -849,7 +488,7 @@ fn draw_cursor(buf: &mut Buffer, l: &Layout, app: &App) {
     for y in l.ruler.y..l.rows.bottom() {
         if let Some(cell) = buf.cell_mut((x, y)) {
             let bg = cell.bg;
-            cell.set_symbol(VLINE);
+            cell.set_symbol(VLINE.as_str());
             cell.set_fg(t.cursor);
             cell.set_bg(bg);
         }
@@ -857,7 +496,7 @@ fn draw_cursor(buf: &mut Buffer, l: &Layout, app: &App) {
 }
 
 fn draw_vscroll(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let Some((start, len)) =
         scrollbar::proportional_geometry(l.rows_h, app.rows_len(), l.rows_h, app.row_scroll)
     else {
@@ -871,7 +510,7 @@ fn draw_vscroll(buf: &mut Buffer, l: &Layout, app: &App) {
         start,
         len,
         thumb: SCROLL_THUMB,
-        track: VLINE,
+        track: VLINE.as_str(),
         thumb_fg: t.accent,
         track_fg: t.wave_dim,
         bg: t.wave_bg,
@@ -906,7 +545,7 @@ pub(crate) fn hscroll_thumb(
 }
 
 fn draw_hscroll(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let Some(wf) = &app.wf else { return };
     if l.cols == 0 {
         return;
@@ -944,6 +583,16 @@ pub(crate) fn draw_scrollbars(buf: &mut Buffer, l: &Layout, app: &App) {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn labels_are_ellipsized_without_splitting_characters() {
+        assert_eq!(clip_label("abcdef", 0), "");
+        assert_eq!(clip_label("abcdef", 1), "…");
+        assert_eq!(clip_label("abcdef", 2), "a…");
+        assert_eq!(clip_label("abcdef", 4), "abc…");
+        assert_eq!(clip_label("abc", 4), "abc");
+        assert_eq!(clip_label("h数据x", 3), "h数…");
+    }
 
     #[test]
     fn scrollbar_thumb_reflects_visible_fraction() {

@@ -1,5 +1,5 @@
 use crate::app::{App, CtxEntry};
-use crate::theme::Theme;
+use crate::settings::theme::Theme;
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use ratatui::buffer::Buffer;
@@ -139,7 +139,7 @@ fn draw_popup(buf: &mut Buffer, area: Rect, entries: &[CtxEntry], sel: usize, t:
 }
 
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let Some(menu) = &app.ctx_menu else { return };
     let Some(root) = root_rect(l, app) else {
         return;

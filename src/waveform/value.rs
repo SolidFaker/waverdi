@@ -139,24 +139,24 @@ pub fn fmt_value(value: &Value, radix: Radix) -> String {
 
 /// Decimal value of an all-known logic value (unknowns give `None`).
 pub fn value_number(value: &Value) -> Option<u64> {
-    if value.has_unknown() {
-        return None;
-    }
     match value {
         Value::Small(packed, width) => {
+            if value.has_unknown() {
+                return None;
+            }
             let mut v = 0u64;
             for i in (0..*width as usize).rev() {
                 v = (v << 1) | ((packed >> (2 * i)) & 1);
             }
             Some(v)
         }
-        Value::Bits(bits) => {
-            if bits.len() > 64 {
-                return None;
-            }
+        Value::Bits(bits) if bits.len() <= 64 => {
             let mut v = 0u64;
-            for &b in bits.iter().rev() {
-                v = (v << 1) | b as u64;
+            for &bit in bits.iter().rev() {
+                if bit >= 2 {
+                    return None;
+                }
+                v = (v << 1) | bit as u64;
             }
             Some(v)
         }

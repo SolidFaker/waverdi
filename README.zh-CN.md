@@ -322,16 +322,24 @@ Create Bus 窗口内：`↑`/`↓` 选择、`Shift`+`↑`/`↓` 调序、`h`/`l`
 
 ## 设置
 
-`F2`（或 **View ▸ Settings...**）打开设置对话框：
+`F2`（或 **View ▸ Settings...**）打开双栏设置对话框。`Tab` 在类别和项目
+之间切换，`↑`/`↓` 选择，`←`/`→` 调整值，`Enter` 编辑；也可用鼠标点击类别和
+项目。**Reset** 恢复当前项，**Close** 关闭对话框。
 
+- **General** — 通过横向滑块调整总线拆分位宽和工作量上限（`changes × bits`），
+  以及全名多选框、时间单位下拉选单、顶部面板比例竖向滑块和波形标签溢出开关
+  （`hide` / `ellipsis`）。默认保留原有门限、短名、timescale、60% 顶部比例和
+  隐藏策略。
 - **Theme** — `Dark`、`Light` 或 `Mixed`。Mixed 下波形区保持深色、其余窗口
   为浅色；波形背景是独立设置，与界面背景互不影响。
 - **UI colours** — 各窗口共用的背景色。
-- **Waveform colours** — 波形自己的背景（`background (wave)`）、高/低电平、
-  未知（x）、高阻（z）、总线值与文本、光标、模拟、时间刻度。`←`/`→` 循环
-  内置调色板，`Enter` 前进，`r` 恢复主题默认。
+- **Waveform colours** — 波形背景、电平、未知/高阻、总线、光标、模拟和时间
+  刻度。`←`/`→` 循环调色板，`r` 恢复当前主题默认。
+- **Key Bindings** — 编辑普通全局命令。`Enter` 捕获新快捷键，`r` 恢复当前项，
+  `R` 全部恢复默认；捕获时也可用 `Backspace`/`Delete` 恢复当前项。与其它命令
+  冲突或属于面板/模态保留键的输入会被拒绝。
 
-切换主题会重置逐项自定义颜色；设置在本次会话内有效。
+切换主题会重置逐项自定义颜色。常规项、颜色和快捷键覆盖均在本次会话内有效。
 
 ## 项目结构
 
@@ -342,16 +350,20 @@ waveform/          示例 dump（counter.vcd、complex.vcd、demo.fst）
 shot/              README 截图
 src/
 ├── main.rs        CLI、终端初始化、事件循环
-├── app/           状态机：输入、按键、鼠标、视图、导航、动作
-├── ui/            ratatui 渲染：layout、tree、source、list、wave、菜单
-├── rtl/           RTL 源码：filelist/KDB 发现、SV 扫描器、源码视图
+├── app/           文档状态、输入、鼠标、导航；keymap.rs 统一普通快捷键
+├── engine/        后台加载、延迟解码、波形采样与查询
+├── settings/      主题、面板比例、时间单位与设置行
+├── ui/            ratatui 布局与绘制（采样位于 engine）
+│   └── widgets/   按钮、输入框、选择控件、下拉选单、滑块、标签与容器
+├── rtl/           filelist/KDB 发现与 SourceView
+│   └── scan/      SV 词法、轻量解析、elaboration、trace 与波形适配
 ├── waveform/      数据模型：信号、值、时间、scope 树、数组
+├── dump/          格式注册、共享上限与各格式 source 适配器
 ├── vcd.rs         VCD 解析器
 ├── fst.rs         FST 加载（wellen）
 ├── fsdb.rs        FSDB 加载（Verdi FFR SDK，Linux）
-├── dump.rs        格式探测与分发
-├── picker.rs      系统对话框探测 / 封装
-└── theme.rs       颜色主题
+├── perf.rs        可选性能场景（仅测试构建）
+└── picker.rs      系统对话框探测 / 封装
 ```
 
 ## 开发
@@ -362,6 +374,7 @@ cargo test fsdb                  # FSDB 测试（需要 VERDI_HOME，交叉验�
 cargo test --no-default-features # 纯 TUI 构建
 cargo clippy --all-targets
 cargo fmt --check
+cargo test --release perf:: -- --ignored --nocapture --test-threads=1 # 可选性能对比
 ```
 
 ## 待办

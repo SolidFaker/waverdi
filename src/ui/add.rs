@@ -189,7 +189,7 @@ pub fn pane_at(screen: Rect, col: u16, row: u16) -> Option<AddFocus> {
 }
 
 pub fn draw(frame: &mut ratatui::Frame, screen: Rect, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let Some(add) = app.add_signals.as_ref() else {
         return;
     };
@@ -351,7 +351,7 @@ fn draw_grid(
     cursor: impl Fn(usize) -> bool,
     selected: impl Fn(usize) -> bool,
     bg: Color,
-    t: &crate::theme::Theme,
+    t: &crate::settings::theme::Theme,
 ) {
     if rect.width == 0 || rect.height == 0 {
         return;
@@ -391,7 +391,7 @@ fn draw_scrollbar(
     start: usize,
     len: usize,
     visible: usize,
-    t: &crate::theme::Theme,
+    t: &crate::settings::theme::Theme,
 ) {
     if rect.width == 0 {
         return;
@@ -419,7 +419,7 @@ fn draw_scrollbar(
 }
 
 fn button(buf: &mut Buffer, rect: Rect, label: &str, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     text::put(
         buf,
         rect.x,

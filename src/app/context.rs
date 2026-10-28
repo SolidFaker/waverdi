@@ -419,7 +419,9 @@ impl App {
         // Splitting duplicates the value changes per chunk; refuse when that
         // would stall the UI thread or allocate gigabytes.
         let workload = source.changes.len().saturating_mul(source.bits as usize);
-        if source.bits > 4096 || workload > 4_000_000 {
+        if source.bits > self.settings.general.bus_split_bits
+            || workload > self.settings.general.bus_split_work
+        {
             self.msg(format!(
                 "bus: {} ({} bit, {} changes) is too large to split",
                 source.name,
@@ -883,6 +885,21 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.contains("too large to split")));
+    }
+
+    #[test]
+    fn split_bus_limits_are_configurable() {
+        let mut app = app_with(VCD);
+        app.settings.general.bus_split_work = 3;
+        assert!(app.append_bit_chunks(3, 1).is_none());
+        app.settings.general.bus_split_work = 4_000_000;
+        assert!(app.append_bit_chunks(3, 1).is_some());
+
+        let mut app = app_with(VCD);
+        app.settings.general.bus_split_bits = 2;
+        assert!(app.append_bit_chunks(3, 1).is_none());
+        app.settings.general.bus_split_bits = 4_096;
+        assert!(app.append_bit_chunks(3, 1).is_some());
     }
 
     #[test]

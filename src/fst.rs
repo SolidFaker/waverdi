@@ -18,16 +18,18 @@ pub fn parse_fst(path: &Path) -> Result<ParseOut, String> {
 
     let (mut tree, meta) = collect_meta(source.hierarchy());
     let mut signals = Vec::with_capacity(meta.len());
-    let mut cache: HashMap<SignalRef, Vec<Change>> = HashMap::new();
+    let mut cache: HashMap<SignalRef, Arc<Vec<Change>>> = HashMap::new();
     for item in meta {
         let changes = if let Some(cached) = cache.get(&item.signal_ref) {
-            cached.clone()
+            Arc::clone(cached)
         } else {
-            let changes = source
-                .get_signal(item.signal_ref)
-                .map(|signal| materialize(signal, source.time_table()))
-                .unwrap_or_default();
-            cache.insert(item.signal_ref, changes.clone());
+            let changes = Arc::new(
+                source
+                    .get_signal(item.signal_ref)
+                    .map(|signal| materialize(signal, source.time_table()))
+                    .unwrap_or_default(),
+            );
+            cache.insert(item.signal_ref, Arc::clone(&changes));
             changes
         };
         let parent = item.parent;
@@ -117,7 +119,7 @@ pub(crate) fn parse_fst_hierarchy(path: &Path) -> Result<FstHierarchy, String> {
     for item in meta {
         let parent = item.parent;
         let index = signals.len();
-        signals.push(item.into_signal(Vec::new(), SigState::Lazy));
+        signals.push(item.into_signal(Arc::new(Vec::new()), SigState::Lazy));
         tree.nodes[parent].signals.push(index);
     }
 
@@ -157,7 +159,7 @@ pub(crate) struct VarMeta {
 }
 
 impl VarMeta {
-    fn into_signal(self, changes: Vec<Change>, state: SigState) -> Signal {
+    fn into_signal(self, changes: Arc<Vec<Change>>, state: SigState) -> Signal {
         let (min, max) = if self.kind == SigKind::Real {
             real_range(&changes)
         } else {
@@ -170,7 +172,7 @@ impl VarMeta {
             dir: String::new(),
             scope: self.scope,
             kind: self.kind,
-            changes: Arc::new(changes),
+            changes,
             min,
             max,
             parent: None,

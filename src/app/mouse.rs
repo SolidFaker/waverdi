@@ -241,6 +241,90 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
             _ => {}
         }
     }
+    if dialog == Dialog::TopSplit
+        && matches!(
+            m.kind,
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
+        )
+    {
+        if let Some(value) = crate::ui::dialog::top_split_slider(app).value_at(m.column, m.row) {
+            app.set_general_value(crate::settings::GeneralSetting::TopSplit, value);
+            app.dragging = Some(new_drag(
+                DragMode::SettingsSlider(crate::settings::GeneralSetting::TopSplit),
+                m.column,
+                0.0,
+            ));
+            return;
+        }
+    }
+    let slider_drag = app
+        .dragging
+        .map(|drag| matches!(drag.mode, DragMode::SettingsSlider(_)))
+        .unwrap_or(false);
+    if dialog == Dialog::Settings
+        && (m.kind == MouseEventKind::Down(MouseButton::Left)
+            || (m.kind == MouseEventKind::Drag(MouseButton::Left) && slider_drag))
+    {
+        if let Some(hit) = crate::ui::dialog::settings_hit(app.layout().area, app, m.column, m.row)
+        {
+            match hit {
+                crate::ui::dialog::SettingsHit::Category(index) => {
+                    app.select_settings_category(index);
+                }
+                crate::ui::dialog::SettingsHit::Item(index) => {
+                    app.select_settings_row(index);
+                    if matches!(
+                        app.settings_row(),
+                        Some(crate::app::SettingRow::KeyBinding(_))
+                    ) {
+                        app.settings_activate();
+                    }
+                }
+                crate::ui::dialog::SettingsHit::Theme(index) => {
+                    app.set_theme_kind(crate::settings::ThemeKind::ALL[index]);
+                }
+                crate::ui::dialog::SettingsHit::General {
+                    row,
+                    setting,
+                    value,
+                } => {
+                    app.select_settings_row(row);
+                    match setting {
+                        crate::settings::GeneralSetting::TimeBase if value == usize::MAX => {
+                            app.time_dropdown.open = !app.time_dropdown.open;
+                        }
+                        crate::settings::GeneralSetting::TopSplit => {
+                            app.dialog = Some(Dialog::TopSplit);
+                        }
+                        _ => {
+                            app.set_general_value(setting, value);
+                            if matches!(
+                                setting,
+                                crate::settings::GeneralSetting::BusSplitBits
+                                    | crate::settings::GeneralSetting::BusSplitWork
+                            ) {
+                                app.dragging = Some(new_drag(
+                                    DragMode::SettingsSlider(setting),
+                                    m.column,
+                                    0.0,
+                                ));
+                            }
+                        }
+                    }
+                }
+                crate::ui::dialog::SettingsHit::Dropdown(index) => {
+                    app.set_general_value(crate::settings::GeneralSetting::TimeBase, index);
+                    app.time_dropdown.open = false;
+                }
+                crate::ui::dialog::SettingsHit::DismissDropdown => {
+                    app.time_dropdown.open = false;
+                }
+                crate::ui::dialog::SettingsHit::Reset => app.settings_reset(),
+                crate::ui::dialog::SettingsHit::Close => app.dialog = None,
+            }
+            return;
+        }
+    }
     let delta: i64 = match m.kind {
         MouseEventKind::ScrollUp => -1,
         MouseEventKind::ScrollDown => 1,
@@ -265,6 +349,7 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
             }
         }
         Dialog::CreateBus => app.bus_builder_move(delta),
+        Dialog::Settings => app.settings_move(delta),
         _ => {}
     }
 }
@@ -284,6 +369,7 @@ fn dialog_scroll_to(app: &mut App, dialog: Dialog, row: u16) {
     match dialog {
         Dialog::Find => app.find_sel = bottom,
         Dialog::CreateBus => app.bus_builder_select(bottom),
+        Dialog::Settings => app.select_settings_row(bottom),
         _ => {}
     }
 }
@@ -345,11 +431,11 @@ fn mouse_down(
     }
 
     if btn == MouseButton::Left {
-        if let Some(mode) = grip_at(&l, app.splits, col, row) {
+        if let Some(mode) = grip_at(&l, app.settings.splits, col, row) {
             let (start, pct) = match mode {
                 // Vertical splits remember the grabbed row instead of a column.
-                DragMode::SplitTop => (row, app.splits.top_pct as f64),
-                DragMode::SplitValue => (col, app.splits.value_pct as f64),
+                DragMode::SplitTop => (row, app.settings.splits.top_pct as f64),
+                DragMode::SplitValue => (col, app.settings.splits.value_pct as f64),
                 _ => (col, split_pct(app, mode)),
             };
             app.dragging = Some(new_drag(mode, start, pct));
@@ -378,7 +464,7 @@ fn mouse_down(
             app.dragging = Some(new_drag(DragMode::TreeScroll, col, 0.0));
             return false;
         }
-        let (_, sep_x, module_x) = crate::ui::tree::columns(inner, app.splits.hier_pct);
+        let (_, sep_x, module_x) = crate::ui::tree::columns(inner, app.settings.splits.hier_pct);
         // Bottom row: one horizontal scrollbar per column.
         if row == inner.bottom().saturating_sub(1) {
             if col < sep_x {
@@ -397,7 +483,7 @@ fn mouse_down(
             app.dragging = Some(Drag {
                 mode: DragMode::SplitHier,
                 start_x: col,
-                start_pct: app.splits.hier_pct as f64,
+                start_pct: app.settings.splits.hier_pct as f64,
                 row: 0,
             });
             return false;
@@ -491,9 +577,9 @@ fn mouse_down(
     if pt_in(l.list, col, row) {
         // Bottom row: one horizontal scrollbar for the names and one for the
         // Value column.
-        let value_w = l.value_col_width(app.splits.value_pct);
+        let value_w = l.value_col_width(app.settings.splits.value_pct);
         if row == l.list.bottom().saturating_sub(1) {
-            let grip = l.value_grip_x(app.splits.value_pct);
+            let grip = l.value_grip_x(app.settings.splits.value_pct);
             if col > grip {
                 scroll_list_value_h(app, &l, col);
                 app.dragging = Some(new_drag(DragMode::ValueHScroll, col, 0.0));
@@ -709,8 +795,8 @@ fn new_drag(mode: DragMode, col: u16, start_pct: f64) -> Drag {
 
 fn split_pct(app: &App, mode: DragMode) -> f64 {
     match mode {
-        DragMode::SplitTree => app.splits.tree_pct as f64,
-        DragMode::SplitList => app.splits.list_pct as f64,
+        DragMode::SplitTree => app.settings.splits.tree_pct as f64,
+        DragMode::SplitList => app.settings.splits.list_pct as f64,
         _ => 0.0,
     }
 }
@@ -765,6 +851,7 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
     let Some(drag) = app.dragging else { return };
     let l = app.layout();
     match drag.mode {
+        DragMode::SettingsSlider(_) => {}
         DragMode::Cursor => {
             app.cursor = app.tick_at_x(col);
             let span = app.span();
@@ -927,7 +1014,7 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
             let delta = col as f64 - drag.start_x as f64;
             let inner_w = crate::ui::layout::tree_inner(&l).width.max(1) as f64;
             let pct = drag.start_pct + delta * 100.0 / inner_w;
-            app.splits.hier_pct =
+            app.settings.splits.hier_pct =
                 pct.clamp(Splits::MIN_HIER_PCT as f64, Splits::MAX_HIER_PCT as f64) as u16;
         }
         DragMode::DialogScroll => {}
@@ -936,19 +1023,23 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
         DragMode::SplitTree => {
             let delta = col as f64 - drag.start_x as f64;
             let pct = drag.start_pct + delta * 100.0 / l.area.width.max(1) as f64;
-            app.splits.tree_pct =
-                pct.clamp(Splits::MIN_PCT as f64, app.splits.max_tree_pct() as f64) as u16;
+            app.settings.splits.tree_pct = pct.clamp(
+                Splits::MIN_PCT as f64,
+                app.settings.splits.max_tree_pct() as f64,
+            ) as u16;
         }
         DragMode::SplitList => {
             let delta = col as f64 - drag.start_x as f64;
             let pct = drag.start_pct + delta * 100.0 / l.area.width.max(1) as f64;
-            app.splits.list_pct =
-                pct.clamp(Splits::MIN_PCT as f64, app.splits.max_list_pct() as f64) as u16;
+            app.settings.splits.list_pct = pct.clamp(
+                Splits::MIN_PCT as f64,
+                app.settings.splits.max_list_pct() as f64,
+            ) as u16;
         }
         DragMode::SplitTop => {
             let delta = row as f64 - drag.start_x as f64;
             let pct = drag.start_pct + delta * 100.0 / l.area.height.max(1) as f64;
-            app.splits.top_pct =
+            app.settings.splits.top_pct =
                 pct.clamp(Splits::MIN_TOP_PCT as f64, Splits::MAX_TOP_PCT as f64) as u16;
         }
         DragMode::SplitValue => {
@@ -956,7 +1047,7 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
             let list_w = l.list.width.max(1) as f64;
             let delta = col as f64 - drag.start_x as f64;
             let pct = drag.start_pct - delta * 100.0 / list_w;
-            app.splits.value_pct =
+            app.settings.splits.value_pct =
                 pct.clamp(Splits::MIN_VALUE_PCT as f64, Splits::MAX_VALUE_PCT as f64) as u16;
         }
         DragMode::SourceSel => {
@@ -1006,14 +1097,14 @@ fn scroll_tree(app: &mut App, l: &Layout, row: u16) {
 
 /// Horizontal scroll of the Signal List names.
 fn scroll_list_h(app: &mut App, l: &Layout, col: u16) {
-    let value_w = l.value_col_width(app.splits.value_pct);
+    let value_w = l.value_col_width(app.settings.splits.value_pct);
     let name_w = crate::ui::list::name_width(l, value_w);
     let content = app.list_content_width();
     let max = content.saturating_sub(name_w);
     if max == 0 {
         return;
     }
-    let grip = l.value_grip_x(app.splits.value_pct);
+    let grip = l.value_grip_x(app.settings.splits.value_pct);
     let end = grip.saturating_sub(1);
     let span = end.saturating_sub(l.list.x).max(1) as f64;
     let rel = col.saturating_sub(l.list.x) as f64 / span;
@@ -1022,13 +1113,15 @@ fn scroll_list_h(app: &mut App, l: &Layout, col: u16) {
 
 /// Horizontal scroll of the Value column.
 fn scroll_list_value_h(app: &mut App, l: &Layout, col: u16) {
-    let value_w = l.value_col_width(app.splits.value_pct);
+    let value_w = l.value_col_width(app.settings.splits.value_pct);
     let content = app.value_content_width();
     let max = content.saturating_sub(value_w);
     if max == 0 {
         return;
     }
-    let x0 = l.value_grip_x(app.splits.value_pct).saturating_add(1);
+    let x0 = l
+        .value_grip_x(app.settings.splits.value_pct)
+        .saturating_add(1);
     let x1 = l.list.right().saturating_sub(1).max(x0 + 1);
     let end = x1.saturating_sub(1);
     let span = end.saturating_sub(x0).max(1) as f64;
@@ -1040,7 +1133,7 @@ fn scroll_list_value_h(app: &mut App, l: &Layout, col: u16) {
 /// Module column, otherwise the Hierarchy column).
 fn scroll_tree_h(app: &mut App, l: &Layout, col: u16, module: bool) {
     let inner = crate::ui::layout::tree_inner(l);
-    let (hier_w, sep_x, module_x) = crate::ui::tree::columns(inner, app.splits.hier_pct);
+    let (hier_w, sep_x, module_x) = crate::ui::tree::columns(inner, app.settings.splits.hier_pct);
     let (x0, x1, content, view) = if module {
         let right = inner.right().saturating_sub(1);
         let view = right.saturating_sub(module_x) as usize;
@@ -1312,12 +1405,12 @@ mod tests {
         let mut app = app_with(VCD);
         app.set_display(vec![0]);
         let l = app.layout();
-        let x = l.value_grip_x(app.splits.value_pct);
+        let x = l.value_grip_x(app.settings.splits.value_pct);
         let y = l.list.y + 2;
         crate::app::handle_mouse(&mut app, click(x, y));
         crate::app::handle_mouse(&mut app, drag(x - 4, y));
         app.dragging = None;
-        assert!(app.splits.value_pct > Splits::default().value_pct);
+        assert!(app.settings.splits.value_pct > Splits::default().value_pct);
     }
 
     #[test]
@@ -1383,7 +1476,7 @@ mod tests {
         crate::app::handle_mouse(&mut app, click(50, y));
         crate::app::handle_mouse(&mut app, drag(50, y + 5));
         app.dragging = None;
-        assert!(app.splits.top_pct > Splits::default().top_pct);
+        assert!(app.settings.splits.top_pct > Splits::default().top_pct);
         assert!(app.layout().nwave.y > before);
     }
 
@@ -1395,7 +1488,7 @@ mod tests {
         crate::app::handle_mouse(&mut app, click(l.tree_grip_x(), 5));
         crate::app::handle_mouse(&mut app, drag(l.tree_grip_x() + 10, 5));
         app.dragging = None;
-        assert!(app.splits.tree_pct > Splits::default().tree_pct);
+        assert!(app.settings.splits.tree_pct > Splits::default().tree_pct);
         assert!(app.layout().tree.width > before);
         assert!(app.layout().wave.width > 0);
     }
@@ -1553,6 +1646,77 @@ mod tests {
     }
 
     #[test]
+    fn settings_mouse_switches_categories_and_captures_shortcuts() {
+        let mut app = app_with(VCD);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.open_settings();
+        let area =
+            crate::ui::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::Settings);
+        crate::app::handle_mouse(&mut app, click(area.x + 2, area.y + 5));
+        assert_eq!(
+            app.settings_category,
+            crate::settings::SettingsCategory::KeyBindings
+        );
+        crate::app::handle_mouse(&mut app, click(area.x + 40, area.y + 1));
+        assert_eq!(app.dialog, Some(crate::app::Dialog::BindKey));
+        assert_eq!(app.key_capture, Some(0));
+    }
+
+    #[test]
+    fn settings_horizontal_slider_supports_mouse_drag() {
+        let mut app = app_with(VCD);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.open_settings();
+        let area =
+            crate::ui::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::Settings);
+        let x = (area.x..area.right())
+            .find(|&x| {
+                matches!(
+                    crate::ui::dialog::settings_hit(app.last_area, &app, x, area.y + 1),
+                    Some(crate::ui::dialog::SettingsHit::General {
+                        setting: crate::settings::GeneralSetting::BusSplitBits,
+                        value: 4,
+                        ..
+                    })
+                )
+            })
+            .expect("slider endpoint");
+        crate::app::handle_mouse(&mut app, click(x, area.y + 1));
+        assert_eq!(app.settings.general.bus_split_bits, 16_384);
+        assert!(app.dragging.is_some());
+    }
+
+    #[test]
+    fn top_split_vertical_slider_supports_mouse_drag() {
+        let mut app = app_with(VCD);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.dialog = Some(crate::app::Dialog::TopSplit);
+        let area =
+            crate::ui::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::TopSplit);
+        crate::app::handle_mouse(&mut app, click(area.x + area.width / 2, area.bottom() - 2));
+        assert_eq!(
+            app.settings.splits.top_pct,
+            crate::settings::Splits::MIN_TOP_PCT
+        );
+        assert!(app.dragging.is_some());
+    }
+
+    #[test]
+    fn settings_buttons_reset_and_close() {
+        let mut app = app_with(VCD);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.open_settings();
+        app.settings.general.bus_split_bits = 8_192;
+        let area =
+            crate::ui::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::Settings);
+        crate::app::handle_mouse(&mut app, click(area.right() - 17, area.bottom() - 2));
+        assert_eq!(app.settings.general.bus_split_bits, 4_096);
+        assert_eq!(app.dialog, Some(crate::app::Dialog::Settings));
+        crate::app::handle_mouse(&mut app, click(area.right() - 6, area.bottom() - 2));
+        assert_eq!(app.dialog, None);
+    }
+
+    #[test]
     fn dialog_scrollbar_click_scrolls_the_body() {
         let mut app = app_with(VCD);
         app.sync_layout(ratatui::layout::Rect::new(0, 0, 60, 14));
@@ -1577,7 +1741,7 @@ mod tests {
         let area = crate::ui::toolbar::time_menu_rect(l.toolbar, &app);
         // Entry 0 is the timescale, entry 1 is fs.
         crate::app::handle_mouse(&mut app, click(area.x + 1, area.y + 2));
-        assert_eq!(app.time_base, crate::waveform::TimeBase::Fs);
+        assert_eq!(app.settings.time_base, crate::waveform::TimeBase::Fs);
         assert!(app.time_menu.is_none());
     }
 
@@ -1589,14 +1753,14 @@ mod tests {
         crate::app::handle_mouse(&mut app, click(button.x + 1, button.y));
         let area = crate::ui::toolbar::time_menu_rect(l.toolbar, &app);
         app.time_menu = Some(1);
-        let before = app.time_base;
+        let before = app.settings.time_base;
         // The top border row must not underflow into an entry index.
         crate::app::handle_mouse(&mut app, click(area.x + 1, area.y));
         assert_eq!(app.time_menu, Some(1));
-        assert_eq!(app.time_base, before);
+        assert_eq!(app.settings.time_base, before);
         // The bottom border row is below the last entry.
         crate::app::handle_mouse(&mut app, click(area.x + 1, area.bottom() - 1));
-        assert_eq!(app.time_base, before);
+        assert_eq!(app.settings.time_base, before);
     }
 
     #[test]
@@ -1975,7 +2139,7 @@ mod tests {
         app.set_display(vec![0]);
         app.show_full_names = true;
         let l = app.layout();
-        let value_w = l.value_col_width(app.splits.value_pct);
+        let value_w = l.value_col_width(app.settings.splits.value_pct);
         let name_w = crate::ui::list::name_width(&l, value_w);
         let max = app.list_content_width() - name_w;
         assert!(max > 0, "the test needs an overflowing name");
@@ -1987,7 +2151,7 @@ mod tests {
             app.dragging.map(|drag| drag.mode),
             Some(crate::app::DragMode::ListHScroll)
         ));
-        let grip = l.value_grip_x(app.splits.value_pct);
+        let grip = l.value_grip_x(app.settings.splits.value_pct);
         crate::app::handle_mouse(&mut app, drag(l.list.x + (grip - l.list.x) / 2, y));
         app.dragging = None;
         assert!(app.list_h_scroll > 0 && app.list_h_scroll < max);
@@ -2094,12 +2258,12 @@ mod tests {
         let mut app = app_with(vcd);
         app.set_display(vec![0]);
         let l = app.layout();
-        let value_w = l.value_col_width(app.splits.value_pct);
+        let value_w = l.value_col_width(app.settings.splits.value_pct);
         assert!(
             app.value_content_width() > value_w,
             "needs an overflowing value"
         );
-        let grip = l.value_grip_x(app.splits.value_pct);
+        let grip = l.value_grip_x(app.settings.splits.value_pct);
         let y = l.list.bottom() - 1;
         crate::app::handle_mouse(&mut app, click(grip + 1, y));
         assert!(matches!(
@@ -2133,7 +2297,8 @@ mod tests {
 
         let l = app.layout();
         let inner = crate::ui::layout::tree_inner(&l);
-        let (hier_w, sep_x, module_x) = crate::ui::tree::columns(inner, app.splits.hier_pct);
+        let (hier_w, sep_x, module_x) =
+            crate::ui::tree::columns(inner, app.settings.splits.hier_pct);
         let name_w = hier_w.saturating_sub(1) as usize;
         let module_w = inner.right().saturating_sub(module_x + 1) as usize;
         assert!(app.tree_content_width() > name_w);
@@ -2153,12 +2318,12 @@ mod tests {
         assert!(app.module_h_scroll > 0);
 
         // The Hierarchy | Module divider resizes the columns.
-        let before = app.splits.hier_pct;
+        let before = app.settings.splits.hier_pct;
         crate::app::handle_mouse(&mut app, click(sep_x, inner.y + 2));
         crate::app::handle_mouse(&mut app, drag(sep_x + 6, inner.y + 2));
         app.dragging = None;
-        assert!(app.splits.hier_pct > before);
-        let (_, sep_after, _) = crate::ui::tree::columns(inner, app.splits.hier_pct);
+        assert!(app.settings.splits.hier_pct > before);
+        let (_, sep_after, _) = crate::ui::tree::columns(inner, app.settings.splits.hier_pct);
         assert!(sep_after > sep_x);
     }
 

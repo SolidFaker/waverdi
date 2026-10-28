@@ -1,5 +1,5 @@
 use crate::app::{App, Focus, TreeNode};
-use crate::theme::Theme;
+use crate::settings::theme::Theme;
 use crate::ui::layout::{tree_inner, Layout};
 use crate::ui::scrollbar;
 use crate::ui::text;
@@ -36,7 +36,7 @@ pub fn columns(inner: Rect, hier_pct: u16) -> (u16, u16, u16) {
 }
 
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let focused = app.focus == Focus::Tree;
     draw_frame(buf, l, t, focused);
 
@@ -44,7 +44,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let (hier_w, sep_x, module_x) = columns(inner, app.splits.hier_pct);
+    let (hier_w, sep_x, module_x) = columns(inner, app.settings.splits.hier_pct);
 
     // Header: Hierarchy | Module.
     let header = Rect {

@@ -1,6 +1,6 @@
-﻿use super::{App, Dialog};
+use super::{App, Dialog};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     Open,
     OpenTui,
@@ -58,10 +58,7 @@ impl Action {
             Action::Next => app.jump_transition(true),
             Action::Radix => app.cycle_radix(),
             Action::LoadFilelist => app.open_filelist_dialog(),
-            Action::Settings => {
-                app.settings_sel = 0;
-                app.open_dialog(Dialog::Settings);
-            }
+            Action::Settings => app.open_settings(),
             Action::Keys => app.open_dialog(Dialog::Keys),
             Action::About => app.open_dialog(Dialog::About),
         }

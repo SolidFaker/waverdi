@@ -1,5 +1,6 @@
 use super::{App, Dialog};
-use crate::waveform::{fmt_real, format_time, Radix, SigKind, Ticks, Value};
+use crate::engine::query::ValueQuery;
+use crate::waveform::{format_time, Ticks};
 
 impl App {
     /// Open the "Find Value" dialog, pre-filled with the last query.
@@ -24,7 +25,7 @@ impl App {
 
     /// Jump to the next/previous value change matching the stored query.
     pub fn search_value(&mut self, forward: bool) {
-        let Some(query) = self.value_query.clone() else {
+        let Some(query_text) = self.value_query.clone() else {
             self.msg("no value query yet (press 'v' to enter one)");
             return;
         };
@@ -52,14 +53,13 @@ impl App {
             return;
         };
         let radix = self.radix_for(index);
+        let query = ValueQuery::new(&query_text, radix);
         let cursor = self.cursor;
         let count = wf.value_len(index);
         if count == 0 {
             self.msg(format!("{}: no value changes", signal.full_name()));
             return;
         }
-        // Synthesized brace values are joined per time, so they are matched
-        // against the computed text instead of a stored change list.
         let found: Option<Ticks> = if wf.is_synthesized(index) {
             let times = wf.value_times(index);
             let start = if forward {
@@ -71,17 +71,13 @@ impl App {
             if forward {
                 (start..count)
                     .chain(0..start)
-                    .find(|&k| {
-                        at(k).is_some_and(|value| value_matches(&value, signal.kind, radix, &query))
-                    })
+                    .find(|&k| at(k).is_some_and(|value| query.matches(&value, signal.kind)))
                     .map(|k| times[k])
             } else {
                 (0..start)
                     .rev()
                     .chain((start..count).rev())
-                    .find(|&k| {
-                        at(k).is_some_and(|value| value_matches(&value, signal.kind, radix, &query))
-                    })
+                    .find(|&k| at(k).is_some_and(|value| query.matches(&value, signal.kind)))
                     .map(|k| times[k])
             }
         } else {
@@ -90,8 +86,7 @@ impl App {
             } else {
                 signal.changes.partition_point(|c| c.t < cursor)
             };
-            let matches =
-                |k: usize| value_matches(&signal.changes[k].v, signal.kind, radix, &query);
+            let matches = |k: usize| query.matches(&signal.changes[k].v, signal.kind);
             if forward {
                 (start..count)
                     .chain(0..start)
@@ -114,84 +109,22 @@ impl App {
                 self.msg(format!(
                     "{} = {} at {}",
                     name,
-                    query.trim(),
+                    query_text.trim(),
                     format_time(t as f64, &ts)
                 ));
             }
             None => {
                 let name = signal.full_name();
-                self.msg(format!("value '{}' not found in {name}", query.trim()));
+                self.msg(format!("value '{}' not found in {name}", query_text.trim()));
             }
         }
     }
-}
-
-fn value_matches(value: &Value, kind: SigKind, radix: Radix, query: &str) -> bool {
-    match (kind, value) {
-        (SigKind::Bits, Value::Small(..) | Value::Bits(_)) => {
-            // Numeric fast path: avoids formatting every value while
-            // searching through millions of changes.
-            if let Some(number) = query_number(query, radix) {
-                if let Some(found) = crate::waveform::value_number(value) {
-                    return found == number;
-                }
-            }
-            same_value_text(&crate::waveform::fmt_value(value, radix), query)
-        }
-        (SigKind::Real, Value::Real(real)) => query
-            .trim()
-            .parse::<f64>()
-            .map(|q| (q - real).abs() < 1e-9)
-            .unwrap_or_else(|_| fmt_real(*real).eq_ignore_ascii_case(query.trim())),
-        (SigKind::Str, Value::Str(text)) => text.contains(query.trim()),
-        _ => false,
-    }
-}
-
-/// Numeric value of a search query, honouring an optional `h`/`b`/`o`/`d`
-/// prefix and otherwise the row's radix.
-fn query_number(query: &str, radix: Radix) -> Option<u64> {
-    let text = query.trim().replace('_', "");
-    let (base, digits) = match text.as_bytes().first()? {
-        b'h' | b'H' => (16, &text[1..]),
-        b'b' | b'B' => (2, &text[1..]),
-        b'o' | b'O' => (8, &text[1..]),
-        b'd' | b'D' => (10, &text[1..]),
-        _ => (
-            match radix {
-                Radix::Hex => 16,
-                Radix::Oct => 8,
-                Radix::Bin => 2,
-                _ => 10,
-            },
-            text.as_str(),
-        ),
-    };
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    u64::from_str_radix(digits, base).ok()
-}
-
-/// Compare formatted values, allowing the radix prefix to be omitted.
-fn same_value_text(formatted: &str, query: &str) -> bool {
-    let normalize = |s: &str| s.trim().to_ascii_lowercase().replace('_', "");
-    let a = normalize(formatted);
-    let b = normalize(query);
-    if a == b {
-        return true;
-    }
-    let strip = |s: &str| match s.as_bytes().first() {
-        Some(b'b' | b'h' | b'o' | b'd') if s.len() > 1 => s[1..].to_string(),
-        _ => s.to_string(),
-    };
-    strip(&a) == strip(&b)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::query_number;
     use crate::app::tests::app_with;
+    use crate::engine::query::query_number;
     use crate::waveform::Radix;
 
     const VCD: &str = "$timescale 1ns $end\n\

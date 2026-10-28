@@ -8,6 +8,8 @@ pub enum Dialog {
     CreateBus,
     GroupName,
     Settings,
+    BindKey,
+    TopSplit,
     Keys,
     About,
     AddSignals,

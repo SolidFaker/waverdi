@@ -1,4 +1,4 @@
-﻿use crate::app::{Action, App};
+use crate::app::{Action, App};
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use crate::waveform::{TimeBase, TimeScale};
@@ -90,7 +90,7 @@ impl ToolbarCache {
     fn get(&mut self, tb: Rect, app: &App) -> &Self {
         let key = ToolbarKey {
             tb,
-            base: app.time_base,
+            base: app.settings.time_base,
             ts: app.wf.as_ref().map(|wf| wf.ts),
         };
         if self.key == Some(key) {
@@ -179,7 +179,7 @@ pub fn time_menu_rect(tb: Rect, app: &App) -> Rect {
 
 /// Draw the time-base dropdown (on top of the panes).
 pub fn draw_time_menu(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let Some(selected) = app.time_menu else {
         return;
     };
@@ -206,7 +206,7 @@ pub fn run_tool(app: &mut App, tool: Tool) -> bool {
     if tool == Tool::TimeBase {
         let current = TimeBase::CYCLE
             .iter()
-            .position(|base| *base == app.time_base)
+            .position(|base| *base == app.settings.time_base)
             .unwrap_or(0);
         app.time_menu = Some(current);
         return false;
@@ -215,7 +215,7 @@ pub fn run_tool(app: &mut App, tool: Tool) -> bool {
 }
 
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     buf.set_style(l.toolbar, Style::new().bg(t.toolbar_bg));
     let enabled = app.wf.is_some();
     let mut cache = app.toolbar_cache.borrow_mut();

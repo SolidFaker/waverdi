@@ -11,6 +11,7 @@ pub mod text;
 pub mod toolbar;
 pub mod tree;
 pub mod wave;
+pub mod widgets;
 
 use crate::app::App;
 use crate::ui::layout::{compute_layout, Layout};
@@ -23,8 +24,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     app.sync_layout(area);
     app.sync_source();
     app.sync_source_trace();
-    let l = compute_layout(area, app.splits);
-    let t = &app.theme;
+    let l = compute_layout(area, app.settings.splits);
+    let t = &app.settings.theme;
 
     {
         let buf = frame.buffer_mut();
@@ -69,7 +70,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
 /// Vertical divider between the Signal List and the waveforms.
 fn draw_divider(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let fg = if app.focus == crate::app::Focus::Tree {
         t.panel_border
     } else {
@@ -302,11 +303,11 @@ mod tests {
         // Row 0 is the group header; clk is selected and data is multi-selected.
         assert_eq!(
             buffer.cell((l.list.x + 2, l.list.y + 3)).unwrap().bg,
-            crate::theme::Theme::DARK.row_sel_bg
+            crate::settings::theme::Theme::DARK.row_sel_bg
         );
         assert_eq!(
             buffer.cell((l.list.x + 2, l.list.y + 4)).unwrap().bg,
-            crate::theme::Theme::DARK.multi_sel_bg
+            crate::settings::theme::Theme::DARK.multi_sel_bg
         );
     }
 
@@ -576,6 +577,26 @@ mod tests {
     }
 
     #[test]
+    fn wave_label_overflow_can_hide_or_ellipsize() {
+        let vcd = "$timescale 1ns $end\n\
+            $var reg 32 ! data $end\n\
+            $enddefinitions $end\n\
+            #0\nh12345678 !\n#5\nh2 !\n#100\nh3 !\n";
+        let out = vcd::parse_bytes(vcd.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.set_display(vec![0]);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 120, 30));
+        app.t0 = 0.0;
+        app.scale = 1.0;
+        let hidden = render_app(&mut app, 120, 30);
+        assert!(!hidden.contains("h12…"), "{hidden}");
+        app.settings.general.wave_overflow = crate::settings::WaveValueOverflow::Ellipsize;
+        let clipped = render_app(&mut app, 120, 30);
+        assert!(clipped.contains("h12…"), "{clipped}");
+    }
+
+    #[test]
     fn add_signals_dialog_renders() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();
@@ -699,17 +720,17 @@ mod tests {
         app.focus = crate::app::Focus::List;
         assert_eq!(
             pane_color(&mut app, l.list.x + 1, l.list.y),
-            crate::theme::Theme::DARK.accent
+            crate::settings::theme::Theme::DARK.accent
         );
         app.focus = crate::app::Focus::Wave;
         assert_eq!(
             pane_color(&mut app, l.nwave.x + 1, l.nwave.y),
-            crate::theme::Theme::DARK.accent
+            crate::settings::theme::Theme::DARK.accent
         );
         app.focus = crate::app::Focus::Tree;
         assert_eq!(
             pane_color(&mut app, l.tree.x, l.tree.y),
-            crate::theme::Theme::DARK.accent
+            crate::settings::theme::Theme::DARK.accent
         );
     }
 
@@ -720,7 +741,7 @@ mod tests {
         app.apply_parsed("<test>", out);
         app.set_display(vec![0]);
         app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
-        app.time_base = crate::waveform::TimeBase::Ps;
+        app.settings.time_base = crate::waveform::TimeBase::Ps;
         app.t0 = 1000.0;
         app.scale = 1.0;
         let screen = render_app(&mut app, 100, 30);
@@ -741,7 +762,7 @@ mod tests {
         app.apply_parsed("<test>", out);
         app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
         app.set_display(vec![0]);
-        app.set_theme_kind(crate::theme::ThemeKind::Mixed);
+        app.set_theme_kind(crate::settings::theme::ThemeKind::Mixed);
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| super::render(f, &mut app)).unwrap();
@@ -750,21 +771,21 @@ mod tests {
         // Dark waveform canvas, light Signal List header.
         assert_eq!(
             buffer.cell((l.wave.x + 1, l.wave.bottom() - 1)).unwrap().bg,
-            crate::theme::Theme::DARK.bg
+            crate::settings::theme::Theme::DARK.bg
         );
         assert_eq!(
             buffer.cell((l.list.x + 1, l.list.y)).unwrap().bg,
-            crate::theme::Theme::LIGHT.list_header_bg
+            crate::settings::theme::Theme::LIGHT.list_header_bg
         );
         // Other panes keep light backgrounds: the Signal List uses the light
         // alternate row colour while the waveform rows stay dark.
         assert_eq!(
             buffer.cell((l.list.x + 2, l.list.y + 2)).unwrap().bg,
-            crate::theme::Theme::LIGHT.row_alt
+            crate::settings::theme::Theme::LIGHT.row_alt
         );
         assert_eq!(
             buffer.cell((l.rows.x + 2, l.rows.y)).unwrap().bg,
-            crate::theme::Theme::DARK.bg
+            crate::settings::theme::Theme::DARK.bg
         );
     }
 
@@ -775,14 +796,17 @@ mod tests {
         app.apply_parsed("<test>", out);
         app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
         app.set_display(vec![1]);
-        app.splits.value_pct = crate::ui::layout::Splits::MIN_VALUE_PCT;
+        app.settings.splits.value_pct = crate::ui::layout::Splits::MIN_VALUE_PCT;
         app.cursor = 5; // data 0 -> 5: the Value cell shows the transition
         let screen = render_app(&mut app, 100, 30);
         let l = app.layout();
         let lines: Vec<Vec<char>> = screen.lines().map(|line| line.chars().collect()).collect();
         let row = &lines[(l.list.y + 3) as usize]; // G0 header then the data row
         assert_eq!(row[l.list_grip_x() as usize], '│');
-        assert_eq!(row[l.value_grip_x(app.splits.value_pct) as usize], '│');
+        assert_eq!(
+            row[l.value_grip_x(app.settings.splits.value_pct) as usize],
+            '│'
+        );
     }
 
     #[test]
@@ -802,12 +826,12 @@ mod tests {
         terminal.draw(|f| super::render(f, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
         let l = app.layout();
-        let theme = crate::theme::Theme::DARK;
+        let theme = crate::settings::theme::Theme::DARK;
         let fg = |x: u16, y: u16| buffer.cell((x, y)).unwrap().fg;
         // Signal List value column: the G0 header row then the data row, the
         // value starting one cell right of the grip.
         let y = l.list.y + 3;
-        let x = l.value_grip_x(app.splits.value_pct) + 1;
+        let x = l.value_grip_x(app.settings.splits.value_pct) + 1;
         assert_eq!(buffer.cell((x, y)).unwrap().symbol(), "h");
         assert_eq!(fg(x, y), theme.value);
         assert_eq!(buffer.cell((x + 1, y)).unwrap().symbol(), "z");
@@ -845,7 +869,7 @@ mod tests {
         terminal.draw(|f| super::render(f, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
         let l = app.layout();
-        let theme = crate::theme::Theme::DARK;
+        let theme = crate::settings::theme::Theme::DARK;
         let y = l.rows.y + 1;
         let fg = |col: u16| buffer.cell((l.rows.x + col, y)).unwrap().fg;
         let symbol = |col: u16| {
@@ -899,7 +923,7 @@ mod tests {
         terminal.draw(|f| super::render(f, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
         let l = app.layout();
-        let theme = crate::theme::Theme::DARK;
+        let theme = crate::settings::theme::Theme::DARK;
         let y = l.rows.y + 1;
         let fg = |col: u16| buffer.cell((l.rows.x + col, y)).unwrap().fg;
         assert_eq!(fg(2), theme.bus);
@@ -914,7 +938,7 @@ mod tests {
         let mut app = App::new();
         app.apply_parsed("<test>", out);
         app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
-        app.set_theme_kind(crate::theme::ThemeKind::Light);
+        app.set_theme_kind(crate::settings::theme::ThemeKind::Light);
         app.open_dialog(crate::app::Dialog::Keys);
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -923,7 +947,7 @@ mod tests {
         let area = super::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::Keys);
         assert_eq!(
             buffer.cell((area.x + 2, area.y + 2)).unwrap().bg,
-            crate::theme::Theme::LIGHT.popup_bg
+            crate::settings::theme::Theme::LIGHT.popup_bg
         );
     }
 
@@ -934,7 +958,7 @@ mod tests {
         app.apply_parsed("<test>", out);
         app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
         app.set_display(vec![0]);
-        app.set_theme_kind(crate::theme::ThemeKind::Mixed);
+        app.set_theme_kind(crate::settings::theme::ThemeKind::Mixed);
         app.open_dialog(crate::app::Dialog::Keys);
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -950,8 +974,8 @@ mod tests {
         let wave = buffer.cell((l.wave.right() - 2, l.wave.y + 2)).unwrap().bg;
         let list = buffer.cell((l.list.x + 1, l.list.y)).unwrap().bg;
         assert!(lum(wave) < lum(list), "wave {wave:?} vs list {list:?}");
-        assert_ne!(wave, crate::theme::Theme::LIGHT.popup_bg);
-        assert!(lum(wave) < lum(crate::theme::Theme::DARK.bg) + 32);
+        assert_ne!(wave, crate::settings::theme::Theme::LIGHT.popup_bg);
+        assert!(lum(wave) < lum(crate::settings::theme::Theme::DARK.bg) + 32);
     }
 
     #[test]
@@ -1026,13 +1050,16 @@ mod tests {
         let count_cell = buffer
             .cell((rect.x + gutter + col as u16, rect.y + 2))
             .unwrap();
-        assert_eq!(count_cell.bg, crate::theme::Theme::DARK.src_signal);
+        assert_eq!(
+            count_cell.bg,
+            crate::settings::theme::Theme::DARK.src_signal
+        );
         // The neighbouring signal on the same line is not selected.
         let next_col = view.lines[2].find("next").unwrap();
         let next_cell = buffer
             .cell((rect.x + gutter + next_col as u16, rect.y + 2))
             .unwrap();
-        assert_ne!(next_cell.bg, crate::theme::Theme::DARK.src_signal);
+        assert_ne!(next_cell.bg, crate::settings::theme::Theme::DARK.src_signal);
     }
 
     #[test]
@@ -1116,6 +1143,38 @@ mod tests {
     }
 
     #[test]
+    fn settings_dialog_renders_categories_items_and_effective_shortcuts() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.open_settings();
+        let general = render_app(&mut app, 100, 30);
+        for text in [
+            "General",
+            "Theme",
+            "UI Colours",
+            "Waveform Colours",
+            "Key Bindings",
+            "bus split max bits",
+            "wave label ellipsis",
+            "[ ] full hierarchical names",
+            "ts ▾",
+            "top pane ratio",
+            "[ Reset ]",
+            "[ Close ]",
+        ] {
+            assert!(general.contains(text), "missing {text}: {general}");
+        }
+        app.set_settings_category(crate::settings::SettingsCategory::Theme);
+        let theme = render_app(&mut app, 100, 30);
+        assert!(theme.contains("(●) Dark"), "{theme}");
+        app.set_settings_category(crate::settings::SettingsCategory::KeyBindings);
+        let keys = render_app(&mut app, 100, 30);
+        assert!(keys.contains("zoom in"), "{keys}");
+        assert!(keys.contains("z / = / +"), "{keys}");
+    }
+
+    #[test]
     fn dialogs_render_on_small_screens() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();
@@ -1128,6 +1187,7 @@ mod tests {
                 crate::app::Dialog::SplitBus,
                 crate::app::Dialog::CreateBus,
                 crate::app::Dialog::GroupName,
+                crate::app::Dialog::Settings,
                 crate::app::Dialog::Keys,
                 crate::app::Dialog::About,
             ] {
@@ -1203,8 +1263,8 @@ mod tests {
         let y = root.y + 1;
         let left = buffer.cell((root.x + 1, y)).unwrap();
         let right = buffer.cell((root.right() - 2, y)).unwrap();
-        assert_eq!(left.bg, crate::theme::Theme::DARK.accent);
-        assert_eq!(right.bg, crate::theme::Theme::DARK.accent);
+        assert_eq!(left.bg, crate::settings::theme::Theme::DARK.accent);
+        assert_eq!(right.bg, crate::settings::theme::Theme::DARK.accent);
         // No name/title on the top border any more.
         let top: String = (root.x..root.right())
             .map(|x| buffer.cell((x, root.y)).unwrap().symbol())
@@ -1238,7 +1298,7 @@ mod tests {
         terminal.draw(|f| super::render(f, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
         let l = app.layout();
-        let grip = l.value_grip_x(app.splits.value_pct);
+        let grip = l.value_grip_x(app.settings.splits.value_pct);
         let row = |y: u16| -> String {
             (l.list.x..grip)
                 .map(|x| buffer.cell((x, y)).map(|cell| cell.symbol()).unwrap_or(" "))
@@ -1369,8 +1429,8 @@ endmodule
             let x = code.x + super::source::gutter_width(view);
             buffer.cell((x, y)).unwrap().fg
         };
-        assert_eq!(line_fg(dead), crate::theme::Theme::DARK.dim);
-        assert_ne!(line_fg(live), crate::theme::Theme::DARK.dim);
+        assert_eq!(line_fg(dead), crate::settings::theme::Theme::DARK.dim);
+        assert_ne!(line_fg(live), crate::settings::theme::Theme::DARK.dim);
     }
 
     #[test]
@@ -1391,7 +1451,7 @@ endmodule
         terminal.draw(|f| super::render(f, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
         let l = app.layout();
-        let grip = l.value_grip_x(app.splits.value_pct);
+        let grip = l.value_grip_x(app.settings.splits.value_pct);
         let y = l.list.y + 3; // G0 header, the signal row
         let cell_fg = |symbol: &str| {
             (l.list.x..grip)
@@ -1400,9 +1460,9 @@ endmodule
                 .map(|cell| cell.fg)
         };
         // `tb.dut.clk`: the path is dim, the name keeps the signal colour.
-        assert_eq!(cell_fg("t"), Some(crate::theme::Theme::DARK.dim));
-        assert_eq!(cell_fg("d"), Some(crate::theme::Theme::DARK.dim));
-        assert_eq!(cell_fg("k"), Some(crate::theme::Theme::DARK.name));
+        assert_eq!(cell_fg("t"), Some(crate::settings::theme::Theme::DARK.dim));
+        assert_eq!(cell_fg("d"), Some(crate::settings::theme::Theme::DARK.dim));
+        assert_eq!(cell_fg("k"), Some(crate::settings::theme::Theme::DARK.name));
     }
 
     #[test]
@@ -1430,7 +1490,7 @@ endmodule
         let buffer = terminal.backend().buffer();
         let l = app.layout();
         let inner = super::layout::tree_inner(&l);
-        let (_, sep_x, _) = super::tree::columns(inner, app.splits.hier_pct);
+        let (_, sep_x, _) = super::tree::columns(inner, app.settings.splits.hier_pct);
         // The divider reaches the bottom row of the pane.
         assert_eq!(
             buffer.cell((sep_x, inner.bottom() - 1)).unwrap().symbol(),

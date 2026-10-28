@@ -4,10 +4,12 @@ mod browser;
 mod context;
 mod dialog;
 mod input;
+pub(crate) mod keymap;
 mod keys;
 mod load;
 mod mouse;
 mod nav;
+mod preferences;
 mod value;
 mod view;
 
@@ -22,14 +24,20 @@ pub use keys::handle_key;
 pub use load::{LoadEvent, LoadJob};
 pub use mouse::handle_mouse;
 pub use nav::{Group, ListRow};
+pub use preferences::{SettingRow, SettingsPane};
 
 use crate::dump::source::Capabilities;
+use crate::engine::wave::WaveRowCache;
 use crate::rtl::{RtlDb, SourceSet, SourceView};
-use crate::theme::{Theme, ThemeKind, UiSetting, WaveSetting};
-use crate::ui::layout::{compute_layout, Layout, Splits};
+#[cfg(test)]
+pub(crate) use crate::settings::Splits;
+use crate::settings::{GeneralSetting, SettingId, Settings, SettingsCategory, ThemeKind};
+#[cfg(test)]
+use crate::settings::{UiSetting, WaveSetting};
+use crate::ui::layout::{compute_layout, Layout};
 use crate::ui::status::StatusCache;
 use crate::ui::toolbar::ToolbarCache;
-use crate::ui::wave::WaveRowCache;
+use crate::ui::widgets::DropdownState;
 use crate::waveform::{Radix, Ticks, TimeBase, Waveform};
 use ratatui::layout::Rect;
 use std::cell::RefCell;
@@ -49,13 +57,19 @@ type PaneCache<T> = RefCell<Option<(u64, Rc<Vec<T>>)>>;
 /// scrollbar both read it, so each signal is formatted once per key.
 struct ListValueCache {
     key: (Ticks, u64, u64, u64),
-    values: Vec<Option<(Rc<str>, usize)>>,
+    values: HashMap<usize, (Rc<str>, usize)>,
+    max_width: Option<usize>,
 }
 
-/// Brace labels of one synthesized waveform row, valid for one zoom window.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum WaveLabelKey {
+    Time(Ticks),
+    Change(usize),
+}
+
 struct WaveRowLabels {
-    key: (u64, u64, u16, u64, u64),
-    labels: HashMap<Ticks, (Rc<str>, usize)>,
+    key: (u64, u64),
+    labels: HashMap<WaveLabelKey, (Rc<str>, usize)>,
 }
 
 /// Match list of the Find dialog, keyed by the query text and the waveform.
@@ -114,6 +128,7 @@ pub(crate) enum DragMode {
     SourceHScroll,
     ListHScroll,
     DialogScroll,
+    SettingsSlider(GeneralSetting),
     /// Dragging the scrollbar of one "Add Signals" picker pane.
     AddScroll(AddFocus),
     SplitTree,
@@ -193,8 +208,6 @@ pub struct App {
     pub t0: f64,
     pub scale: f64,
     pub cursor: Ticks,
-    /// Time base of the ruler and status readouts (timescale by default).
-    pub time_base: TimeBase,
     /// Open time-base dropdown: highlighted entry index.
     pub time_menu: Option<usize>,
     pub range: Option<(Ticks, Ticks)>,
@@ -209,7 +222,8 @@ pub struct App {
     pub find_sel: usize,
     pub radix: HashMap<usize, Radix>,
     pub last_click: Option<(u16, u16, Instant)>,
-    pub splits: Splits,
+    /// Theme, pane proportions and time base shared across waveform loads.
+    pub settings: Settings,
     /// Per-signal analog rendering range; presence means "show as analog".
     pub analog: HashMap<usize, (f64, f64)>,
     /// Per-signal highlight background chosen from the context menu.
@@ -231,11 +245,12 @@ pub struct App {
     pub browser: Option<FileBrowser>,
     /// What the next file-dialog pick should load.
     pub(crate) browser_mode: BrowserMode,
-    /// Active colour scheme.
-    pub theme: Theme,
-    pub theme_kind: ThemeKind,
-    /// Selected row of the settings dialog (0 = theme, rest = waveform colours).
+    /// Selected row in the settings schema; dialog navigation owns this state.
     pub settings_sel: usize,
+    pub settings_category: SettingsCategory,
+    pub settings_pane: SettingsPane,
+    pub key_capture: Option<usize>,
+    pub time_dropdown: DropdownState,
     /// RTL sources for the Source pane (filelist or discovered from the dump).
     pub sources: Option<SourceSet>,
     /// Parsed RTL modules of `sources` (declaration/driver/load lines).
@@ -265,6 +280,7 @@ pub struct App {
     /// Bumped whenever a new RTL database is installed.
     rtl_version: u64,
     list_value_cache: RefCell<Option<ListValueCache>>,
+    list_name_cache: RefCell<Option<(u64, bool, usize)>>,
     wave_labels: RefCell<HashMap<usize, WaveRowLabels>>,
     /// Sampled waveform rows, reused across overlay-only redraws.
     wave_rows: RefCell<WaveRowCache>,
@@ -316,7 +332,6 @@ impl App {
             t0: 0.0,
             scale: 1.0,
             cursor: 0,
-            time_base: TimeBase::Scale,
             time_menu: None,
             range: None,
             dragging: None,
@@ -329,7 +344,7 @@ impl App {
             find_sel: 0,
             radix: HashMap::new(),
             last_click: None,
-            splits: Splits::default(),
+            settings: Settings::default(),
             analog: HashMap::new(),
             highlight: HashMap::new(),
             source_highlight: HashMap::new(),
@@ -341,9 +356,11 @@ impl App {
             use_gui: crate::picker::detect_gui(),
             browser: None,
             browser_mode: BrowserMode::Waveform,
-            theme: Theme::DARK,
-            theme_kind: ThemeKind::Dark,
             settings_sel: 0,
+            settings_category: SettingsCategory::General,
+            settings_pane: SettingsPane::Items,
+            key_capture: None,
+            time_dropdown: DropdownState::default(),
             sources: None,
             rtl: None,
             source_view: None,
@@ -359,6 +376,7 @@ impl App {
             waveform_version: 0,
             rtl_version: 0,
             list_value_cache: RefCell::new(None),
+            list_name_cache: RefCell::new(None),
             wave_labels: RefCell::new(HashMap::new()),
             wave_rows: RefCell::new(WaveRowCache::default()),
             status_cache: RefCell::new(StatusCache::new()),
@@ -420,7 +438,7 @@ impl App {
     }
 
     pub fn layout(&self) -> Layout {
-        compute_layout(self.last_area, self.splits)
+        compute_layout(self.last_area, self.settings.splits)
     }
 
     pub fn cols(&self) -> usize {
@@ -756,7 +774,7 @@ impl App {
         self.groups = vec![Group::new(0)];
         self.touch_panes();
         self.sel_row = None;
-        self.show_full_names = false;
+        self.show_full_names = self.settings.general.full_names;
         self.selection.clear();
         self.sel_anchor = None;
         self.pending_g = false;
@@ -1693,15 +1711,8 @@ impl App {
     /// Re-format the brace values of array signals with the current radixes.
     fn refresh_arrays(&mut self) {
         let radix = std::mem::take(&mut self.radix);
-        // Brace values are synthesized on demand, so the local refresh only
-        // records the overrides (the UI computes them from its own members)
-        // and drops the cached transition times. A live backend additionally
-        // refreshes the shared waveform off the UI thread.
         if let Some(wf) = self.wf.as_mut() {
             wf.rebuild_array_texts(&radix);
-        }
-        if let Some(job) = &self.load {
-            job.request_rebuild(radix.clone());
         }
         self.radix = radix;
     }
@@ -1869,7 +1880,7 @@ impl App {
 
     /// Label of the current time base for the shortcut bar.
     pub fn time_base_label(&self) -> String {
-        match self.time_base {
+        match self.settings.time_base {
             TimeBase::Scale => self
                 .wf
                 .as_ref()
@@ -1881,70 +1892,80 @@ impl App {
 
     /// Select an explicit ruler time base from the shortcut-bar dropdown.
     pub fn set_time_base(&mut self, base: TimeBase) {
-        self.time_base = base;
+        self.settings.time_base = base;
+        self.time_dropdown.selected = TimeBase::CYCLE
+            .iter()
+            .position(|candidate| *candidate == base)
+            .unwrap_or(0);
         self.time_menu = None;
         let label = self.time_base_label();
         self.msg(format!("time base: {label}"));
     }
 
     /// Switch the colour scheme, dropping any per-colour customisation.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_theme_kind(&mut self, kind: ThemeKind) {
-        self.theme_kind = kind;
-        self.theme = kind.theme();
+        self.settings.set_theme_kind(kind);
         self.msg(format!("theme: {}", kind.name()));
     }
 
-    /// Cycle the colour scheme from the settings dialog.
-    pub fn cycle_theme(&mut self, delta: i64) {
-        let count = ThemeKind::ALL.len() as i64;
-        let index = ThemeKind::ALL
-            .iter()
-            .position(|kind| *kind == self.theme_kind)
-            .unwrap_or(0) as i64;
-        let next = (index + delta).rem_euclid(count) as usize;
-        self.set_theme_kind(ThemeKind::ALL[next]);
+    pub fn cycle_setting(&mut self, setting: SettingId, delta: i64) {
+        match setting {
+            SettingId::Theme => {
+                let current = ThemeKind::ALL
+                    .iter()
+                    .position(|kind| *kind == self.settings.theme_kind)
+                    .unwrap_or(0);
+                let code = if delta < 0 {
+                    crossterm::event::KeyCode::Left
+                } else {
+                    crossterm::event::KeyCode::Right
+                };
+                let key =
+                    crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+                if let Some(next) =
+                    crate::ui::widgets::RadioGroup::handle_key(current, ThemeKind::ALL.len(), key)
+                {
+                    self.set_theme_kind(ThemeKind::ALL[next]);
+                }
+            }
+            SettingId::General(GeneralSetting::TimeBase) => {
+                let count = TimeBase::CYCLE.len() as i64;
+                let next = (self.time_dropdown.selected as i64 + delta).rem_euclid(count) as usize;
+                self.set_time_base(TimeBase::CYCLE[next]);
+            }
+            SettingId::General(GeneralSetting::WaveOverflow) => {
+                let current = self.settings.general.wave_overflow
+                    == crate::settings::WaveValueOverflow::Ellipsize;
+                let key = crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Enter,
+                    crossterm::event::KeyModifiers::NONE,
+                );
+                let next = crate::ui::widgets::Toggle::changed(current, key).unwrap_or(current);
+                self.set_general_value(GeneralSetting::WaveOverflow, next as usize);
+            }
+            SettingId::General(GeneralSetting::FullNames) => {
+                let current = self.settings.general.full_names;
+                let key = crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(' '),
+                    crossterm::event::KeyModifiers::NONE,
+                );
+                let next = crate::ui::widgets::Checkbox::changed(current, key).unwrap_or(current);
+                self.set_general_value(GeneralSetting::FullNames, next as usize);
+            }
+            _ => self.settings.cycle(setting, delta),
+        }
     }
 
-    /// Cycle one waveform colour through the built-in palette.
-    pub fn cycle_wave_setting(&mut self, setting: WaveSetting, delta: i64) {
-        let color = crate::theme::cycle_color(setting.get(&self.theme), delta);
-        setting.set(&mut self.theme, color);
-    }
-
-    /// Restore the waveform colour to the value of the active theme.
-    pub fn reset_wave_setting(&mut self, setting: WaveSetting) {
-        let base = self.theme_kind.theme();
-        setting.set(&mut self.theme, setting.get(&base));
-    }
-
-    /// Cycle a general UI colour through the built-in palette.
-    pub fn cycle_ui_setting(&mut self, setting: UiSetting, delta: i64) {
-        let color = crate::theme::cycle_color(setting.get(&self.theme), delta);
-        setting.set(&mut self.theme, color);
-    }
-
-    /// Restore a general UI colour to the value of the active theme.
-    pub fn reset_ui_setting(&mut self, setting: UiSetting) {
-        let base = self.theme_kind.theme();
-        setting.set(&mut self.theme, setting.get(&base));
-    }
-
-    /// Settings dialog rows: theme, UI colours, then waveform colours.
-    pub fn settings_len(&self) -> usize {
-        1 + UiSetting::ALL.len() + WaveSetting::ALL.len()
-    }
-
-    /// UI colour shown on a settings row, if the row is a UI colour.
-    pub fn settings_ui(&self, row: usize) -> Option<UiSetting> {
-        row.checked_sub(1)
-            .filter(|index| *index < UiSetting::ALL.len())
-            .and_then(|index| UiSetting::ALL.get(index).copied())
-    }
-
-    /// Waveform colour shown on a settings row, if the row is one.
-    pub fn settings_setting(&self, row: usize) -> Option<WaveSetting> {
-        row.checked_sub(1 + UiSetting::ALL.len())
-            .and_then(|index| WaveSetting::ALL.get(index).copied())
+    pub fn reset_setting(&mut self, setting: SettingId) {
+        if setting == SettingId::General(GeneralSetting::TimeBase) {
+            self.set_time_base(TimeBase::Scale);
+        } else {
+            self.settings.reset(setting);
+        }
+        if setting == SettingId::General(GeneralSetting::FullNames) {
+            self.show_full_names = self.settings.general.full_names;
+        }
     }
 
     /// Test helper: install a flat display list owned by the first group.
@@ -2271,33 +2292,77 @@ endmodule
 
     #[test]
     fn theme_switching_and_wave_colour_customisation() {
-        use crate::theme::{Theme, ThemeKind, WaveSetting};
+        use crate::settings::{Theme, ThemeKind, UiSetting, WaveSetting};
         let mut app =
             app_with("$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n#0\n0!\n");
-        assert_eq!(app.theme_kind, ThemeKind::Dark);
-        app.cycle_theme(1);
-        assert_eq!(app.theme_kind, ThemeKind::Light);
-        assert_eq!(app.theme.bg, Theme::LIGHT.bg);
+        assert_eq!(app.settings.theme_kind, ThemeKind::Dark);
+        app.cycle_setting(SettingId::Theme, 1);
+        assert_eq!(app.settings.theme_kind, ThemeKind::Light);
+        assert_eq!(app.settings.theme.bg, Theme::LIGHT.bg);
         // The UI background and the waveform background are separate settings.
-        app.cycle_ui_setting(crate::theme::UiSetting::Background, 1);
-        assert_ne!(app.theme.bg, Theme::LIGHT.bg);
-        assert_eq!(app.theme.wave_bg, Theme::LIGHT.wave_bg);
-        app.reset_ui_setting(crate::theme::UiSetting::Background);
-        assert_eq!(app.theme.bg, Theme::LIGHT.bg);
+        app.cycle_setting(SettingId::Ui(UiSetting::Background), 1);
+        assert_ne!(app.settings.theme.bg, Theme::LIGHT.bg);
+        assert_eq!(app.settings.theme.wave_bg, Theme::LIGHT.wave_bg);
+        app.reset_setting(SettingId::Ui(UiSetting::Background));
+        assert_eq!(app.settings.theme.bg, Theme::LIGHT.bg);
         // A custom waveform colour is applied and can be reset.
-        app.cycle_wave_setting(WaveSetting::High, 1);
-        assert_ne!(app.theme.high, Theme::LIGHT.high);
-        app.reset_wave_setting(WaveSetting::High);
-        assert_eq!(app.theme.high, Theme::LIGHT.high);
+        app.cycle_setting(SettingId::Wave(WaveSetting::High), 1);
+        assert_ne!(app.settings.theme.high, Theme::LIGHT.high);
+        app.reset_setting(SettingId::Wave(WaveSetting::High));
+        assert_eq!(app.settings.theme.high, Theme::LIGHT.high);
         // Mixed keeps light chrome with a dark waveform.
-        app.cycle_theme(1); // Light -> Mixed
-        assert_eq!(app.theme_kind, ThemeKind::Mixed);
-        assert_eq!(app.theme.bg, Theme::LIGHT.bg);
-        assert_eq!(app.theme.wave_bg, Theme::DARK.bg);
-        assert_eq!(app.theme.high, Theme::DARK.high);
+        app.cycle_setting(SettingId::Theme, 1); // Light -> Mixed
+        assert_eq!(app.settings.theme_kind, ThemeKind::Mixed);
+        assert_eq!(app.settings.theme.bg, Theme::LIGHT.bg);
+        assert_eq!(app.settings.theme.wave_bg, Theme::DARK.bg);
+        assert_eq!(app.settings.theme.high, Theme::DARK.high);
         // The cycle wraps back to dark.
-        app.cycle_theme(1);
-        assert_eq!(app.theme_kind, ThemeKind::Dark);
+        app.cycle_setting(SettingId::Theme, 1);
+        assert_eq!(app.settings.theme_kind, ThemeKind::Dark);
+    }
+
+    #[test]
+    fn colour_changes_keep_the_waveform_sampling_cache() {
+        let mut app =
+            app_with("$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n#0\n0!\n");
+        let layout = app.layout();
+        let sampled = app.wave_row(0, &layout, (0.0, 0.0), Vec::new);
+        for setting in [
+            SettingId::Ui(UiSetting::Background),
+            SettingId::Wave(WaveSetting::High),
+            SettingId::Theme,
+        ] {
+            app.cycle_setting(setting, 1);
+            let cached = app.wave_row(0, &layout, (0.0, 0.0), || {
+                panic!("colour change invalidated waveform samples")
+            });
+            assert!(Rc::ptr_eq(&sampled, &cached));
+        }
+    }
+
+    #[test]
+    fn waveform_install_preserves_settings() {
+        let mut app =
+            app_with("$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n#0\n0!\n");
+        app.set_theme_kind(ThemeKind::Light);
+        app.cycle_setting(SettingId::Ui(UiSetting::Background), 1);
+        app.settings.splits.top_pct = 42;
+        app.settings.splits.value_pct = 33;
+        app.time_menu = Some(1);
+        app.set_time_base(TimeBase::Us);
+        assert_eq!(app.time_menu, None);
+        assert_eq!(
+            app.messages.last().map(String::as_str),
+            Some("time base: us")
+        );
+        let expected = app.settings.clone();
+
+        let out = crate::vcd::parse_bytes(
+            b"$timescale 1ps $end\n$var wire 1 ! next $end\n$enddefinitions $end\n#0\n1!\n",
+        )
+        .unwrap();
+        app.apply_waveform("<next>".to_string(), out.wf, out.warnings);
+        assert_eq!(app.settings, expected);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use std::rc::Rc;
 
 pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let focused = app.focus == Focus::List;
     let header = Rect {
         x: l.list.x,
@@ -24,8 +24,8 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
         Style::new().fg(t.text).add_modifier(Modifier::BOLD)
     };
     buf.set_string(l.list.x, l.list.y, " Signal List", title_style);
-    let value_w = l.value_col_width(app.splits.value_pct);
-    let grip = l.value_grip_x(app.splits.value_pct);
+    let value_w = l.value_col_width(app.settings.splits.value_pct);
+    let grip = l.value_grip_x(app.settings.splits.value_pct);
     text::put(
         buf,
         grip + 1,
@@ -42,6 +42,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
 
     let rows = app.list_rows();
     let scroll = app.row_scroll.min(rows.len().saturating_sub(l.rows_h));
+    let name_content = app.list_content_width();
     let value_content = app.value_content_width();
     for visible in 0..l.rows_h {
         let k = scroll + visible;
@@ -129,7 +130,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
                 // Right-aligned by default; the horizontal scrollbar shifts
                 // the names to reveal the hierarchy of long names.
                 let width = name_width(l, value_w);
-                let content_w = app.list_content_width().max(width);
+                let content_w = name_content.max(width);
                 let h = app.list_h_scroll.min(content_w - width);
                 let full_text = format!("{indent}{prefix}{leaf}");
                 let full_len = full_text.chars().count();
@@ -210,21 +211,26 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     for y in (l.list.y + 2 + l.rows_h as u16)..l.list.bottom() {
         text::set_cell(buf, grip, y, "│", border, t.bg);
     }
-    draw_h_scrollbar(buf, l, app);
+    draw_h_scrollbar(buf, l, app, name_content, value_content);
 }
 
 /// Horizontal scrollbars of the Signal List: names (left) and values (right),
 /// aligned with the waveform scrollbar.
-fn draw_h_scrollbar(buf: &mut Buffer, l: &Layout, app: &App) {
-    let t = &app.theme;
+fn draw_h_scrollbar(
+    buf: &mut Buffer,
+    l: &Layout,
+    app: &App,
+    name_content: usize,
+    value_content: usize,
+) {
+    let t = &app.settings.theme;
     if l.list.height == 0 {
         return;
     }
-    let value_w = l.value_col_width(app.splits.value_pct);
+    let value_w = l.value_col_width(app.settings.splits.value_pct);
     let name_w = name_width(l, value_w);
-    let grip = l.value_grip_x(app.splits.value_pct);
+    let grip = l.value_grip_x(app.settings.splits.value_pct);
     let y = l.list.bottom().saturating_sub(1);
-    let name_content = app.list_content_width();
     let name_max = name_content.saturating_sub(name_w);
     scrollbar::h_scrollbar(
         buf,
@@ -237,7 +243,6 @@ fn draw_h_scrollbar(buf: &mut Buffer, l: &Layout, app: &App) {
         t.dim,
         t.bg,
     );
-    let value_content = app.value_content_width();
     let value_max = value_content.saturating_sub(value_w);
     scrollbar::h_scrollbar(
         buf,

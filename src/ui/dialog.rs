@@ -1,5 +1,6 @@
-use crate::app::{App, Dialog, EntryKind};
-use crate::theme::{color_name, Theme};
+use crate::app::{keymap, App, Dialog, EntryKind};
+use crate::settings::theme::Theme;
+use crate::settings::KeymapSettings;
 use crate::ui::layout::Layout;
 use crate::ui::text;
 use ratatui::buffer::Buffer;
@@ -8,54 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Widget as _};
 use ratatui::Frame;
-use std::sync::LazyLock;
-
-const KEYS: &[&str] = &[
-    "General   q quit   o open (system dialog when available)",
-    "          O open browser   : goto time   g: ge / gg / G",
-    "          s search signal   F1 / ? help   F2 settings",
-    "          F2 settings: theme + waveform colours",
-    "          -f filelist / File>Load Filelist: RTL sources",
-    "          Shift+A add signals (hierarchy picker)",
-    "Add       Tab cycle panes   ↑ ↓ select   Space toggle",
-    "          Tree: Space opens a scope, ← → folds it",
-    "          Instances: Enter opens it; f cycles the filter",
-    "          a applies, Enter applies and closes, Esc cancels",
-    "Search    v find value (hex/bin/oct/dec/ascii text)",
-    "          n / N next / previous match (wraps around)",
-    "View      z / Z / - / = zoom   f fit   c center",
-    "          h / l move cursor   ← → / Shift+← → x10",
-    "          j / k next / previous row   gg / G first / last",
-    "          J / K move signal / group down / up   Space select",
-    "          w / b next / previous edge (1-bit: rising)",
-    "          e / ge next / previous falling edge",
-    "          0 / $ start / end of time   , / . prev / next change",
-    "          Time button in the nWave bar cycles the time base",
-    "          Home / End start / end   Tab cycle focus",
-    "Source    j / k / h / l move   Enter / a adds the signal",
-    "          ⇧↑↓ or drag select   Ctrl+W adds the selection",
-    "          double click picks a name   right-click: add",
-    "Signals   V visual   dd cut   p paste   x cut (nWave)",
-    "          Esc clear   r cycle radix / rename group",
-    "          h full names (Signal List)   right-click: menu",
-    "          Shift/Alt/Space multi-select   Ctrl+click range",
-    "Groups    new signals go to the cursor group; G0 is the default",
-    "          adding to the newest group appends a fresh group",
-    "          Enter / ← → collapse / expand   r: rename group",
-    "          right-click: New Group / Rename / Expand / Remove",
-    "          ↑ ↓ / PgUp PgDn navigate lists",
-    "Mouse     menus / toolbar: click to execute",
-    "          drag pane borders: resize panes",
-    "          drag scrollbars: scroll / pan time",
-    "          drag list rows: reorder signals",
-    "          Instance: click selects, double click folds a scope",
-    "          Source: drag selects lines, double click a name;",
-    "          right-click: Add to Waveform",
-    "          click ruler: cursor   drag waveform: range",
-    "          click inside a selection: zoom to it",
-    "          wheel over waveform: zoom   over lists: scroll",
-    "          dialogs: ✕ closes, scrollbars are draggable",
-];
+use std::sync::{Arc, LazyLock, Mutex};
 
 const OPEN_W: u16 = 76;
 const OPEN_H: u16 = 20;
@@ -88,17 +42,18 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
     if dialog == Dialog::Open {
         return open_rect(screen);
     }
+    let wanted_width = if dialog == Dialog::Settings { 92 } else { 64 };
     let wanted_height = match dialog {
         Dialog::Find => 14,
-        Dialog::Keys => KEYS.len() as u16 + 4,
+        Dialog::Keys => keymap::help_len() as u16 + 4,
         Dialog::CreateBus => app
             .bus_builder()
             .map(|builder| builder.items.len() as u16 + 4)
             .unwrap_or(8),
-        Dialog::Settings => app.settings_len() as u16 + 5,
+        Dialog::Settings => 22,
         _ => 7,
     };
-    let width = 64u16
+    let width = wanted_width
         .min(screen.width.saturating_sub(8))
         .max(28)
         .min(screen.width);
@@ -118,6 +73,7 @@ pub fn visible_rows(screen: Rect, app: &App, dialog: Dialog) -> usize {
     let area = dialog_rect(screen, app, dialog);
     let reserved = match dialog {
         Dialog::Find => 5,
+        Dialog::Settings => 4,
         _ => 2,
     };
     (area.height as usize).saturating_sub(reserved).max(1)
@@ -170,32 +126,41 @@ pub fn close_button(screen: Rect, app: &App, dialog: Dialog) -> Rect {
     }
 }
 
-/// The static help text wrapped for every inner width the dialog can have.
-/// The dialog is at most 64 columns wide (4 border/padding columns), so all
-/// reachable widths are covered; wrapping runs once per process instead of on
-/// every redraw.
-static KEYS_WRAPPED: LazyLock<Vec<Vec<String>>> = LazyLock::new(|| {
-    (0..=64)
-        .map(|width| {
-            KEYS.iter()
-                .flat_map(|line| text::wrap(line, width))
-                .collect()
-        })
-        .collect()
-});
-
-/// Help lines of the Keys dialog for an inner width (clamped to the widths
-/// that can actually occur).
-fn keys_lines(inner_w: usize) -> &'static [String] {
-    KEYS_WRAPPED
-        .get(inner_w)
-        .or_else(|| KEYS_WRAPPED.last())
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
+struct KeyHelpCache {
+    revision: u64,
+    widths: Vec<Option<Arc<[String]>>>,
 }
 
-fn keys_line_count(inner_w: usize) -> usize {
-    keys_lines(inner_w).len()
+static KEYS_WRAPPED: LazyLock<Mutex<KeyHelpCache>> = LazyLock::new(|| {
+    Mutex::new(KeyHelpCache {
+        revision: u64::MAX,
+        widths: vec![None; 65],
+    })
+});
+
+fn keys_lines(inner_w: usize, settings: &KeymapSettings) -> Arc<[String]> {
+    let mut cache = KEYS_WRAPPED.lock().unwrap_or_else(|err| err.into_inner());
+    if cache.revision != settings.revision {
+        let lines = keymap::help_lines(settings);
+        cache.widths = (0..=64)
+            .map(|width| {
+                let wrapped: Vec<String> = lines
+                    .iter()
+                    .flat_map(|line| text::wrap(line, width))
+                    .collect();
+                Some(Arc::from(wrapped))
+            })
+            .collect();
+        cache.revision = settings.revision;
+    }
+    let index = inner_w.min(cache.widths.len().saturating_sub(1));
+    cache.widths[index]
+        .clone()
+        .unwrap_or_else(|| Arc::from(Vec::new()))
+}
+
+fn keys_line_count(inner_w: usize, settings: &KeymapSettings) -> usize {
+    keys_lines(inner_w, settings).len()
 }
 
 /// Scrollable body of a dialog: `None` when everything fits.
@@ -205,7 +170,7 @@ pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea
         Dialog::Keys => (
             area.y + 1,
             area.height.saturating_sub(2) as usize,
-            keys_line_count(area.width.saturating_sub(4) as usize),
+            keys_line_count(area.width.saturating_sub(4) as usize, &app.settings.keys),
         ),
         Dialog::Find => (
             area.y + 4,
@@ -216,6 +181,11 @@ pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea
             area.y + 1,
             area.height.saturating_sub(4) as usize,
             app.bus_builder().map(|b| b.items.len()).unwrap_or(0),
+        ),
+        Dialog::Settings => (
+            area.y + 1,
+            area.height.saturating_sub(4) as usize,
+            app.settings_len(),
         ),
         _ => return None,
     };
@@ -235,7 +205,7 @@ pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea
 }
 
 pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let title = match dialog {
         Dialog::Open => "Open Waveform",
         Dialog::Goto => "Go to Time",
@@ -245,6 +215,8 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
         Dialog::CreateBus => "Create Bus",
         Dialog::GroupName => "Rename Group",
         Dialog::Settings => "Settings",
+        Dialog::BindKey => "Edit Shortcut",
+        Dialog::TopSplit => "Top Pane Ratio",
         Dialog::Keys => "Key Bindings",
         Dialog::About => "About",
         Dialog::AddSignals => "Add Signals",
@@ -334,9 +306,11 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
                 );
             }
             Dialog::Settings => draw_settings(buf, area, app),
+            Dialog::BindKey => draw_bind_key(buf, area, app),
+            Dialog::TopSplit => draw_top_split(buf, area, app),
             Dialog::Keys => {
                 let inner_w = area.width.saturating_sub(4) as usize;
-                let lines = keys_lines(inner_w);
+                let lines = keys_lines(inner_w, &app.settings.keys);
                 let rows = area.height.saturating_sub(2) as usize;
                 let max_scroll = lines.len().saturating_sub(rows);
                 let scroll = app.dialog_scroll.min(max_scroll);
@@ -387,42 +361,429 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
     }
 }
 
-/// Settings: colour scheme plus per-item waveform colours.
+struct SettingsLayout {
+    categories: Rect,
+    items: Rect,
+    rows: usize,
+}
+
+fn settings_layout(area: Rect) -> SettingsLayout {
+    use crate::ui::widgets::{Column, Constraint, Row};
+
+    let outer = Column::new(&[Constraint::Fill, Constraint::Fixed(2)])
+        .gap(1)
+        .split(Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        ));
+    let body = outer[0];
+    let columns = Row::new(&[Constraint::Ratio(1, 4), Constraint::Fill])
+        .gap(1)
+        .split(body);
+    SettingsLayout {
+        categories: columns[0],
+        items: columns[1],
+        rows: body.height as usize,
+    }
+}
+
+fn settings_buttons(
+    area: Rect,
+) -> (
+    crate::ui::widgets::Button<'static>,
+    crate::ui::widgets::Button<'static>,
+) {
+    (
+        crate::ui::widgets::Button::new(
+            "Reset",
+            Rect::new(
+                area.right().saturating_sub(22),
+                area.bottom().saturating_sub(2),
+                10,
+                1,
+            ),
+        ),
+        crate::ui::widgets::Button::new(
+            "Close",
+            Rect::new(
+                area.right().saturating_sub(11),
+                area.bottom().saturating_sub(2),
+                10,
+                1,
+            ),
+        ),
+    )
+}
+
 fn draw_settings(buf: &mut Buffer, area: Rect, app: &App) {
-    let t = &app.theme;
-    let x = area.x + 2;
-    let width = area.width.saturating_sub(4) as usize;
-    let rows = area.height.saturating_sub(3) as usize;
-    for row in 0..app.settings_len().min(rows) {
-        let y = area.y + 1 + row as u16;
-        let selected = row == app.settings_sel;
-        let style = if selected {
+    use crate::app::{SettingRow, SettingsPane};
+    use crate::settings::{GeneralSetting, SettingId, SettingsCategory, ThemeKind};
+    use crate::ui::widgets::{Alignment, Checkbox, Dropdown, Label, RadioGroup, Toggle};
+
+    let t = &app.settings.theme;
+    let layout = settings_layout(area);
+    for (index, category) in SettingsCategory::ALL.into_iter().enumerate() {
+        let selected = category == app.settings_category;
+        let focused = app.settings_pane == SettingsPane::Categories;
+        let style = if selected && focused {
             Style::new().fg(Color::Black).bg(t.accent)
+        } else if selected {
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD)
         } else {
             Style::new().fg(t.text)
         };
-        if row == 0 {
-            let label = format!("theme                ◂ {:^7} ▸", app.theme_kind.name());
-            text::put(buf, x, y, &text::trunc(&label, width), style);
-        } else if let Some(setting) = app.settings_ui(row) {
-            let color = setting.get(t);
-            let label = format!("{:<18} {:<9}", setting.label(), color_name(color));
-            text::put(buf, x, y, &label, style);
-            text::put(buf, x + 28, y, "██", Style::new().fg(color));
-        } else if let Some(setting) = app.settings_setting(row) {
-            let color = setting.get(t);
-            let label = format!("{:<18} {:<9}", setting.label(), color_name(color));
-            text::put(buf, x, y, &label, style);
-            text::put(buf, x + 28, y, "██", Style::new().fg(color));
+        Label::new(category.label(), layout.categories.width as usize).draw(
+            buf,
+            layout.categories.x,
+            layout.categories.y + index as u16,
+            style,
+        );
+    }
+    for y in layout.categories.y..layout.categories.bottom() {
+        text::set_cell(
+            buf,
+            layout.items.x.saturating_sub(1),
+            y,
+            "│",
+            t.dim,
+            t.popup_bg,
+        );
+    }
+
+    let total = app.settings_len();
+    let scroll = app.dialog_scroll.min(total.saturating_sub(layout.rows));
+    for (offset, row) in (scroll..total).take(layout.rows).enumerate() {
+        let Some(setting) = app.settings_row_at(row) else {
+            continue;
+        };
+        let y = layout.items.y + offset as u16;
+        let row_area = Rect::new(layout.items.x, y, layout.items.width, 1);
+        let selected = row == app.settings_sel && app.settings_pane == SettingsPane::Items;
+        match setting {
+            SettingRow::Setting(SettingId::Theme) => {
+                let options: Vec<&str> = ThemeKind::ALL.iter().map(|kind| kind.name()).collect();
+                let selected = ThemeKind::ALL
+                    .iter()
+                    .position(|kind| *kind == app.settings.theme_kind)
+                    .unwrap_or(0);
+                RadioGroup::new(&options, selected, row_area).draw(buf, t);
+            }
+            SettingRow::Setting(SettingId::General(GeneralSetting::BusSplitBits))
+            | SettingRow::Setting(SettingId::General(GeneralSetting::BusSplitWork)) => {
+                let general = match setting {
+                    SettingRow::Setting(SettingId::General(setting)) => setting,
+                    _ => unreachable!(),
+                };
+                Label::new(general.label(), 24).draw(buf, row_area.x, y, Style::new().fg(t.text));
+                if let Some(slider) = app.general_slider(
+                    general,
+                    Rect::new(
+                        row_area.x + 26,
+                        y,
+                        row_area.width.saturating_sub(40).max(6),
+                        1,
+                    ),
+                ) {
+                    slider.draw(buf, t);
+                }
+                Label::new(&general.value(&app.settings.general), 8)
+                    .align(Alignment::Right)
+                    .draw(
+                        buf,
+                        row_area.right().saturating_sub(8),
+                        y,
+                        Style::new().fg(t.accent),
+                    );
+            }
+            SettingRow::Setting(SettingId::General(GeneralSetting::WaveOverflow)) => {
+                Toggle::new(
+                    app.settings.general.wave_overflow
+                        == crate::settings::WaveValueOverflow::Ellipsize,
+                    "wave label ellipsis",
+                    row_area,
+                )
+                .draw(buf, t);
+            }
+            SettingRow::Setting(SettingId::General(GeneralSetting::FullNames)) => {
+                Checkbox::new(
+                    app.settings.general.full_names,
+                    "full hierarchical names",
+                    row_area,
+                )
+                .draw(buf, t);
+            }
+            SettingRow::Setting(SettingId::General(GeneralSetting::TimeBase)) => {
+                let options: Vec<&str> = crate::waveform::TimeBase::CYCLE
+                    .iter()
+                    .map(|base| base.label())
+                    .collect();
+                Dropdown::new(&options, app.time_dropdown, row_area).draw(buf, t);
+            }
+            SettingRow::Setting(SettingId::General(GeneralSetting::TopSplit)) => {
+                let view = app.settings_row_view(setting);
+                Label::new(&format!("{} (Enter to adjust)", view.label), 28).draw(
+                    buf,
+                    row_area.x,
+                    y,
+                    Style::new().fg(t.text),
+                );
+                Label::new(&view.value, 5).align(Alignment::Right).draw(
+                    buf,
+                    row_area.right().saturating_sub(5),
+                    y,
+                    Style::new().fg(t.accent),
+                );
+            }
+            _ => {
+                let view = app.settings_row_view(setting);
+                let selected_style = if selected {
+                    Style::new().fg(Color::Black).bg(t.accent)
+                } else {
+                    Style::new().fg(t.text)
+                };
+                let marker = if view.custom { "*" } else { " " };
+                Label::new(&format!("{marker} {}", view.label), 28).draw(
+                    buf,
+                    row_area.x,
+                    y,
+                    selected_style,
+                );
+                Label::new(&view.value, row_area.width.saturating_sub(30) as usize)
+                    .align(Alignment::Right)
+                    .draw(buf, row_area.x + 30, y, selected_style);
+                if let Some(color) = view.color {
+                    text::put(
+                        buf,
+                        row_area.right().saturating_sub(3),
+                        y,
+                        "██",
+                        Style::new().fg(color),
+                    );
+                }
+            }
         }
     }
+    draw_scrollbar(
+        buf,
+        area.right().saturating_sub(2),
+        layout.items.y,
+        layout.rows,
+        scroll,
+        total,
+        t,
+    );
+    let help = if app.settings_category == SettingsCategory::KeyBindings {
+        "Tab pane  ↑↓ select  Enter bind  r default  R all defaults"
+    } else {
+        "Tab pane  ↑↓ select  ←/→ change  Enter edit  r reset"
+    };
+    text::put(
+        buf,
+        area.x + 2,
+        area.bottom().saturating_sub(2),
+        &text::trunc(help, area.width.saturating_sub(28) as usize),
+        Style::new().fg(t.dim),
+    );
+    let (reset, close) = settings_buttons(area);
+    reset
+        .enabled(app.settings_row().is_some())
+        .selected(app.settings_pane == crate::app::SettingsPane::Items)
+        .draw(buf, t);
+    close.draw(buf, t);
+}
+
+fn draw_bind_key(buf: &mut Buffer, area: Rect, app: &App) {
+    let t = &app.settings.theme;
+    let Some(index) = app.key_capture else { return };
+    let binding = &crate::app::keymap::bindings()[index];
+    let x = area.x + 2;
+    text::put(
+        buf,
+        x,
+        area.y + 1,
+        &text::trunc(binding.description, area.width.saturating_sub(4) as usize),
+        Style::new().fg(t.text).add_modifier(Modifier::BOLD),
+    );
+    text::put(
+        buf,
+        x,
+        area.y + 2,
+        &format!(
+            "current: {}",
+            crate::app::keymap::effective_keys(index, &app.settings.keys)
+        ),
+        Style::new().fg(t.dim),
+    );
+    text::put(
+        buf,
+        x,
+        area.y + 4,
+        "press a new shortcut",
+        Style::new().fg(t.accent),
+    );
     text::put(
         buf,
         x,
         area.bottom().saturating_sub(2),
-        "↑/↓ select   ←/→ change   Enter next   r reset   Esc close",
+        "Esc cancel   Backspace/Delete default",
         Style::new().fg(t.dim),
     );
+}
+
+fn draw_top_split(buf: &mut Buffer, area: Rect, app: &App) {
+    let t = &app.settings.theme;
+    crate::ui::widgets::Label::new(
+        &format!("top pane ratio: {}%", app.settings.splits.top_pct),
+        area.width.saturating_sub(4) as usize,
+    )
+    .align(crate::ui::widgets::Alignment::Center)
+    .draw(buf, area.x + 2, area.y + 1, Style::new().fg(t.text));
+    top_split_slider(app).draw(buf, t);
+}
+
+pub fn top_split_slider(app: &App) -> crate::ui::widgets::Slider {
+    let area = dialog_rect(app.last_area, app, Dialog::TopSplit);
+    crate::ui::widgets::Slider::new(
+        app.settings.splits.top_pct as usize,
+        crate::settings::Splits::MIN_TOP_PCT as usize,
+        crate::settings::Splits::MAX_TOP_PCT as usize,
+        crate::ui::widgets::Orientation::Vertical,
+        Rect::new(
+            area.x + area.width / 2,
+            area.y + 2,
+            1,
+            area.height.saturating_sub(3).max(1),
+        ),
+    )
+    .step(5)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsHit {
+    Category(usize),
+    Item(usize),
+    Theme(usize),
+    General {
+        row: usize,
+        setting: crate::settings::GeneralSetting,
+        value: usize,
+    },
+    Dropdown(usize),
+    DismissDropdown,
+    Reset,
+    Close,
+}
+
+pub fn settings_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<SettingsHit> {
+    use crate::settings::{GeneralSetting, SettingId, ThemeKind};
+    use crate::ui::widgets::{Checkbox, Dropdown, RadioGroup, Toggle};
+
+    let area = dialog_rect(screen, app, Dialog::Settings);
+    let (reset, close) = settings_buttons(area);
+    if reset.contains(col, row) {
+        return Some(SettingsHit::Reset);
+    }
+    if close.contains(col, row) {
+        return Some(SettingsHit::Close);
+    }
+    let layout = settings_layout(area);
+    let total = app.settings_len();
+    let scroll = app.dialog_scroll.min(total.saturating_sub(layout.rows));
+    let selected_row = scroll + (row.saturating_sub(layout.items.y) as usize);
+    if app.time_dropdown.open {
+        let options: Vec<&str> = crate::waveform::TimeBase::CYCLE
+            .iter()
+            .map(|base| base.label())
+            .collect();
+        let y = layout.items.y + app.settings_sel.saturating_sub(scroll) as u16;
+        let item = Rect::new(layout.items.x, y, layout.items.width, 1);
+        let dropdown = Dropdown::new(&options, app.time_dropdown, item);
+        if let Some(index) = dropdown.option_at(col, row) {
+            return Some(SettingsHit::Dropdown(index));
+        }
+        return Some(SettingsHit::DismissDropdown);
+    }
+    if crate::ui::layout::pt_in(layout.categories, col, row) {
+        let index = (row - layout.categories.y) as usize;
+        return (index < crate::settings::SettingsCategory::ALL.len())
+            .then_some(SettingsHit::Category(index));
+    }
+    if !crate::ui::layout::pt_in(layout.items, col, row) || selected_row >= total {
+        return None;
+    }
+    match app.settings_row_at(selected_row) {
+        Some(crate::app::SettingRow::Setting(SettingId::Theme)) => {
+            let options: Vec<&str> = ThemeKind::ALL.iter().map(|kind| kind.name()).collect();
+            let selected = ThemeKind::ALL
+                .iter()
+                .position(|kind| *kind == app.settings.theme_kind)
+                .unwrap_or(0);
+            RadioGroup::new(&options, selected, layout.items)
+                .option_at(col, row)
+                .map(SettingsHit::Theme)
+        }
+        Some(crate::app::SettingRow::Setting(SettingId::General(setting))) => {
+            let y = layout.items.y + selected_row.saturating_sub(scroll) as u16;
+            let item = Rect::new(layout.items.x, y, layout.items.width, 1);
+            match setting {
+                GeneralSetting::BusSplitBits | GeneralSetting::BusSplitWork => app
+                    .general_slider(
+                        setting,
+                        Rect::new(item.x + 26, y, item.width.saturating_sub(40).max(6), 1),
+                    )
+                    .and_then(|slider| slider.value_at(col, row))
+                    .map(|value| SettingsHit::General {
+                        row: selected_row,
+                        setting,
+                        value,
+                    }),
+                GeneralSetting::WaveOverflow => Toggle::new(
+                    app.settings.general.wave_overflow
+                        == crate::settings::WaveValueOverflow::Ellipsize,
+                    "wave label ellipsis",
+                    item,
+                )
+                .changed_at(col, row)
+                .map(|value| SettingsHit::General {
+                    row: selected_row,
+                    setting,
+                    value: value as usize,
+                }),
+                GeneralSetting::FullNames => Checkbox::new(
+                    app.settings.general.full_names,
+                    "full hierarchical names",
+                    item,
+                )
+                .changed_at(col, row)
+                .map(|value| SettingsHit::General {
+                    row: selected_row,
+                    setting,
+                    value: value as usize,
+                }),
+                GeneralSetting::TimeBase => {
+                    let options: Vec<&str> = crate::waveform::TimeBase::CYCLE
+                        .iter()
+                        .map(|base| base.label())
+                        .collect();
+                    Dropdown::new(&options, app.time_dropdown, item)
+                        .contains(col, row)
+                        .then_some(SettingsHit::General {
+                            row: selected_row,
+                            setting,
+                            value: usize::MAX,
+                        })
+                }
+                GeneralSetting::TopSplit => Some(SettingsHit::General {
+                    row: selected_row,
+                    setting,
+                    value: usize::MAX,
+                }),
+            }
+        }
+        _ => Some(SettingsHit::Item(selected_row)),
+    }
 }
 
 /// Dim everything outside the dialog in place, preserving each pane's own
@@ -461,7 +822,7 @@ fn dim_color(color: Color) -> Option<Color> {
 }
 
 fn draw_browser(buf: &mut Buffer, area: Rect, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let Some(browser) = &app.browser else {
         text::put(
             buf,
@@ -542,7 +903,7 @@ fn draw_browser(buf: &mut Buffer, area: Rect, app: &App) {
 }
 
 fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) {
-    let t = &app.theme;
+    let t = &app.settings.theme;
     let Some(builder) = app.bus_builder() else {
         text::put(
             buf,
@@ -634,25 +995,17 @@ fn draw_input(
     app: &App,
     labels: (&str, &str),
 ) -> Option<Position> {
-    let t = &app.theme;
+    use crate::ui::widgets::{Constraint, Row, TextBox};
+
+    let t = &app.settings.theme;
     let (label, hint) = labels;
-    text::put(buf, x, area.y + 2, label, Style::new().fg(t.text));
-    let input_x = x + label.chars().count() as u16;
-    let avail = area.right().saturating_sub(input_x) as usize;
-    let value = app.input.as_string();
-    let shown = text::trunc(&value, width.min(avail));
-    text::put(
-        buf,
-        input_x,
-        area.y + 2,
-        &shown,
-        Style::new().fg(t.text).bg(t.input_bg),
-    );
-    let caret = app.input.cursor().min(shown.chars().count()) as u16;
-    if let Some(cell) = buf.cell_mut((input_x + caret, area.y + 2)) {
-        cell.set_bg(t.text);
-        cell.set_fg(Color::Black);
-    }
+    let cells = Row::new(&[
+        Constraint::Fixed(label.chars().count() as u16),
+        Constraint::Fill,
+    ])
+    .split(Rect::new(x, area.y + 2, width as u16, 1));
+    text::put(buf, cells[0].x, cells[0].y, label, Style::new().fg(t.text));
+    let caret = TextBox::new(&app.input, cells[1]).draw(buf, t);
     text::put(
         buf,
         x,
@@ -660,29 +1013,27 @@ fn draw_input(
         &text::trunc(hint, width),
         Style::new().fg(t.dim),
     );
-    Some(Position::new(input_x + caret, area.y + 2))
+    Some(caret)
 }
 
 fn draw_find(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) -> Option<Position> {
-    let t = &app.theme;
-    // Query row, hint row, then the scrolling match list.
-    text::put(buf, x, area.y + 1, "Query: ", Style::new().fg(t.text));
-    let input_x = x + 7;
-    let avail = area.right().saturating_sub(input_x) as usize;
-    let input = app.input.as_string();
-    let shown = text::trunc(&input, width.min(avail));
+    use crate::ui::widgets::{Constraint, Row, TextBox};
+
+    let t = &app.settings.theme;
+    let cells = Row::new(&[Constraint::Fixed(7), Constraint::Fill]).split(Rect::new(
+        x,
+        area.y + 1,
+        width as u16,
+        1,
+    ));
     text::put(
         buf,
-        input_x,
-        area.y + 1,
-        &shown,
-        Style::new().fg(t.text).bg(t.input_bg),
+        cells[0].x,
+        cells[0].y,
+        "Query: ",
+        Style::new().fg(t.text),
     );
-    let caret = app.input.cursor().min(shown.chars().count()) as u16;
-    if let Some(cell) = buf.cell_mut((input_x + caret, area.y + 1)) {
-        cell.set_bg(t.text);
-        cell.set_fg(Color::Black);
-    }
+    let caret = TextBox::new(&app.input, cells[1]).draw(buf, t);
     text::put(
         buf,
         x,
@@ -727,7 +1078,7 @@ fn draw_find(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) -> O
         matches.len(),
         t,
     );
-    Some(Position::new(input_x + caret, area.y + 1))
+    Some(caret)
 }
 
 #[cfg(test)]
@@ -752,12 +1103,27 @@ mod tests {
     }
 
     #[test]
-    fn keys_help_is_wrapped_once_per_width() {
-        let first = keys_lines(40);
-        let again = keys_lines(40);
-        assert!(std::ptr::eq(first, again), "wrap cache missed");
-        let expected: usize = KEYS.iter().map(|line| text::wrap(line, 40).len()).sum();
+    fn keys_help_is_wrapped_once_per_width_and_revision() {
+        let mut settings = KeymapSettings::default();
+        let first = keys_lines(40, &settings);
+        let again = keys_lines(40, &settings);
+        assert!(Arc::ptr_eq(&first, &again), "wrap cache missed");
+        let expected: usize = keymap::help_lines(&settings)
+            .iter()
+            .map(|line| text::wrap(line, 40).len())
+            .sum();
         assert_eq!(first.len(), expected);
-        assert_eq!(keys_line_count(40), expected);
+        assert_eq!(keys_line_count(40, &settings), expected);
+
+        settings.set(
+            0,
+            crate::settings::KeyChord {
+                code: crossterm::event::KeyCode::F(5),
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        let changed = keys_lines(40, &settings);
+        assert!(!Arc::ptr_eq(&first, &changed));
+        assert!(changed.iter().any(|line| line.contains("F5")));
     }
 }
