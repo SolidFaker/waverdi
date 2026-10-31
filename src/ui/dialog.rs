@@ -42,7 +42,11 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
     if dialog == Dialog::Open {
         return open_rect(screen);
     }
-    let wanted_width = if dialog == Dialog::Settings { 92 } else { 64 };
+    let wanted_width = match dialog {
+        Dialog::Settings => 92,
+        Dialog::ColorPicker => 68,
+        _ => 64,
+    };
     let wanted_height = match dialog {
         Dialog::Find => 14,
         Dialog::Keys => keymap::help_len() as u16 + 4,
@@ -50,7 +54,7 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
             .bus_builder()
             .map(|builder| builder.items.len() as u16 + 4)
             .unwrap_or(8),
-        Dialog::Settings => 22,
+        Dialog::Settings | Dialog::ColorPicker => 22,
         _ => 7,
     };
     let width = wanted_width
@@ -71,9 +75,11 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
 /// Body rows a dialog shows, used for paging and scrolling.
 pub fn visible_rows(screen: Rect, app: &App, dialog: Dialog) -> usize {
     let area = dialog_rect(screen, app, dialog);
+    if dialog == Dialog::Settings {
+        return settings_layout(area).rows;
+    }
     let reserved = match dialog {
         Dialog::Find => 5,
-        Dialog::Settings => 4,
         _ => 2,
     };
     (area.height as usize).saturating_sub(reserved).max(1)
@@ -182,11 +188,7 @@ pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea
             area.height.saturating_sub(4) as usize,
             app.bus_builder().map(|b| b.items.len()).unwrap_or(0),
         ),
-        Dialog::Settings => (
-            area.y + 1,
-            area.height.saturating_sub(4) as usize,
-            app.settings_len(),
-        ),
+        Dialog::Settings => (area.y + 1, settings_layout(area).rows, app.settings_len()),
         _ => return None,
     };
     if rows == 0 || total <= rows {
@@ -216,7 +218,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
         Dialog::GroupName => "Rename Group",
         Dialog::Settings => "Settings",
         Dialog::BindKey => "Edit Shortcut",
-        Dialog::TopSplit => "Top Pane Ratio",
+        Dialog::ColorPicker => "Color Picker",
         Dialog::Keys => "Key Bindings",
         Dialog::About => "About",
         Dialog::AddSignals => "Add Signals",
@@ -307,7 +309,11 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
             }
             Dialog::Settings => draw_settings(buf, area, app),
             Dialog::BindKey => draw_bind_key(buf, area, app),
-            Dialog::TopSplit => draw_top_split(buf, area, app),
+            Dialog::ColorPicker => {
+                if let Some(picker) = app.color_picker.as_ref() {
+                    cursor = crate::ui::widgets::ColorPicker::new(picker, area).draw(buf, t);
+                }
+            }
             Dialog::Keys => {
                 let inner_w = area.width.saturating_sub(4) as usize;
                 let lines = keys_lines(inner_w, &app.settings.keys);
@@ -387,6 +393,20 @@ fn settings_layout(area: Rect) -> SettingsLayout {
         items: columns[1],
         rows: body.height as usize,
     }
+}
+
+fn bus_slider_area(row_area: Rect) -> Option<Rect> {
+    (row_area.width >= 48).then(|| Rect::new(row_area.x + 26, row_area.y, row_area.width - 40, 1))
+}
+
+pub fn settings_popup_bounds(screen: Rect, app: &App) -> Rect {
+    let area = dialog_rect(screen, app, Dialog::Settings);
+    Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    )
 }
 
 fn settings_buttons(
@@ -477,15 +497,9 @@ fn draw_settings(buf: &mut Buffer, area: Rect, app: &App) {
                     _ => unreachable!(),
                 };
                 Label::new(general.label(), 24).draw(buf, row_area.x, y, Style::new().fg(t.text));
-                if let Some(slider) = app.general_slider(
-                    general,
-                    Rect::new(
-                        row_area.x + 26,
-                        y,
-                        row_area.width.saturating_sub(40).max(6),
-                        1,
-                    ),
-                ) {
+                if let Some(slider) =
+                    bus_slider_area(row_area).and_then(|area| app.general_slider(general, area))
+                {
                     slider.draw(buf, t);
                 }
                 Label::new(&general.value(&app.settings.general), 8)
@@ -515,26 +529,18 @@ fn draw_settings(buf: &mut Buffer, area: Rect, app: &App) {
                 .draw(buf, t);
             }
             SettingRow::Setting(SettingId::General(GeneralSetting::TimeBase)) => {
+                Label::new(
+                    GeneralSetting::TimeBase.label(),
+                    24.min(row_area.width as usize),
+                )
+                .draw(buf, row_area.x, y, Style::new().fg(t.text));
                 let options: Vec<&str> = crate::waveform::TimeBase::CYCLE
                     .iter()
                     .map(|base| base.label())
                     .collect();
-                Dropdown::new(&options, app.time_dropdown, row_area).draw(buf, t);
-            }
-            SettingRow::Setting(SettingId::General(GeneralSetting::TopSplit)) => {
-                let view = app.settings_row_view(setting);
-                Label::new(&format!("{} (Enter to adjust)", view.label), 28).draw(
-                    buf,
-                    row_area.x,
-                    y,
-                    Style::new().fg(t.text),
-                );
-                Label::new(&view.value, 5).align(Alignment::Right).draw(
-                    buf,
-                    row_area.right().saturating_sub(5),
-                    y,
-                    Style::new().fg(t.accent),
-                );
+                let mut state = app.time_dropdown;
+                state.open = false;
+                Dropdown::new(&options, state, time_dropdown_area(row_area)).draw(buf, t);
             }
             _ => {
                 let view = app.settings_row_view(setting);
@@ -550,16 +556,18 @@ fn draw_settings(buf: &mut Buffer, area: Rect, app: &App) {
                     y,
                     selected_style,
                 );
-                Label::new(&view.value, row_area.width.saturating_sub(30) as usize)
+                let value_width = if view.color.is_some() {
+                    row_area.width.saturating_sub(38)
+                } else {
+                    row_area.width.saturating_sub(30)
+                };
+                Label::new(&view.value, value_width as usize)
                     .align(Alignment::Right)
                     .draw(buf, row_area.x + 30, y, selected_style);
                 if let Some(color) = view.color {
-                    text::put(
-                        buf,
-                        row_area.right().saturating_sub(3),
-                        y,
-                        "██",
-                        Style::new().fg(color),
+                    buf.set_style(
+                        Rect::new(row_area.right().saturating_sub(4), y, 2, 1),
+                        Style::new().bg(color),
                     );
                 }
             }
@@ -589,9 +597,44 @@ fn draw_settings(buf: &mut Buffer, area: Rect, app: &App) {
     let (reset, close) = settings_buttons(area);
     reset
         .enabled(app.settings_row().is_some())
-        .selected(app.settings_pane == crate::app::SettingsPane::Items)
+        .selected(
+            app.settings_pane == crate::app::SettingsPane::Buttons
+                && app.settings_button == crate::app::SettingsButton::Reset,
+        )
         .draw(buf, t);
-    close.draw(buf, t);
+    close
+        .selected(
+            app.settings_pane == crate::app::SettingsPane::Buttons
+                && app.settings_button == crate::app::SettingsButton::Close,
+        )
+        .draw(buf, t);
+    draw_settings_dropdown(buf, app);
+}
+
+pub fn time_dropdown_anchor(screen: Rect, app: &App) -> Rect {
+    let area = dialog_rect(screen, app, Dialog::Settings);
+    let layout = settings_layout(area);
+    let scroll = app
+        .dialog_scroll
+        .min(app.settings_len().saturating_sub(layout.rows));
+    let y = layout.items.y + app.time_dropdown_anchor.saturating_sub(scroll) as u16;
+    time_dropdown_area(Rect::new(layout.items.x, y, layout.items.width, 1))
+}
+
+fn draw_settings_dropdown(buf: &mut Buffer, app: &App) {
+    if !app.time_dropdown.open {
+        return;
+    }
+    let anchor = time_dropdown_anchor(app.last_area, app);
+    let options: Vec<&str> = crate::waveform::TimeBase::CYCLE
+        .iter()
+        .map(|base| base.label())
+        .collect();
+    crate::ui::widgets::Dropdown::new(&options, app.time_dropdown, anchor).draw_options(
+        buf,
+        &app.settings.theme,
+        settings_popup_bounds(app.last_area, app),
+    );
 }
 
 fn draw_bind_key(buf: &mut Buffer, area: Rect, app: &App) {
@@ -632,32 +675,14 @@ fn draw_bind_key(buf: &mut Buffer, area: Rect, app: &App) {
     );
 }
 
-fn draw_top_split(buf: &mut Buffer, area: Rect, app: &App) {
-    let t = &app.settings.theme;
-    crate::ui::widgets::Label::new(
-        &format!("top pane ratio: {}%", app.settings.splits.top_pct),
-        area.width.saturating_sub(4) as usize,
+fn time_dropdown_area(row_area: Rect) -> Rect {
+    let label_width = 24.min(row_area.width);
+    Rect::new(
+        row_area.x + label_width,
+        row_area.y,
+        row_area.width - label_width,
+        1,
     )
-    .align(crate::ui::widgets::Alignment::Center)
-    .draw(buf, area.x + 2, area.y + 1, Style::new().fg(t.text));
-    top_split_slider(app).draw(buf, t);
-}
-
-pub fn top_split_slider(app: &App) -> crate::ui::widgets::Slider {
-    let area = dialog_rect(app.last_area, app, Dialog::TopSplit);
-    crate::ui::widgets::Slider::new(
-        app.settings.splits.top_pct as usize,
-        crate::settings::Splits::MIN_TOP_PCT as usize,
-        crate::settings::Splits::MAX_TOP_PCT as usize,
-        crate::ui::widgets::Orientation::Vertical,
-        Rect::new(
-            area.x + area.width / 2,
-            area.y + 2,
-            1,
-            area.height.saturating_sub(3).max(1),
-        ),
-    )
-    .step(5)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -681,6 +706,19 @@ pub fn settings_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<Setti
     use crate::ui::widgets::{Checkbox, Dropdown, RadioGroup, Toggle};
 
     let area = dialog_rect(screen, app, Dialog::Settings);
+    let layout = settings_layout(area);
+    if app.time_dropdown.open {
+        let options: Vec<&str> = crate::waveform::TimeBase::CYCLE
+            .iter()
+            .map(|base| base.label())
+            .collect();
+        let anchor = time_dropdown_anchor(screen, app);
+        let dropdown = Dropdown::new(&options, app.time_dropdown, anchor);
+        if let Some(index) = dropdown.option_at(col, row, settings_popup_bounds(screen, app)) {
+            return Some(SettingsHit::Dropdown(index));
+        }
+        return Some(SettingsHit::DismissDropdown);
+    }
     let (reset, close) = settings_buttons(area);
     if reset.contains(col, row) {
         return Some(SettingsHit::Reset);
@@ -688,57 +726,51 @@ pub fn settings_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<Setti
     if close.contains(col, row) {
         return Some(SettingsHit::Close);
     }
-    let layout = settings_layout(area);
     let total = app.settings_len();
     let scroll = app.dialog_scroll.min(total.saturating_sub(layout.rows));
     let selected_row = scroll + (row.saturating_sub(layout.items.y) as usize);
-    if app.time_dropdown.open {
-        let options: Vec<&str> = crate::waveform::TimeBase::CYCLE
-            .iter()
-            .map(|base| base.label())
-            .collect();
-        let y = layout.items.y + app.settings_sel.saturating_sub(scroll) as u16;
-        let item = Rect::new(layout.items.x, y, layout.items.width, 1);
-        let dropdown = Dropdown::new(&options, app.time_dropdown, item);
-        if let Some(index) = dropdown.option_at(col, row) {
-            return Some(SettingsHit::Dropdown(index));
-        }
-        return Some(SettingsHit::DismissDropdown);
-    }
     if crate::ui::layout::pt_in(layout.categories, col, row) {
         let index = (row - layout.categories.y) as usize;
         return (index < crate::settings::SettingsCategory::ALL.len())
             .then_some(SettingsHit::Category(index));
     }
-    if !crate::ui::layout::pt_in(layout.items, col, row) || selected_row >= total {
+    if !crate::ui::layout::pt_in(layout.items, col, row) {
+        return None;
+    }
+    if matches!(
+        app.settings_row_at(0),
+        Some(crate::app::SettingRow::Setting(SettingId::Theme))
+    ) {
+        let options: Vec<&str> = ThemeKind::ALL.iter().map(|kind| kind.name()).collect();
+        let selected = ThemeKind::ALL
+            .iter()
+            .position(|kind| *kind == app.settings.theme_kind)
+            .unwrap_or(0);
+        return RadioGroup::new(&options, selected, layout.items)
+            .option_at(col, row)
+            .map(SettingsHit::Theme);
+    }
+    if selected_row >= total {
         return None;
     }
     match app.settings_row_at(selected_row) {
-        Some(crate::app::SettingRow::Setting(SettingId::Theme)) => {
-            let options: Vec<&str> = ThemeKind::ALL.iter().map(|kind| kind.name()).collect();
-            let selected = ThemeKind::ALL
-                .iter()
-                .position(|kind| *kind == app.settings.theme_kind)
-                .unwrap_or(0);
-            RadioGroup::new(&options, selected, layout.items)
-                .option_at(col, row)
-                .map(SettingsHit::Theme)
-        }
         Some(crate::app::SettingRow::Setting(SettingId::General(setting))) => {
             let y = layout.items.y + selected_row.saturating_sub(scroll) as u16;
             let item = Rect::new(layout.items.x, y, layout.items.width, 1);
             match setting {
-                GeneralSetting::BusSplitBits | GeneralSetting::BusSplitWork => app
-                    .general_slider(
-                        setting,
-                        Rect::new(item.x + 26, y, item.width.saturating_sub(40).max(6), 1),
-                    )
-                    .and_then(|slider| slider.value_at(col, row))
-                    .map(|value| SettingsHit::General {
-                        row: selected_row,
-                        setting,
-                        value,
-                    }),
+                GeneralSetting::BusSplitBits | GeneralSetting::BusSplitWork => {
+                    match bus_slider_area(item) {
+                        Some(area) => app
+                            .general_slider(setting, area)
+                            .and_then(|slider| slider.value_at(col, row))
+                            .map(|value| SettingsHit::General {
+                                row: selected_row,
+                                setting,
+                                value,
+                            }),
+                        None => Some(SettingsHit::Item(selected_row)),
+                    }
+                }
                 GeneralSetting::WaveOverflow => Toggle::new(
                     app.settings.general.wave_overflow
                         == crate::settings::WaveValueOverflow::Ellipsize,
@@ -767,7 +799,7 @@ pub fn settings_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<Setti
                         .iter()
                         .map(|base| base.label())
                         .collect();
-                    Dropdown::new(&options, app.time_dropdown, item)
+                    Dropdown::new(&options, app.time_dropdown, time_dropdown_area(item))
                         .contains(col, row)
                         .then_some(SettingsHit::General {
                             row: selected_row,
@@ -775,11 +807,6 @@ pub fn settings_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<Setti
                             value: usize::MAX,
                         })
                 }
-                GeneralSetting::TopSplit => Some(SettingsHit::General {
-                    row: selected_row,
-                    setting,
-                    value: usize::MAX,
-                }),
             }
         }
         _ => Some(SettingsHit::Item(selected_row)),

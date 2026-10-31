@@ -14,6 +14,14 @@ pub enum SettingsPane {
     Categories,
     #[default]
     Items,
+    Buttons,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SettingsButton {
+    #[default]
+    Reset,
+    Close,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,11 +41,13 @@ impl App {
     pub fn open_settings(&mut self) {
         self.settings_sel = 0;
         self.settings_pane = SettingsPane::Items;
+        self.settings_button = SettingsButton::Reset;
         self.time_dropdown.selected = TimeBase::CYCLE
             .iter()
             .position(|base| *base == self.settings.time_base)
             .unwrap_or(0);
         self.time_dropdown.open = false;
+        self.time_dropdown_anchor = 0;
         self.open_dialog(Dialog::Settings);
     }
 
@@ -77,10 +87,6 @@ impl App {
                     GeneralSetting::TimeBase => (
                         self.time_base_label(),
                         self.settings.time_base != TimeBase::Scale,
-                    ),
-                    GeneralSetting::TopSplit => (
-                        format!("{}%", self.settings.splits.top_pct),
-                        self.settings.splits.top_pct != crate::settings::Splits::default().top_pct,
                     ),
                     _ => {
                         let defaults = GeneralSettings::default();
@@ -129,6 +135,13 @@ impl App {
             self.set_settings_category(self.settings_category.next(delta));
             return;
         }
+        if self.settings_pane == SettingsPane::Buttons {
+            self.settings_button = match self.settings_button {
+                SettingsButton::Reset => SettingsButton::Close,
+                SettingsButton::Close => SettingsButton::Reset,
+            };
+            return;
+        }
         let len = self.settings_len();
         if len == 0 {
             self.settings_sel = 0;
@@ -139,6 +152,13 @@ impl App {
     }
 
     pub fn settings_change(&mut self, delta: i64) {
+        if self.settings_pane == SettingsPane::Buttons {
+            self.settings_button = match self.settings_button {
+                SettingsButton::Reset => SettingsButton::Close,
+                SettingsButton::Close => SettingsButton::Reset,
+            };
+            return;
+        }
         if self.settings_pane == SettingsPane::Categories {
             if delta > 0 {
                 self.settings_pane = SettingsPane::Items;
@@ -152,6 +172,13 @@ impl App {
     }
 
     pub fn settings_activate(&mut self) {
+        if self.settings_pane == SettingsPane::Buttons {
+            match self.settings_button {
+                SettingsButton::Reset => self.settings_reset(),
+                SettingsButton::Close => self.dialog = None,
+            }
+            return;
+        }
         if self.settings_pane == SettingsPane::Categories {
             self.settings_pane = SettingsPane::Items;
             self.reveal_settings_row();
@@ -163,10 +190,11 @@ impl App {
                 self.dialog = Some(Dialog::BindKey);
             }
             Some(SettingRow::Setting(SettingId::General(GeneralSetting::TimeBase))) => {
+                self.time_dropdown_anchor = self.settings_sel;
                 self.time_dropdown.open = !self.time_dropdown.open;
             }
-            Some(SettingRow::Setting(SettingId::General(GeneralSetting::TopSplit))) => {
-                self.dialog = Some(Dialog::TopSplit);
+            Some(SettingRow::Setting(setting @ (SettingId::Ui(_) | SettingId::Wave(_)))) => {
+                self.open_color_picker(setting)
             }
             Some(SettingRow::Setting(setting)) => self.cycle_setting(setting, 1),
             None => {}
@@ -176,8 +204,10 @@ impl App {
     pub fn settings_toggle_pane(&mut self) {
         self.settings_pane = match self.settings_pane {
             SettingsPane::Categories => SettingsPane::Items,
-            SettingsPane::Items => SettingsPane::Categories,
+            SettingsPane::Items => SettingsPane::Buttons,
+            SettingsPane::Buttons => SettingsPane::Categories,
         };
+        self.time_dropdown.open = false;
         self.reveal_settings_row();
     }
 
@@ -206,6 +236,7 @@ impl App {
         self.settings_category = category;
         self.settings_sel = 0;
         self.dialog_scroll = 0;
+        self.time_dropdown.open = false;
         self.reveal_settings_row();
     }
 
@@ -290,17 +321,15 @@ impl App {
                     self.set_time_base(base);
                 }
             }
-            GeneralSetting::TopSplit => {
-                self.settings.splits.top_pct = (value as u16).clamp(
-                    crate::settings::Splits::MIN_TOP_PCT,
-                    crate::settings::Splits::MAX_TOP_PCT,
-                );
-            }
         }
     }
 
     pub fn time_dropdown_key(&mut self, key: KeyEvent) -> bool {
-        let changed = Dropdown::handle_key(&mut self.time_dropdown, TimeBase::CYCLE.len(), key);
+        let bounds = crate::ui::dialog::settings_popup_bounds(self.last_area, self);
+        let anchor = crate::ui::dialog::time_dropdown_anchor(self.last_area, self);
+        let options: Vec<&str> = TimeBase::CYCLE.iter().map(|base| base.label()).collect();
+        let dropdown = Dropdown::new(&options, self.time_dropdown, anchor);
+        let changed = dropdown.handle_key(&mut self.time_dropdown, key, bounds);
         if changed {
             let base = TimeBase::CYCLE[self.time_dropdown.selected];
             self.set_time_base(base);
@@ -308,21 +337,57 @@ impl App {
         changed
     }
 
-    pub fn top_split_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc {
-            self.dialog = None;
+    pub fn open_color_picker(&mut self, setting: SettingId) {
+        let color = match setting {
+            SettingId::Ui(setting) => setting.get(&self.settings.theme),
+            SettingId::Wave(setting) => setting.get(&self.settings.theme),
+            _ => return,
+        };
+        let Some(picker) = crate::ui::widgets::ColorPickerState::new(color) else {
+            self.msg("this colour cannot be edited");
             return;
-        }
-        let slider = Slider::new(
-            self.settings.splits.top_pct as usize,
-            crate::settings::Splits::MIN_TOP_PCT as usize,
-            crate::settings::Splits::MAX_TOP_PCT as usize,
-            Orientation::Vertical,
-            Rect::default(),
-        )
-        .step(5);
-        if let Some(value) = slider.handle_key(key) {
-            self.settings.splits.top_pct = value as u16;
+        };
+        self.time_dropdown.open = false;
+        self.color_picker = Some(picker);
+        self.color_setting = Some(setting);
+        self.dialog = Some(Dialog::ColorPicker);
+    }
+
+    pub fn color_picker_key(&mut self, key: KeyEvent) {
+        let action = self
+            .color_picker
+            .as_mut()
+            .and_then(|picker| picker.handle_key(key));
+        self.finish_color_picker(action);
+    }
+
+    pub fn color_picker_mouse(&mut self, area: Rect, event: crossterm::event::MouseEvent) {
+        let action = self
+            .color_picker
+            .as_mut()
+            .and_then(|picker| picker.mouse(area, event));
+        self.finish_color_picker(action);
+    }
+
+    pub fn close_color_picker(&mut self) {
+        self.color_picker = None;
+        self.color_setting = None;
+        self.dialog = Some(Dialog::Settings);
+    }
+
+    fn finish_color_picker(&mut self, action: Option<crate::ui::widgets::ColorPickerAction>) {
+        use crate::ui::widgets::ColorPickerAction;
+
+        match action {
+            Some(ColorPickerAction::Accept(color)) => {
+                if let Some(setting) = self.color_setting {
+                    self.settings.set_color(setting, color);
+                }
+                self.close_color_picker();
+            }
+            Some(ColorPickerAction::Cancel) => self.close_color_picker(),
+            Some(ColorPickerAction::InvalidHex) => self.msg("invalid colour: expected #RRGGBB"),
+            None => {}
         }
     }
 
@@ -378,7 +443,7 @@ mod tests {
         let mut app = app_with(VCD);
         app.open_settings();
         assert_eq!(app.settings_category, SettingsCategory::General);
-        assert_eq!(app.settings_len(), 6);
+        assert_eq!(app.settings_len(), 5);
         app.settings_change(1);
         assert_eq!(app.settings.general.bus_split_bits, 8_192);
         app.settings_move(1);
@@ -395,6 +460,8 @@ mod tests {
             app.settings_reset();
         }
         app.settings_toggle_pane();
+        assert_eq!(app.settings_pane, SettingsPane::Buttons);
+        app.settings_toggle_pane();
         assert_eq!(app.settings_pane, SettingsPane::Categories);
         app.settings_move(1);
         assert_eq!(app.settings_category, SettingsCategory::Theme);
@@ -402,6 +469,22 @@ mod tests {
         assert_eq!(app.settings_pane, SettingsPane::Items);
         app.settings_change(1);
         assert_eq!(app.settings.theme_kind, ThemeKind::Light);
+    }
+
+    #[test]
+    fn buttons_support_keyboard_focus_reset_and_close() {
+        let mut app = app_with(VCD);
+        app.settings.general.bus_split_bits = 8_192;
+        app.open_settings();
+        app.settings_toggle_pane();
+        assert_eq!(app.settings_pane, SettingsPane::Buttons);
+        assert_eq!(app.settings_button, SettingsButton::Reset);
+        app.settings_activate();
+        assert_eq!(app.settings.general.bus_split_bits, 4_096);
+        app.settings_change(1);
+        assert_eq!(app.settings_button, SettingsButton::Close);
+        app.settings_activate();
+        assert_eq!(app.dialog, None);
     }
 
     #[test]
@@ -446,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn general_checkbox_dropdown_and_vertical_slider_update_settings() {
+    fn general_checkbox_and_dropdown_update_settings() {
         let mut app = app_with(VCD);
         app.select_settings_row(3);
         app.settings_activate();
@@ -460,14 +543,16 @@ mod tests {
         assert_eq!(app.settings.time_base, TimeBase::CYCLE[1]);
         app.time_dropdown_key(key(KeyCode::Enter));
         assert!(!app.time_dropdown.open);
+    }
 
-        app.select_settings_row(5);
+    #[test]
+    fn dropdown_closes_when_category_changes() {
+        let mut app = app_with(VCD);
+        app.select_settings_row(4);
         app.settings_activate();
-        assert_eq!(app.dialog, Some(Dialog::TopSplit));
-        app.top_split_key(key(KeyCode::Up));
-        assert_eq!(app.settings.splits.top_pct, 65);
-        app.top_split_key(key(KeyCode::Esc));
-        assert_eq!(app.dialog, None);
+        assert!(app.time_dropdown.open);
+        app.set_settings_category(SettingsCategory::KeyBindings);
+        assert!(!app.time_dropdown.open);
     }
 
     #[test]

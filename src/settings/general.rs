@@ -49,17 +49,15 @@ pub enum GeneralSetting {
     WaveOverflow,
     FullNames,
     TimeBase,
-    TopSplit,
 }
 
 impl GeneralSetting {
-    pub const ALL: [GeneralSetting; 6] = [
+    pub const ALL: [GeneralSetting; 5] = [
         GeneralSetting::BusSplitBits,
         GeneralSetting::BusSplitWork,
         GeneralSetting::WaveOverflow,
         GeneralSetting::FullNames,
         GeneralSetting::TimeBase,
-        GeneralSetting::TopSplit,
     ];
 
     pub fn label(self) -> &'static str {
@@ -69,7 +67,6 @@ impl GeneralSetting {
             Self::WaveOverflow => "wave label ellipsis",
             Self::FullNames => "full hierarchical names",
             Self::TimeBase => "time base",
-            Self::TopSplit => "top pane ratio",
         }
     }
 
@@ -79,7 +76,7 @@ impl GeneralSetting {
             Self::BusSplitWork => format_work(settings.bus_split_work),
             Self::WaveOverflow => settings.wave_overflow.label().to_string(),
             Self::FullNames => settings.full_names.to_string(),
-            Self::TimeBase | Self::TopSplit => String::new(),
+            Self::TimeBase => String::new(),
         }
     }
 
@@ -97,7 +94,7 @@ impl GeneralSetting {
                 settings.wave_overflow = settings.wave_overflow.cycle(delta);
             }
             Self::FullNames => settings.full_names = !settings.full_names,
-            Self::TimeBase | Self::TopSplit => {}
+            Self::TimeBase => {}
         }
     }
 
@@ -108,7 +105,7 @@ impl GeneralSetting {
             Self::BusSplitWork => settings.bus_split_work = defaults.bus_split_work,
             Self::WaveOverflow => settings.wave_overflow = defaults.wave_overflow,
             Self::FullNames => settings.full_names = defaults.full_names,
-            Self::TimeBase | Self::TopSplit => {}
+            Self::TimeBase => {}
         }
     }
 }

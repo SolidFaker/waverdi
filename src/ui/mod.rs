@@ -1158,20 +1158,140 @@ mod tests {
             "bus split max bits",
             "wave label ellipsis",
             "[ ] full hierarchical names",
-            "ts ▾",
-            "top pane ratio",
+            "time base",
+            "ts",
+            "▾",
             "[ Reset ]",
             "[ Close ]",
         ] {
             assert!(general.contains(text), "missing {text}: {general}");
         }
+        assert!(!general.contains("top pane ratio"), "{general}");
+        assert!(!general.contains("[on]"), "{general}");
+        assert!(!general.contains("[off]"), "{general}");
         app.set_settings_category(crate::settings::SettingsCategory::Theme);
         let theme = render_app(&mut app, 100, 30);
-        assert!(theme.contains("(●) Dark"), "{theme}");
+        assert!(theme.contains("[x] Dark"), "{theme}");
         app.set_settings_category(crate::settings::SettingsCategory::KeyBindings);
         let keys = render_app(&mut app, 100, 30);
         assert!(keys.contains("zoom in"), "{keys}");
         assert!(keys.contains("z / = / +"), "{keys}");
+    }
+
+    #[test]
+    fn colour_settings_separate_swatch_and_render_color_picker() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.open_settings();
+        app.set_settings_category(crate::settings::SettingsCategory::UiColours);
+        let colour = app.settings.theme.bg;
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = super::dialog::dialog_rect(
+            ratatui::layout::Rect::new(0, 0, 100, 30),
+            &app,
+            crate::app::Dialog::Settings,
+        );
+        let y = area.y + 1;
+        let hash_x = (area.x..area.right())
+            .find(|x| buffer.cell((*x, y)).unwrap().symbol() == "#")
+            .expect("hex colour");
+        let swatch_x = (area.x..area.right())
+            .find(|x| {
+                let cell = buffer.cell((*x, y)).unwrap();
+                cell.symbol() == " " && cell.bg == colour
+            })
+            .expect("colour swatch");
+        assert!(hash_x + 6 < swatch_x, "hex value overlaps its swatch");
+
+        app.settings_activate();
+        let picker = render_app(&mut app, 100, 30);
+        for text in [
+            "Color Picker",
+            "Saturation / value",
+            "Current",
+            "Hex",
+            "#0c0c10",
+            "[ OK ]",
+            "[ Cancel ]",
+        ] {
+            assert!(picker.contains(text), "missing {text}: {picker}");
+        }
+        let small = render_app(&mut app, 40, 12);
+        assert!(small.contains("Increase the terminal"), "{small}");
+    }
+
+    #[test]
+    fn settings_selection_stays_visible_on_small_terminal() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.open_settings();
+        app.select_settings_row(3);
+        let screen = render_app(&mut app, 60, 12);
+        assert!(screen.contains("full hierarchical names"), "{screen}");
+    }
+
+    #[test]
+    fn dropdown_rendering_and_clicks_share_geometry() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.open_settings();
+        app.select_settings_row(4);
+        app.settings_activate();
+        let screen = render_app(&mut app, 100, 30);
+        let lines: Vec<&str> = screen.lines().collect();
+        let anchor = super::dialog::time_dropdown_anchor(app.last_area, &app);
+        let bounds = super::dialog::settings_popup_bounds(app.last_area, &app);
+        let options: Vec<&str> = crate::waveform::TimeBase::CYCLE
+            .iter()
+            .map(|base| base.label())
+            .collect();
+        let dropdown = super::widgets::Dropdown::new(&options, app.time_dropdown, anchor);
+        let mut visible = Vec::new();
+        for y in bounds.y..bounds.bottom() {
+            if let Some(index) = dropdown.option_at(anchor.x + 1, y, bounds) {
+                assert!(lines[y as usize].contains(options[index]), "{screen}");
+                assert_eq!(
+                    super::dialog::settings_hit(app.last_area, &app, anchor.x + 1, y),
+                    Some(super::dialog::SettingsHit::Dropdown(index))
+                );
+                visible.push((y, index));
+            }
+        }
+        assert_eq!(visible.len(), options.len(), "{screen}");
+        let (y, index) = *visible.last().unwrap();
+        crate::app::handle_mouse(&mut app, mouse_at(anchor.x + 1, y));
+        assert_eq!(
+            app.settings.time_base,
+            crate::waveform::TimeBase::CYCLE[index]
+        );
+        assert!(!app.time_dropdown.open);
+    }
+
+    #[test]
+    fn narrow_settings_do_not_emit_slider_hits_outside_the_dialog() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 40, 12));
+        app.open_settings();
+        let area = super::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::Settings);
+        for x in area.x..area.right() + 10 {
+            assert!(!matches!(
+                super::dialog::settings_hit(app.last_area, &app, x, area.y + 1),
+                Some(super::dialog::SettingsHit::General {
+                    setting: crate::settings::GeneralSetting::BusSplitBits,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

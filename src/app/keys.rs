@@ -14,6 +14,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     {
         return true;
     }
+    if app.dialog.is_some() {
+        return dialog_key(app, key);
+    }
     if app.pending_g {
         app.pending_g = false;
         match key.code {
@@ -35,9 +38,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.delete_selected_signals();
         }
         return false;
-    }
-    if app.dialog.is_some() {
-        return dialog_key(app, key);
     }
     if app.ctx_menu.is_some() {
         return ctx_key(app, key);
@@ -166,6 +166,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Char('h') if app.focus == Focus::List => {
             app.show_full_names = !app.show_full_names;
+            app.settings.general.full_names = app.show_full_names;
             app.msg(if app.show_full_names {
                 "signal names: full hierarchy"
             } else {
@@ -405,8 +406,8 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         app.capture_key(key);
         return false;
     }
-    if app.dialog == Some(Dialog::TopSplit) {
-        app.top_split_key(key);
+    if app.dialog == Some(Dialog::ColorPicker) {
+        app.color_picker_key(key);
         return false;
     }
     if app.dialog == Some(Dialog::Settings) && app.time_dropdown.open && app.time_dropdown_key(key)
@@ -428,6 +429,9 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('r') if app.dialog == Some(Dialog::Settings) => app.settings_reset(),
         KeyCode::Char('R') if app.dialog == Some(Dialog::Settings) => app.settings_reset_all(),
         KeyCode::Enter if app.dialog == Some(Dialog::Settings) => app.settings_activate(),
+        KeyCode::Char(' ') if app.dialog == Some(Dialog::Settings) => app.settings_activate(),
+        KeyCode::Char('n') if app.dialog == Some(Dialog::FindValue) => app.search_value(true),
+        KeyCode::Char('N') if app.dialog == Some(Dialog::FindValue) => app.search_value(false),
         KeyCode::Enter => match app.dialog {
             Some(Dialog::Goto) => app.apply_goto(),
             Some(Dialog::FindValue) => app.apply_find_value(),
@@ -444,6 +448,15 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
             _ => app.dialog = None,
         },
         _ if matches!(
+            app.dialog,
+            Some(
+                Dialog::Goto
+                    | Dialog::Find
+                    | Dialog::FindValue
+                    | Dialog::SplitBus
+                    | Dialog::GroupName
+            )
+        ) && matches!(
             key.code,
             KeyCode::Char(_)
                 | KeyCode::Backspace
@@ -949,11 +962,20 @@ mod tests {
         assert_ne!(app.settings.theme.bg, Theme::LIGHT.bg);
         handle_key(&mut app, key(KeyCode::Char('r')));
         assert_eq!(app.settings.theme.bg, Theme::LIGHT.bg);
+        let before_picker = app.settings.theme.bg;
         handle_key(&mut app, key(KeyCode::Enter));
-        assert_ne!(app.settings.theme.bg, Theme::LIGHT.bg);
-        let after_enter = app.settings.theme.bg;
-        handle_key(&mut app, key(KeyCode::Left));
-        assert_ne!(app.settings.theme.bg, after_enter);
+        assert_eq!(app.dialog, Some(Dialog::ColorPicker));
+        assert_eq!(app.settings.theme.bg, before_picker);
+        handle_key(&mut app, key(KeyCode::Right));
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.dialog, Some(Dialog::Settings));
+        assert_ne!(app.settings.theme.bg, before_picker);
+        let accepted = app.settings.theme.bg;
+        handle_key(&mut app, key(KeyCode::Enter));
+        handle_key(&mut app, key(KeyCode::Right));
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.dialog, Some(Dialog::Settings));
+        assert_eq!(app.settings.theme.bg, accepted);
         handle_key(&mut app, key(KeyCode::Char('r')));
         assert_eq!(app.settings.theme.bg, Theme::LIGHT.bg);
 
@@ -965,6 +987,70 @@ mod tests {
         assert_eq!(app.settings.theme.wave_bg, Theme::LIGHT.wave_bg);
         handle_key(&mut app, key(KeyCode::Esc));
         assert_eq!(app.dialog, None);
+    }
+
+    #[test]
+    fn pending_prefix_does_not_leak_into_dialog_input() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        app.sel_row = Some(1);
+        app.pending_d = true;
+        app.open_dialog(Dialog::FindValue);
+        handle_key(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(app.display, vec![0, 1]);
+        assert_eq!(app.input.as_string(), "d");
+        assert!(!app.pending_d);
+    }
+
+    #[test]
+    fn settings_space_toggles_checkbox_without_touching_text_input() {
+        let mut app = app_with(VCD);
+        app.input.set("keep");
+        app.open_settings();
+        app.select_settings_row(3);
+        handle_key(&mut app, key(KeyCode::Char(' ')));
+        assert!(app.settings.general.full_names);
+        assert!(app.show_full_names);
+        assert_eq!(app.input.as_string(), "keep");
+    }
+
+    #[test]
+    fn find_value_n_and_n_navigate_matches() {
+        let vcd = "$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n#0\n0!\n#10\n1!\n#20\n0!\n";
+        let mut app = app_with(vcd);
+        app.set_display(vec![0]);
+        app.sel_row = Some(1);
+        app.value_query = Some("b1".to_string());
+        app.open_dialog(Dialog::FindValue);
+        handle_key(&mut app, key(KeyCode::Char('n')));
+        assert_eq!(app.cursor, 10);
+        app.cursor = 20;
+        handle_key(&mut app, key(KeyCode::Char('N')));
+        assert_eq!(app.cursor, 10);
+        assert_eq!(app.dialog, Some(Dialog::FindValue));
+    }
+
+    #[test]
+    fn full_name_shortcut_and_checkbox_share_state() {
+        let mut app = app_with(VCD);
+        app.focus = Focus::List;
+        handle_key(&mut app, key(KeyCode::Char('h')));
+        assert!(app.show_full_names);
+        assert!(app.settings.general.full_names);
+        app.select_settings_row(3);
+        app.settings_activate();
+        assert!(!app.show_full_names);
+        assert!(!app.settings.general.full_names);
+    }
+
+    #[test]
+    fn theme_reset_restores_dark_theme() {
+        let mut app = app_with(VCD);
+        app.set_settings_category(crate::settings::SettingsCategory::Theme);
+        app.set_theme_kind(crate::settings::ThemeKind::Light);
+        app.settings_reset();
+        assert_eq!(app.settings.theme_kind, crate::settings::ThemeKind::Dark);
+        assert_eq!(app.settings.theme, crate::settings::Theme::DARK);
     }
 
     #[test]

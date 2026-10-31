@@ -83,7 +83,7 @@ impl Slider {
     }
 
     fn round(&self, raw: usize) -> usize {
-        let stepped = (raw / self.step) * self.step;
+        let stepped = self.min + ((raw.saturating_sub(self.min) / self.step) * self.step);
         stepped.clamp(self.min, self.max)
     }
 

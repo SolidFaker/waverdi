@@ -24,7 +24,7 @@ pub use keys::handle_key;
 pub use load::{LoadEvent, LoadJob};
 pub use mouse::handle_mouse;
 pub use nav::{Group, ListRow};
-pub use preferences::{SettingRow, SettingsPane};
+pub use preferences::{SettingRow, SettingsButton, SettingsPane};
 
 use crate::dump::source::Capabilities;
 use crate::engine::wave::WaveRowCache;
@@ -249,8 +249,12 @@ pub struct App {
     pub settings_sel: usize,
     pub settings_category: SettingsCategory,
     pub settings_pane: SettingsPane,
+    pub settings_button: SettingsButton,
     pub key_capture: Option<usize>,
     pub time_dropdown: DropdownState,
+    pub time_dropdown_anchor: usize,
+    pub color_picker: Option<crate::ui::widgets::ColorPickerState>,
+    pub color_setting: Option<SettingId>,
     /// RTL sources for the Source pane (filelist or discovered from the dump).
     pub sources: Option<SourceSet>,
     /// Parsed RTL modules of `sources` (declaration/driver/load lines).
@@ -359,8 +363,12 @@ impl App {
             settings_sel: 0,
             settings_category: SettingsCategory::General,
             settings_pane: SettingsPane::Items,
+            settings_button: SettingsButton::Reset,
             key_capture: None,
             time_dropdown: DropdownState::default(),
+            time_dropdown_anchor: 0,
+            color_picker: None,
+            color_setting: None,
             sources: None,
             rtl: None,
             source_view: None,
@@ -419,6 +427,10 @@ impl App {
     /// faster and forwards `Moved` events instead of dropping them.
     pub fn is_dragging(&self) -> bool {
         self.dragging.is_some()
+            || self
+                .color_picker
+                .as_ref()
+                .is_some_and(crate::ui::widgets::ColorPickerState::dragging)
     }
 
     /// Consume the redraw request; called by the event loop after a draw.
@@ -1641,6 +1653,8 @@ impl App {
 
     /// Open a dialog, resetting its body scroll.
     pub fn open_dialog(&mut self, dialog: Dialog) {
+        self.pending_g = false;
+        self.pending_d = false;
         self.dialog = Some(dialog);
         self.dialog_scroll = 0;
     }

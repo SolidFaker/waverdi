@@ -28,7 +28,7 @@ impl<'a> RadioGroup<'a> {
             } else {
                 Style::new().fg(theme.text)
             };
-            let marker = if selected { "(●)" } else { "( )" };
+            let marker = if selected { "[x]" } else { "[ ]" };
             text::put(
                 buf,
                 self.area.x,
@@ -69,7 +69,7 @@ impl Toggle {
     }
 
     pub fn draw(self, buf: &mut Buffer, theme: &Theme) {
-        let marker = if self.value { "[on]" } else { "[off]" };
+        let marker = if self.value { "[x]" } else { "[ ]" };
         let style = Style::new().fg(if self.value { theme.accent } else { theme.dim });
         text::put(
             buf,
@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_radio_style_is_not_checkbox_style() {
+    fn choice_markers_have_fixed_width() {
         let backend = ratatui::backend::TestBackend::new(12, 1);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let theme = Theme::DARK;
@@ -163,11 +163,13 @@ mod tests {
                     .draw(frame.buffer_mut(), &theme)
             })
             .unwrap();
-        assert!(terminal
+        let text: String = terminal
             .backend()
             .buffer()
             .content
             .iter()
-            .any(|cell| cell.symbol() == "●"));
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.starts_with("[x] Dark"), "{text}");
     }
 }

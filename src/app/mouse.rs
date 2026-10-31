@@ -24,6 +24,21 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
     if let Some(dialog) = app.dialog {
         // While a dialog owns the focus, mouse input goes to it only.
         let l = app.layout();
+        if dialog == Dialog::ColorPicker {
+            if m.kind == MouseEventKind::Down(MouseButton::Left)
+                && pt_in(
+                    crate::ui::dialog::close_button(l.area, app, dialog),
+                    col,
+                    row,
+                )
+            {
+                app.close_color_picker();
+            } else {
+                let area = crate::ui::dialog::dialog_rect(l.area, app, dialog);
+                app.color_picker_mouse(area, m);
+            }
+            return false;
+        }
         if dialog != Dialog::AddSignals
             && m.kind == MouseEventKind::Down(MouseButton::Left)
             && pt_in(
@@ -241,22 +256,6 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
             _ => {}
         }
     }
-    if dialog == Dialog::TopSplit
-        && matches!(
-            m.kind,
-            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
-        )
-    {
-        if let Some(value) = crate::ui::dialog::top_split_slider(app).value_at(m.column, m.row) {
-            app.set_general_value(crate::settings::GeneralSetting::TopSplit, value);
-            app.dragging = Some(new_drag(
-                DragMode::SettingsSlider(crate::settings::GeneralSetting::TopSplit),
-                m.column,
-                0.0,
-            ));
-            return;
-        }
-    }
     let slider_drag = app
         .dragging
         .map(|drag| matches!(drag.mode, DragMode::SettingsSlider(_)))
@@ -273,11 +272,12 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
                 }
                 crate::ui::dialog::SettingsHit::Item(index) => {
                     app.select_settings_row(index);
-                    if matches!(
-                        app.settings_row(),
+                    match app.settings_row() {
                         Some(crate::app::SettingRow::KeyBinding(_))
-                    ) {
-                        app.settings_activate();
+                        | Some(crate::app::SettingRow::Setting(
+                            crate::settings::SettingId::Ui(_) | crate::settings::SettingId::Wave(_),
+                        )) => app.settings_activate(),
+                        _ => {}
                     }
                 }
                 crate::ui::dialog::SettingsHit::Theme(index) => {
@@ -292,9 +292,6 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
                     match setting {
                         crate::settings::GeneralSetting::TimeBase if value == usize::MAX => {
                             app.time_dropdown.open = !app.time_dropdown.open;
-                        }
-                        crate::settings::GeneralSetting::TopSplit => {
-                            app.dialog = Some(Dialog::TopSplit);
                         }
                         _ => {
                             app.set_general_value(setting, value);
@@ -324,6 +321,28 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
             }
             return;
         }
+    }
+    if dialog == Dialog::Settings
+        && app.time_dropdown.open
+        && matches!(
+            m.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        )
+    {
+        let options: Vec<&str> = crate::waveform::TimeBase::CYCLE
+            .iter()
+            .map(|base| base.label())
+            .collect();
+        let anchor = crate::ui::dialog::time_dropdown_anchor(app.last_area, app);
+        let dropdown = crate::ui::widgets::Dropdown::new(&options, app.time_dropdown, anchor);
+        let bounds = crate::ui::dialog::settings_popup_bounds(app.last_area, app);
+        let delta = if m.kind == MouseEventKind::ScrollUp {
+            -1
+        } else {
+            1
+        };
+        dropdown.scroll(&mut app.time_dropdown, delta, bounds);
+        return;
     }
     let delta: i64 = match m.kind {
         MouseEventKind::ScrollUp => -1,
@@ -359,6 +378,9 @@ fn dialog_scroll_to(app: &mut App, dialog: Dialog, row: u16) {
     let Some(area) = crate::ui::dialog::scroll_area(app.layout().area, app, dialog) else {
         return;
     };
+    if dialog == Dialog::Settings {
+        app.time_dropdown.open = false;
+    }
     let max = area.total.saturating_sub(area.rows);
     let denom = area.rows.saturating_sub(1).max(1) as f64;
     let rel = (row.saturating_sub(area.bar.y) as f64 / denom).clamp(0.0, 1.0);
@@ -1687,18 +1709,30 @@ mod tests {
     }
 
     #[test]
-    fn top_split_vertical_slider_supports_mouse_drag() {
+    fn colour_row_opens_picker_and_buttons_apply_or_cancel() {
         let mut app = app_with(VCD);
         app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
-        app.dialog = Some(crate::app::Dialog::TopSplit);
+        app.open_settings();
+        app.set_settings_category(crate::settings::SettingsCategory::UiColours);
+        let settings =
+            crate::ui::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::Settings);
+        crate::app::handle_mouse(&mut app, click(settings.x + 40, settings.y + 1));
+        assert_eq!(app.dialog, Some(crate::app::Dialog::ColorPicker));
         let area =
-            crate::ui::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::TopSplit);
-        crate::app::handle_mouse(&mut app, click(area.x + area.width / 2, area.bottom() - 2));
-        assert_eq!(
-            app.settings.splits.top_pct,
-            crate::settings::Splits::MIN_TOP_PCT
+            crate::ui::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::ColorPicker);
+        let layout = crate::ui::widgets::ColorPicker::layout(area).unwrap();
+        crate::app::handle_mouse(
+            &mut app,
+            click(layout.sv.right() - 1, layout.sv.bottom() - 1),
         );
-        assert!(app.dragging.is_some());
+        crate::app::handle_mouse(&mut app, click(layout.ok.x + 2, layout.ok.y));
+        assert_eq!(app.dialog, Some(crate::app::Dialog::Settings));
+        assert_eq!(app.settings.theme.bg, ratatui::style::Color::Rgb(0, 0, 0));
+
+        crate::app::handle_mouse(&mut app, click(settings.x + 40, settings.y + 1));
+        crate::app::handle_mouse(&mut app, click(layout.cancel.x + 2, layout.cancel.y));
+        assert_eq!(app.dialog, Some(crate::app::Dialog::Settings));
+        assert_eq!(app.settings.theme.bg, ratatui::style::Color::Rgb(0, 0, 0));
     }
 
     #[test]
@@ -1714,6 +1748,52 @@ mod tests {
         assert_eq!(app.dialog, Some(crate::app::Dialog::Settings));
         crate::app::handle_mouse(&mut app, click(area.right() - 6, area.bottom() - 2));
         assert_eq!(app.dialog, None);
+    }
+
+    #[test]
+    fn theme_radio_options_are_all_clickable() {
+        let mut app = app_with(VCD);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.open_settings();
+        app.set_settings_category(crate::settings::SettingsCategory::Theme);
+        let area =
+            crate::ui::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::Settings);
+        for (index, y) in [(1, 2), (2, 3)] {
+            let x = area.x + 40;
+            let row = area.y + y;
+            assert_eq!(
+                crate::ui::dialog::settings_hit(app.last_area, &app, x, row),
+                Some(crate::ui::dialog::SettingsHit::Theme(index))
+            );
+            crate::app::handle_mouse(&mut app, click(x, row));
+            assert_eq!(
+                app.settings.theme_kind,
+                crate::settings::ThemeKind::ALL[index]
+            );
+        }
+    }
+
+    #[test]
+    fn open_dropdown_keeps_its_anchor_during_wheel() {
+        let mut app = app_with(VCD);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
+        app.select_settings_row(4);
+        app.settings_activate();
+        let selection = app.settings_sel;
+        let area =
+            crate::ui::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::Settings);
+        crate::app::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: area.x + 40,
+                row: area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.settings_sel, selection);
+        assert_eq!(app.time_dropdown_anchor, 4);
+        assert!(app.time_dropdown.open);
     }
 
     #[test]

@@ -21,9 +21,19 @@ impl<'a> TextBox<'a> {
         buf.set_style(self.area, style);
         let width = self.area.width as usize;
         let value = self.state.as_string();
-        let shown = text::trunc(&value, width);
+        let cursor = self.state.cursor();
+        let len = value.chars().count();
+        let start = if width == 0 {
+            0
+        } else {
+            cursor
+                .saturating_add(1)
+                .saturating_sub(width)
+                .min(len.saturating_sub(width))
+        };
+        let shown = text::scroll_slice(&value, start, width);
         text::put(buf, self.area.x, self.area.y, &shown, style);
-        let caret = self.state.cursor().min(shown.chars().count()) as u16;
+        let caret = cursor.saturating_sub(start).min(width.saturating_sub(1)) as u16;
         let x = self.area.x + caret;
         let y = self.area.y;
         if let Some(cell) = buf.cell_mut((x, y)) {
@@ -77,5 +87,27 @@ mod tests {
             &mut state,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
         ));
+    }
+
+    #[test]
+    fn long_input_scrolls_to_the_cursor() {
+        let mut state = InputState::default();
+        state.set("abcdefghij");
+        let backend = ratatui::backend::TestBackend::new(4, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = Theme::DARK;
+        let mut caret = Position::new(0, 0);
+        terminal
+            .draw(|frame| {
+                caret =
+                    TextBox::new(&state, Rect::new(0, 0, 4, 1)).draw(frame.buffer_mut(), &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..4)
+            .map(|x| buffer.cell((x, 0)).unwrap().symbol())
+            .collect();
+        assert_eq!(text, "…ghi");
+        assert_eq!(caret, Position::new(3, 0));
     }
 }

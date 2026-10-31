@@ -114,11 +114,6 @@ impl Settings {
                     .unwrap_or(0) as i64;
                 self.time_base = TimeBase::CYCLE[(index + delta).rem_euclid(count) as usize];
             }
-            SettingId::General(GeneralSetting::TopSplit) => {
-                self.splits.top_pct = (self.splits.top_pct as i64 + delta * 5)
-                    .clamp(Splits::MIN_TOP_PCT as i64, Splits::MAX_TOP_PCT as i64)
-                    as u16;
-            }
             SettingId::General(setting) => setting.cycle(&mut self.general, delta),
             SettingId::Theme => {
                 let count = ThemeKind::ALL.len() as i64;
@@ -144,14 +139,20 @@ impl Settings {
         let base = self.theme_kind.theme();
         match setting {
             SettingId::General(GeneralSetting::TimeBase) => self.time_base = TimeBase::Scale,
-            SettingId::General(GeneralSetting::TopSplit) => {
-                self.splits.top_pct = Splits::default().top_pct
-            }
             SettingId::General(setting) => setting.reset(&mut self.general),
-            SettingId::Theme => {}
+            SettingId::Theme => self.set_theme_kind(ThemeKind::Dark),
             SettingId::Ui(setting) => setting.set(&mut self.theme, setting.get(&base)),
             SettingId::Wave(setting) => setting.set(&mut self.theme, setting.get(&base)),
         }
+    }
+
+    pub fn set_color(&mut self, setting: SettingId, color: ratatui::style::Color) -> bool {
+        match setting {
+            SettingId::Ui(setting) => setting.set(&mut self.theme, color),
+            SettingId::Wave(setting) => setting.set(&mut self.theme, color),
+            _ => return false,
+        }
+        true
     }
 
     pub fn set_theme_kind(&mut self, kind: ThemeKind) {
@@ -167,7 +168,7 @@ mod tests {
     #[test]
     fn schema_is_split_by_category() {
         let settings = Settings::default();
-        assert_eq!(settings.len(SettingsCategory::General), 6);
+        assert_eq!(settings.len(SettingsCategory::General), 5);
         assert_eq!(settings.len(SettingsCategory::Theme), 1);
         assert_eq!(settings.len(SettingsCategory::UiColours), 1);
         assert_eq!(settings.len(SettingsCategory::WaveformColours), 10);

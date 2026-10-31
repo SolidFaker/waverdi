@@ -9,7 +9,7 @@ pub enum Dialog {
     GroupName,
     Settings,
     BindKey,
-    TopSplit,
+    ColorPicker,
     Keys,
     About,
     AddSignals,
