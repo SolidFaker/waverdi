@@ -243,6 +243,8 @@ pub struct App {
     pub follow_sel: usize,
     pub follow_name: String,
     pub toolbar_search: bool,
+    pub search_case_sensitive: bool,
+    pub search_regex: bool,
     pub(crate) source_history: Vec<navigation::SourceLocation>,
     pub(crate) source_history_index: Option<usize>,
     pub(crate) history_restore: bool,
@@ -373,6 +375,8 @@ impl App {
             follow_sel: 0,
             follow_name: String::new(),
             toolbar_search: false,
+            search_case_sensitive: false,
+            search_regex: false,
             source_history: Vec::new(),
             source_history_index: None,
             history_restore: false,
@@ -418,7 +422,10 @@ impl App {
             trace_key: None,
             pending_fit: false,
         };
-        app.msg("waverdi 0.1 — press 'o' to open a waveform dump, F1/? for key bindings");
+        app.msg(format!(
+            "waverdi {} — press 'o' to open a waveform dump, F1/? for key bindings",
+            env!("CARGO_PKG_VERSION")
+        ));
         app
     }
 

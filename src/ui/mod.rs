@@ -1193,6 +1193,15 @@ mod tests {
     }
 
     #[test]
+    fn about_shows_package_version() {
+        let mut app = App::new();
+        app.open_dialog(crate::app::Dialog::About);
+        let screen = render_app(&mut app, 100, 30);
+        let version = format!("waverdi {}", env!("CARGO_PKG_VERSION"));
+        assert!(screen.contains(&version), "missing {version}: {screen}");
+    }
+
+    #[test]
     fn settings_dialog_renders_categories_items_and_effective_shortcuts() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();

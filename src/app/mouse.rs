@@ -1907,6 +1907,8 @@ mod tests {
             Tool::HierarchyDown,
             Tool::Back,
             Tool::Forward,
+            Tool::SearchCase,
+            Tool::SearchRegex,
             Tool::SearchDown,
             Tool::SearchUp,
         ] {
@@ -1940,6 +1942,25 @@ mod tests {
             );
         }
         assert_eq!(app.input.as_string(), "rst");
+        for tool in [Tool::SearchCase, Tool::SearchRegex] {
+            let col = (l.nav_toolbar.x..l.nav_toolbar.right())
+                .find(|col| {
+                    matches!(
+                        crate::ui::toolbar::tool_at(
+                            l.toolbar,
+                            l.nav_toolbar,
+                            &app,
+                            *col,
+                            l.nav_toolbar.y
+                        ),
+                        Some(found) if found == tool
+                    )
+                })
+                .expect("search toggle");
+            crate::app::handle_mouse(&mut app, click(col, l.nav_toolbar.y));
+        }
+        assert!(app.search_case_sensitive);
+        assert!(app.search_regex);
         crate::app::handle_key(
             &mut app,
             crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, KeyModifiers::NONE),

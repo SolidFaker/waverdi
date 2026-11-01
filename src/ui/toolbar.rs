@@ -25,6 +25,8 @@ pub enum Tool {
     Back,
     Forward,
     Search,
+    SearchCase,
+    SearchRegex,
     SearchDown,
     SearchUp,
 }
@@ -60,11 +62,13 @@ const TOOLS: [(&str, Tool); 10] = [
     ("Time", Tool::TimeBase),
 ];
 
-const NAV_TOOLS: [(&str, Tool); 4] = [
+const NAV_TOOLS: [(&str, Tool); 6] = [
     ("↑", Tool::HierarchyUp),
     ("↓", Tool::HierarchyDown),
     ("←", Tool::Back),
     ("→", Tool::Forward),
+    ("Aa", Tool::SearchCase),
+    (".*", Tool::SearchRegex),
 ];
 
 fn tool_label(tool: Tool, app: &App) -> String {
@@ -300,6 +304,14 @@ pub fn run_tool(app: &mut App, tool: Tool) -> bool {
             app.focus_source_search();
             false
         }
+        Tool::SearchCase => {
+            app.toggle_search_case_sensitive();
+            false
+        }
+        Tool::SearchRegex => {
+            app.toggle_search_regex();
+            false
+        }
         Tool::SearchDown => {
             app.search_source(true);
             false
@@ -331,14 +343,18 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) -> Option<Position> {
         text::put(buf, rect.x + 1, rect.y, label, style);
         text::put(buf, rect.right(), rect.y, "│", Style::new().fg(t.dim));
     }
-    for (_, rect, label) in &cache.nav_buttons {
-        text::put(
-            buf,
-            rect.x + 1,
-            rect.y,
-            label,
-            Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
-        );
+    for (tool, rect, label) in &cache.nav_buttons {
+        let active = match tool {
+            Tool::SearchCase => app.search_case_sensitive,
+            Tool::SearchRegex => app.search_regex,
+            _ => false,
+        };
+        let style = if active {
+            Style::new().fg(Color::Black).bg(t.accent)
+        } else {
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD)
+        };
+        text::put(buf, rect.x + 1, rect.y, label, style);
         text::put(buf, rect.right(), rect.y, "│", Style::new().fg(t.dim));
     }
     if app.toolbar_search && cache.search.width > 0 {

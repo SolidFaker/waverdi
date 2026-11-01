@@ -150,6 +150,26 @@ impl App {
         self.focus = Focus::Source;
     }
 
+    pub fn toggle_search_case_sensitive(&mut self) {
+        self.search_case_sensitive = !self.search_case_sensitive;
+        self.msg(format!(
+            "source search: {}",
+            if self.search_case_sensitive {
+                "case sensitive"
+            } else {
+                "ignore case"
+            }
+        ));
+    }
+
+    pub fn toggle_search_regex(&mut self) {
+        self.search_regex = !self.search_regex;
+        self.msg(format!(
+            "source search: regular expressions {}",
+            if self.search_regex { "on" } else { "off" }
+        ));
+    }
+
     pub fn toolbar_search_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc | KeyCode::Tab => self.toolbar_search = false,
@@ -167,16 +187,35 @@ impl App {
             self.msg("source search: enter a query");
             return;
         }
-        let found = self
-            .source_view
-            .as_ref()
-            .and_then(|view| find_in_source(view, &query, forward));
-        let Some((line, col)) = found else {
+        let Some(result) = self.source_view.as_ref().map(|view| {
+            find_in_source(
+                view,
+                &query,
+                forward,
+                self.search_case_sensitive,
+                self.search_regex,
+            )
+        }) else {
+            self.msg(format!("source search: no match for {query}"));
+            return;
+        };
+        let found = match result {
+            Ok(found) => found,
+            Err(error) => {
+                self.msg(error);
+                return;
+            }
+        };
+        let Some((line, start, end)) = found else {
             self.msg(format!("source search: no match for {query}"));
             return;
         };
         self.remember_source_location();
-        self.set_source_cursor(line, col);
+        self.set_source_cursor(line, start);
+        if let Some(view) = self.source_view.as_mut() {
+            view.anchor = Some((line, start));
+            view.sel = Some(((line, start), (line, end)));
+        }
         self.focus = Focus::Source;
     }
 }
@@ -185,11 +224,21 @@ fn find_in_source(
     view: &crate::rtl::SourceView,
     query: &str,
     forward: bool,
-) -> Option<(usize, usize)> {
+    case_sensitive: bool,
+    regex_enabled: bool,
+) -> Result<Option<(usize, usize, usize)>, String> {
+    let pattern = if regex_enabled {
+        query.to_string()
+    } else {
+        regex::escape(query)
+    };
+    let regex = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|error| format!("source search: invalid regex: {error}"))?;
     if view.lines.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let query = query.to_lowercase();
     let count = view.lines.len();
     for step in 0..count {
         let (line, start) = if forward {
@@ -203,7 +252,7 @@ fn find_in_source(
                 (step == 0).then_some(view.col),
             )
         };
-        let text = view.lines[line].to_lowercase();
+        let text = &view.lines[line];
         let boundary = start.unwrap_or_else(|| if forward { 0 } else { text.chars().count() });
         let byte = text
             .char_indices()
@@ -211,15 +260,19 @@ fn find_in_source(
             .map(|(index, _)| index)
             .unwrap_or(text.len());
         let found = if forward {
-            text[byte..].find(&query).map(|index| byte + index)
+            regex
+                .find_at(text, byte)
+                .filter(|found| found.start() >= byte)
         } else {
-            text[..byte].rfind(&query)
+            regex.find_iter(&text[..byte]).last()
         };
-        if let Some(index) = found {
-            return Some((line, text[..index].chars().count()));
+        if let Some(found) = found {
+            let start = text[..found.start()].chars().count();
+            let end = text[..found.end()].chars().count();
+            return Ok(Some((line, start, end)));
         }
     }
-    None
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -244,13 +297,61 @@ mod tests {
         };
         view.line = 1;
         view.col = 5;
-        assert_eq!(find_in_source(&view, "alpha", true), Some((0, 0)));
-        assert_eq!(find_in_source(&view, "alpha", false), Some((0, 0)));
+        assert_eq!(
+            find_in_source(&view, "alpha", true, false, false),
+            Ok(Some((0, 0, 5)))
+        );
+        assert_eq!(
+            find_in_source(&view, "alpha", false, false, false),
+            Ok(Some((0, 0, 5)))
+        );
         view.line = 0;
         view.col = 0;
-        assert_eq!(find_in_source(&view, "alpha", true), Some((1, 5)));
-        assert_eq!(find_in_source(&view, "alpha", false), Some((1, 5)));
-        assert_eq!(find_in_source(&view, "missing", true), None);
+        assert_eq!(
+            find_in_source(&view, "alpha", true, false, false),
+            Ok(Some((1, 5, 10)))
+        );
+        assert_eq!(
+            find_in_source(&view, "alpha", false, false, false),
+            Ok(Some((1, 5, 10)))
+        );
+        assert_eq!(
+            find_in_source(&view, "missing", true, false, false),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn search_supports_case_and_regex_modes() {
+        let mut view = crate::rtl::SourceView {
+            module: "search".into(),
+            file: PathBuf::new(),
+            lines: vec!["Alpha".into(), "alpha".into(), "foo123".into()],
+            max_width: 6,
+            line_modules: vec!["search".into(); 3],
+            spans: vec![Vec::new(); 3],
+            inactive: vec![false; 3],
+            scroll: 0,
+            line: 1,
+            col: 0,
+            anchor: None,
+            sel: None,
+        };
+        assert_eq!(
+            find_in_source(&view, "^ALPHA$", true, false, true),
+            Ok(Some((0, 0, 5)))
+        );
+        assert_eq!(find_in_source(&view, "^ALPHA$", true, true, true), Ok(None));
+        view.line = 0;
+        assert_eq!(
+            find_in_source(&view, "foo[0-9]+", true, false, false),
+            Ok(None)
+        );
+        assert_eq!(
+            find_in_source(&view, "foo[0-9]+", true, false, true),
+            Ok(Some((2, 0, 6)))
+        );
+        assert!(find_in_source(&view, "[", true, false, true).is_err());
     }
 
     #[test]
@@ -287,6 +388,10 @@ mod tests {
         app.search_source(true);
         assert_eq!(app.source_view.as_ref().unwrap().line, 0);
         assert_eq!(app.source_view.as_ref().unwrap().col, 17);
+        assert_eq!(
+            app.source_view.as_ref().unwrap().sel,
+            Some(((0, 17), (0, 20)))
+        );
         app.hierarchy_down();
         assert_eq!(app.source_view.as_ref().unwrap().module, "child");
         app.history_back();

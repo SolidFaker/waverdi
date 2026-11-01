@@ -352,7 +352,11 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
             }
             Dialog::About => {
                 let lines = [
-                    "waverdi 0.1 — Verdi-style terminal RTL waveform viewer",
+                    concat!(
+                        "waverdi ",
+                        env!("CARGO_PKG_VERSION"),
+                        " — Verdi-style terminal RTL waveform viewer"
+                    ),
                     "formats: VCD, FST (FSDB via the Verdi FFR library)",
                     "ratatui + crossterm on Rust",
                 ];
