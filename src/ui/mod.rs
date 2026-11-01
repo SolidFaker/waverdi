@@ -1143,6 +1143,21 @@ mod tests {
     }
 
     #[test]
+    fn create_bus_dialog_renders_name_editor() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.set_display(vec![0, 1]);
+        app.selection = vec![0, 1];
+        app.open_create_bus(0);
+        app.input.set("result_bus");
+        let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("Name (blank=auto):"), "{screen}");
+        assert!(screen.contains("result_bus"), "{screen}");
+        assert!(screen.contains("Tab name/list"), "{screen}");
+    }
+
+    #[test]
     fn settings_dialog_renders_categories_items_and_effective_shortcuts() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();

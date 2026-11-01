@@ -240,6 +240,8 @@ pub struct App {
     pub renaming_group: Option<u32>,
     /// Ordering state of `Dialog::CreateBus`.
     pub bus_builder: Option<BusBuilder>,
+    /// Display-only bus ancestry; automatic expansion keeps using `Signal::parent`.
+    pub(crate) manual_parents: HashMap<usize, usize>,
     /// Use the native GUI file dialog instead of the built-in browser.
     pub use_gui: bool,
     pub browser: Option<FileBrowser>,
@@ -357,6 +359,7 @@ impl App {
             pending_split: None,
             renaming_group: None,
             bus_builder: None,
+            manual_parents: HashMap::new(),
             use_gui: crate::picker::detect_gui(),
             browser: None,
             browser_mode: BrowserMode::Waveform,
@@ -811,6 +814,7 @@ impl App {
         self.pending_split = None;
         self.renaming_group = None;
         self.bus_builder = None;
+        self.manual_parents.clear();
         self.find_sel = 0;
         self.value_query = None;
         self.cursor = wf.start;

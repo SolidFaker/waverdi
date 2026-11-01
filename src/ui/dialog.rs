@@ -52,7 +52,7 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
         Dialog::Keys => keymap::help_len() as u16 + 4,
         Dialog::CreateBus => app
             .bus_builder()
-            .map(|builder| builder.items.len() as u16 + 4)
+            .map(|builder| builder.items.len() as u16 + 5)
             .unwrap_or(8),
         Dialog::Settings | Dialog::ColorPicker => 22,
         _ => 7,
@@ -184,8 +184,8 @@ pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea
             app.find_matches().len(),
         ),
         Dialog::CreateBus => (
-            area.y + 1,
-            area.height.saturating_sub(4) as usize,
+            area.y + 2,
+            area.height.saturating_sub(5) as usize,
             app.bus_builder().map(|b| b.items.len()).unwrap_or(0),
         ),
         Dialog::Settings => (area.y + 1, settings_layout(area).rows, app.settings_len()),
@@ -296,7 +296,9 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
                     ),
                 );
             }
-            Dialog::CreateBus => draw_bus_builder(buf, area, app),
+            Dialog::CreateBus => {
+                cursor = draw_bus_builder(buf, area, app);
+            }
             Dialog::GroupName => {
                 cursor = draw_input(
                     buf,
@@ -929,7 +931,15 @@ fn draw_browser(buf: &mut Buffer, area: Rect, app: &App) {
     }
 }
 
-fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) {
+fn bus_name_row(area: Rect) -> Rect {
+    Rect::new(area.x + 2, area.y + 1, area.width.saturating_sub(4), 1)
+}
+
+pub fn create_bus_name_area(screen: Rect, app: &App) -> Rect {
+    bus_name_row(dialog_rect(screen, app, Dialog::CreateBus))
+}
+
+fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) -> Option<Position> {
     let t = &app.settings.theme;
     let Some(builder) = app.bus_builder() else {
         text::put(
@@ -939,12 +949,46 @@ fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) {
             "no bus builder state",
             Style::new().fg(t.xcol),
         );
-        return;
+        return None;
     };
+    const NAME_LABEL: &str = "Name (blank=auto): ";
+    let name_row = bus_name_row(area);
+    text::put(
+        buf,
+        name_row.x,
+        name_row.y,
+        &text::trunc(NAME_LABEL, name_row.width as usize),
+        Style::new().fg(if builder.name_focus { t.accent } else { t.text }),
+    );
+    let label_width = (NAME_LABEL.len() as u16).min(name_row.width);
+    let input_area = Rect::new(
+        name_row.x + label_width,
+        name_row.y,
+        name_row.width - label_width,
+        1,
+    );
+    let value = app.input.as_string();
+    let mut caret = None;
+    if builder.name_focus && input_area.width > 0 {
+        caret = Some(crate::ui::widgets::TextBox::new(&app.input, input_area).draw(buf, t));
+    } else {
+        let (value, fg) = if value.is_empty() {
+            (app.bus_builder_default_name(), t.dim)
+        } else {
+            (value, t.text)
+        };
+        crate::ui::widgets::Label::new(&value, input_area.width as usize).draw(
+            buf,
+            input_area.x,
+            input_area.y,
+            Style::new().fg(fg).bg(t.input_bg),
+        );
+    }
+
     let inner = area.width.saturating_sub(2) as usize;
     let count = builder.items.len();
     let total: u32 = builder.items.iter().map(|item| item.width()).sum();
-    let rows = area.height.saturating_sub(4) as usize;
+    let rows = area.height.saturating_sub(5) as usize;
     let max_scroll = count.saturating_sub(rows);
     let mut scroll = app.dialog_scroll.min(max_scroll);
     if builder.sel >= scroll + rows {
@@ -982,7 +1026,7 @@ fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) {
         text::put(
             buf,
             area.x + 2,
-            area.y + 1 + (k - scroll) as u16,
+            area.y + 2 + (k - scroll) as u16,
             &text::trunc(&label, inner),
             style,
         );
@@ -990,13 +1034,13 @@ fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) {
     draw_scrollbar(
         buf,
         area.right().saturating_sub(2),
-        area.y + 1,
+        area.y + 2,
         rows,
         scroll,
         count,
         t,
     );
-    let hint_top = " ↑↓ select   ⇧↑↓ reorder   h/l LSB   H/L MSB   x full range";
+    let hint_top = " Tab name/list  ↑↓ select  ⇧↑↓ reorder  h/l LSB  H/L MSB";
     let hint_bottom = format!(" s/S sort   r rev   Enter create   Esc cancel   {total} bits ");
     text::put(
         buf,
@@ -1012,6 +1056,7 @@ fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) {
         &text::trunc(&hint_bottom, inner),
         Style::new().fg(t.dim),
     );
+    caret
 }
 
 fn draw_input(

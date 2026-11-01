@@ -151,11 +151,9 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
             {
                 app.finish_source_selection();
             }
-            // A drop may leave the newest group populated: only now add the
-            // trailing empty group (never while dragging through groups).
             if app
                 .dragging
-                .map(|drag| matches!(drag.mode, DragMode::Reorder | DragMode::GroupReorder))
+                .map(|drag| drag.mode == DragMode::GroupReorder)
                 .unwrap_or(false)
             {
                 app.ensure_trailing_group();
@@ -254,6 +252,32 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
                 return;
             }
             _ => {}
+        }
+    }
+    if dialog == Dialog::CreateBus && m.kind == MouseEventKind::Down(MouseButton::Left) {
+        let screen = app.layout().area;
+        if pt_in(
+            crate::ui::dialog::create_bus_name_area(screen, app),
+            m.column,
+            m.row,
+        ) {
+            app.bus_builder_focus_name();
+            return;
+        }
+        let area = crate::ui::dialog::dialog_rect(screen, app, dialog);
+        let top = area.y + 2;
+        if m.row >= top && m.row < area.bottom().saturating_sub(2) {
+            let index = app.dialog_scroll + (m.row - top) as usize;
+            if app
+                .bus_builder()
+                .is_some_and(|builder| index < builder.items.len())
+            {
+                app.bus_builder_select(index);
+            }
+            if let Some(builder) = app.bus_builder.as_mut() {
+                builder.name_focus = false;
+            }
+            return;
         }
     }
     let slider_drag = app
@@ -905,12 +929,10 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
                 (app.row_scroll + row.saturating_sub(l.list.y + 2) as usize).min(rows.len() - 1);
             let dragged = app.display[drag.row];
             if app.selection.len() > 1 && app.selection.contains(&dragged) {
-                // Move the whole multi-selection one step toward the pointer.
                 match rows[hover] {
                     ListRow::Group { index, .. } => {
-                        let group = app.group_of_signal(dragged).unwrap_or(0);
-                        if group != index {
-                            app.move_selection(if index > group { 1 } else { -1 });
+                        if app.group_of_pos(drag.row) != index {
+                            app.move_selection_to_group(index);
                         }
                     }
                     ListRow::Signal { sig, .. } => {
@@ -945,31 +967,12 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
                 }
                 return;
             }
-            // Move one slot toward the hovered row: no long jumps and no
-            // auto-scroll, so dragging across expanded arrays stays stable.
-            let to = match rows[hover] {
+            let (to, target_group) = match rows[hover] {
                 ListRow::Group { index, .. } => {
-                    let group = app.group_of_signal(dragged).unwrap_or(0);
-                    if group == index {
+                    if app.group_of_pos(drag.row) == index {
                         return;
                     }
-                    let start = app.group_range(index).start;
-                    if start >= app.display.len() {
-                        if drag.row + 1 == app.display.len() {
-                            // The target group is empty and sits after the
-                            // last row: hand the signal over without moving.
-                            app.groups[group].count = app.groups[group].count.saturating_sub(1);
-                            app.groups[index].count += 1;
-                            app.touch_panes();
-                            return;
-                        }
-                        // Step toward the end first, then hand over.
-                        drag.row + 1
-                    } else if start > drag.row {
-                        drag.row + 1
-                    } else {
-                        drag.row.saturating_sub(1)
-                    }
+                    (app.group_range(index).start, Some(index))
                 }
                 ListRow::Signal { sig, .. } => {
                     let Some(pos) = app.display.iter().position(|&s| s == sig) else {
@@ -978,15 +981,23 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
                     if pos == drag.row {
                         return;
                     }
-                    if pos > drag.row {
+                    let to = if pos > drag.row {
                         drag.row + 1
                     } else {
                         drag.row.saturating_sub(1)
-                    }
+                    };
+                    (to, None)
                 }
             };
-            if to != drag.row && to < app.display.len() {
+            let moved = if let Some(group) = target_group {
+                app.move_signal_to(drag.row, group, to)
+            } else if to != drag.row && to < app.display.len() {
                 app.move_signal(drag.row, to);
+                Some(to)
+            } else {
+                None
+            };
+            if let Some(to) = moved {
                 if let Some(active) = app.dragging.as_mut() {
                     active.row = to;
                 }
@@ -1668,6 +1679,34 @@ mod tests {
     }
 
     #[test]
+    fn create_bus_name_editor_supports_mouse_focus() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 ! a $end\n\
+            $var wire 1 \" b $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        app.set_display(vec![0, 1]);
+        app.selection = vec![0, 1];
+        app.open_create_bus(0);
+        let name = crate::ui::dialog::create_bus_name_area(app.last_area, &app);
+        crate::app::handle_mouse(&mut app, click(name.x + 2, name.y));
+        assert!(app.bus_builder().unwrap().name_focus);
+        crate::app::handle_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('n'),
+                KeyModifiers::NONE,
+            ),
+        );
+        assert_eq!(app.input.as_string(), "n");
+        let area =
+            crate::ui::dialog::dialog_rect(app.last_area, &app, crate::app::Dialog::CreateBus);
+        crate::app::handle_mouse(&mut app, click(area.x + 2, area.y + 2));
+        assert!(!app.bus_builder().unwrap().name_focus);
+        assert_eq!(app.bus_builder().unwrap().sel, 0);
+    }
+
+    #[test]
     fn settings_mouse_switches_categories_and_captures_shortcuts() {
         let mut app = app_with(VCD);
         app.sync_layout(ratatui::layout::Rect::new(0, 0, 100, 30));
@@ -2019,6 +2058,39 @@ mod tests {
     }
 
     #[test]
+    fn drag_signal_into_non_tail_empty_group() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 ! a $end\n\
+            $var wire 1 \" b $end\n\
+            $var wire 1 # c $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        app.set_display(vec![0, 1, 2]);
+        app.groups = vec![
+            crate::app::Group::new(0),
+            crate::app::Group::new(1),
+            crate::app::Group::new(2),
+            crate::app::Group::new(3),
+        ];
+        app.groups[0].count = 2;
+        app.groups[2].count = 1;
+        app.touch_panes();
+        let l = app.layout();
+        crate::app::handle_mouse(&mut app, click(30, l.list.y + 3));
+        crate::app::handle_mouse(&mut app, drag(30, l.list.y + 5));
+        app.dragging = None;
+        assert_eq!(app.display, vec![1, 0, 2]);
+        assert_eq!(
+            app.groups
+                .iter()
+                .map(|group| group.count)
+                .collect::<Vec<_>>(),
+            vec![1, 1, 1, 0]
+        );
+        assert_eq!(app.group_of_pos(1), 1);
+    }
+
+    #[test]
     fn drag_group_header_reorders_groups() {
         let mut app = app_with(VCD);
         app.set_display(vec![0, 1]);
@@ -2300,7 +2372,7 @@ mod tests {
     }
 
     #[test]
-    fn a_drop_creates_the_trailing_empty_group() {
+    fn multi_selection_drop_does_not_create_another_group() {
         let vcd = "$timescale 1ns $end\n\
             $var wire 1 ! a $end\n\
             $var wire 1 \" b $end\n\
@@ -2309,6 +2381,7 @@ mod tests {
         let mut app = app_with(vcd);
         app.set_display(vec![0, 1, 2]);
         app.grow_groups(0);
+        app.selection = vec![0, 1];
         assert_eq!(app.groups.len(), 2);
         let l = app.layout();
         let src_row = l.list.y + 3;
@@ -2317,7 +2390,7 @@ mod tests {
         for _ in 0..8 {
             crate::app::handle_mouse(&mut app, drag(30, g1_row));
         }
-        assert_eq!(app.groups[1].count, 1);
+        assert_eq!(app.groups[1].count, 2);
         assert_eq!(app.groups.len(), 2, "no group is created mid-drag");
         let up = MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
@@ -2326,8 +2399,9 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         crate::app::handle_mouse(&mut app, up);
-        assert_eq!(app.groups.len(), 3, "the drop adds the empty group");
-        assert_eq!(app.groups[2].count, 0);
+        assert_eq!(app.groups.len(), 2, "the drop reuses the existing group");
+        assert_eq!(app.groups[0].count, 1);
+        assert_eq!(app.display, vec![2, 0, 1]);
     }
 
     #[test]

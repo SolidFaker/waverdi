@@ -68,10 +68,22 @@ impl App {
                 count: group.count,
                 collapsed: group.collapsed,
             });
+            let mut depths = std::collections::HashMap::new();
             if !group.collapsed {
                 let end = (start + group.count).min(self.display.len());
                 for &sig in &self.display[start..end] {
-                    rows.push(ListRow::Signal { sig, depth: 0 });
+                    let parent = self.manual_parents.get(&sig).copied().or_else(|| {
+                        self.wf
+                            .as_ref()
+                            .and_then(|wf| wf.signals.get(sig))
+                            .and_then(|signal| signal.parent)
+                    });
+                    let depth = parent
+                        .and_then(|parent| depths.get(&parent))
+                        .map(|depth| depth + 1)
+                        .unwrap_or(0);
+                    depths.insert(sig, depth);
+                    rows.push(ListRow::Signal { sig, depth });
                 }
             }
             start += group.count;
@@ -160,7 +172,6 @@ impl App {
     /// Move the displayed signal at `from` to `to` and hand it to `group`,
     /// which may be empty (the slot is where its signals would start).
     /// Returns the signal's new display position.
-    #[cfg(test)]
     pub fn move_signal_to(&mut self, from: usize, group: usize, to: usize) -> Option<usize> {
         self.touch_panes();
         if from >= self.display.len() || group >= self.groups.len() {
@@ -178,11 +189,43 @@ impl App {
         Some(to)
     }
 
-    /// Keep an empty group at the end of the list. Called after a drop or a
-    /// group reorder, never mid-drag, so dragging through the groups does not
-    /// create a trail of empty ones. Keyboard moves deliberately do not call
-    /// it: they may consume the trailing group, and replenishing it there
-    /// would let every `J` hand the selection to yet another fresh group.
+    pub fn move_selection_to_group(&mut self, group: usize) -> Option<usize> {
+        if group >= self.groups.len() {
+            return None;
+        }
+        let positions: Vec<usize> = self
+            .display
+            .iter()
+            .enumerate()
+            .filter(|(_, sig)| self.selection.contains(sig))
+            .map(|(position, _)| position)
+            .collect();
+        if positions.is_empty() {
+            return None;
+        }
+        let moved: Vec<usize> = positions
+            .iter()
+            .map(|&position| self.display[position])
+            .collect();
+        let to = self.group_range(group).start;
+        let removed_before = positions.iter().filter(|&&position| position < to).count();
+        self.touch_panes();
+        for &position in positions.iter().rev() {
+            let source = self.group_of_pos(position);
+            self.display.remove(position);
+            self.groups[source].count = self.groups[source].count.saturating_sub(1);
+        }
+        let to = to.saturating_sub(removed_before).min(self.display.len());
+        for (offset, &sig) in moved.iter().enumerate() {
+            self.display.insert(to + offset, sig);
+        }
+        self.groups[group].count += moved.len();
+        Some(to)
+    }
+
+    /// Restore an empty last group after a group reorder. Signal drops consume
+    /// the destination group without creating another one. Keyboard moves do
+    /// not call this either, so repeated `J` cannot keep growing the list.
     pub(crate) fn ensure_trailing_group(&mut self) {
         if self
             .groups
@@ -252,7 +295,7 @@ impl App {
             .list_rows()
             .iter()
             .filter_map(|row| match row {
-                ListRow::Signal { sig, .. } => {
+                ListRow::Signal { sig, depth, .. } => {
                     let signal = &wf.signals[*sig];
                     let scope = if full_names {
                         signal
@@ -263,7 +306,7 @@ impl App {
                     } else {
                         0
                     };
-                    Some(scope + signal.name.chars().count())
+                    Some(depth * 2 + scope + signal.name.chars().count())
                 }
                 ListRow::Group { .. } => None,
             })
@@ -484,7 +527,7 @@ impl App {
     /// boundaries. On a group row, the group itself is moved. A move never
     /// appends a group: the trailing empty group is a destination that gets
     /// consumed once, so repeated `J`/`K` cannot keep growing the list; adds
-    /// and drops restore the trailing group when it is needed again.
+    /// and group reorders restore the trailing group when it is needed again.
     pub fn move_selected_signal(&mut self, delta: i64) {
         self.touch_panes();
         if let Some(ListRow::Group { index, .. }) = self.selected_row() {
@@ -587,8 +630,8 @@ impl App {
         }
     }
 
-    /// Double-click on a signal row: expand a multi-bit signal into its bits,
-    /// or collapse the bit rows created earlier (also those of `Split Bus`).
+    /// Double-click toggles automatic child rows. Display-only bus ancestry is
+    /// deliberately excluded from this expansion and collapse behavior.
     pub fn toggle_signal_expand(&mut self, sig: usize) {
         self.touch_panes();
         let children: Vec<usize> = match &self.wf {
@@ -1284,16 +1327,14 @@ mod tests {
     }
 
     #[test]
-    fn the_trailing_empty_group_is_added_on_drop() {
+    fn trailing_group_is_restored_after_an_explicit_request() {
         let mut app = app_with(VCD);
         app.set_display(vec![0, 1]);
         app.grow_groups(0); // G1 stays empty
         assert_eq!(app.groups.len(), 2);
-        // Moving (dragging) alone does not create groups...
         app.move_signal_to(0, 1, 2);
         assert_eq!(app.groups[1].count, 1);
-        assert_eq!(app.groups.len(), 2, "no empty group during the drag");
-        // ...only the drop does.
+        assert_eq!(app.groups.len(), 2);
         app.ensure_trailing_group();
         assert_eq!(app.groups.len(), 3);
         assert_eq!(app.groups[2].count, 0);

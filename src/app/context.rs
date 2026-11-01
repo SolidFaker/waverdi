@@ -362,6 +362,10 @@ impl App {
         let Some((first, last)) = self.append_bit_chunks(idx, width) else {
             return;
         };
+        for sig in first..last {
+            self.wf.as_mut().unwrap().signals[sig].parent = None;
+            self.manual_parents.insert(sig, idx);
+        }
         let name = self
             .wf
             .as_ref()
@@ -516,7 +520,12 @@ impl App {
                 lo: 0,
             });
         }
-        self.bus_builder = Some(BusBuilder { items, sel: 0 });
+        self.bus_builder = Some(BusBuilder {
+            items,
+            sel: 0,
+            name_focus: false,
+        });
+        self.input.clear();
         self.open_dialog(Dialog::CreateBus);
     }
 
@@ -584,8 +593,16 @@ impl App {
             )
         };
 
+        let custom_name = self.input.as_string();
+        let custom_name = custom_name.trim();
+        let name = if custom_name.is_empty() {
+            format!("{base}_bus[{}:0]", width - 1)
+        } else {
+            custom_name.to_string()
+        };
+        let members: Vec<usize> = items.iter().map(|item| item.sig).collect();
         let signal = Signal {
-            name: format!("{base}_bus[{}:0]", width - 1),
+            name,
             bits: width as u32,
             var_type: "wire".to_string(),
             dir: String::new(),
@@ -600,18 +617,35 @@ impl App {
         };
         let new_index = {
             let wf = self.wf.as_mut().unwrap();
+            let new_index = wf.signals.len();
             wf.signals.push(signal);
-            wf.signals.len() - 1
+            new_index
         };
-        let last_row = items
+        for &member in &members {
+            self.manual_parents.insert(member, new_index);
+        }
+        let member_set: BTreeSet<usize> = members.iter().copied().collect();
+        let positions: Vec<usize> = self
+            .display
             .iter()
-            .filter_map(|item| self.display.iter().position(|x| *x == item.sig))
-            .max()
-            .map(|r| r + 1)
-            .unwrap_or(self.display.len());
-        let group = self.group_of_pos(last_row.saturating_sub(1));
-        let at = last_row.min(self.display.len());
+            .enumerate()
+            .filter(|(_, sig)| member_set.contains(sig))
+            .map(|(position, _)| position)
+            .collect();
+        let first = positions.first().copied();
+        let group = first
+            .map(|position| self.group_of_pos(position))
+            .unwrap_or_else(|| self.groups.len().saturating_sub(1));
+        for &position in positions.iter().rev() {
+            let source = self.group_of_pos(position);
+            self.display.remove(position);
+            self.groups[source].count = self.groups[source].count.saturating_sub(1);
+        }
+        let at = first.unwrap_or(self.display.len()).min(self.display.len());
         self.display_insert(group, at, new_index);
+        for (offset, &member) in members.iter().enumerate() {
+            self.display_insert(group, at + 1 + offset, member);
+        }
         self.scroll_to_row_of(new_index);
         self.msg(format!(
             "created bus {} from {} bits",
@@ -648,11 +682,42 @@ impl BusItem {
 pub struct BusBuilder {
     pub items: Vec<BusItem>,
     pub sel: usize,
+    pub name_focus: bool,
 }
 
 impl App {
     pub fn bus_builder(&self) -> Option<&BusBuilder> {
         self.bus_builder.as_ref()
+    }
+
+    pub fn bus_builder_default_name(&self) -> String {
+        let Some(builder) = self.bus_builder() else {
+            return String::new();
+        };
+        let Some(first) = builder.items.first() else {
+            return String::new();
+        };
+        let Some(signal) = self.wf.as_ref().and_then(|wf| wf.signals.get(first.sig)) else {
+            return String::new();
+        };
+        let width: u32 = builder.items.iter().map(|item| item.width()).sum();
+        format!("{}_bus[{}:0]", bus_base_name(&signal.name), width - 1)
+    }
+
+    pub fn bus_builder_toggle_name_focus(&mut self) {
+        if let Some(builder) = self.bus_builder.as_mut() {
+            builder.name_focus = !builder.name_focus;
+            if builder.name_focus {
+                self.input.end();
+            }
+        }
+    }
+
+    pub fn bus_builder_focus_name(&mut self) {
+        if let Some(builder) = self.bus_builder.as_mut() {
+            builder.name_focus = true;
+            self.input.end();
+        }
     }
 
     /// Move the LSB (`msb == false`) or MSB (`msb == true`) of the selected
@@ -715,6 +780,7 @@ impl App {
     /// Select a bus-builder row directly (used by the dialog scrollbar).
     pub fn bus_builder_select(&mut self, sel: usize) {
         if let Some(builder) = self.bus_builder.as_mut() {
+            builder.name_focus = false;
             if !builder.items.is_empty() {
                 builder.sel = sel.min(builder.items.len() - 1);
             }
@@ -839,6 +905,20 @@ mod tests {
         assert_eq!(wf.signals[8].name, "data[3]");
         let times: Vec<u64> = wf.signals[5].changes.iter().map(|c| c.t).collect();
         assert_eq!(times, vec![0, 10, 15]);
+        assert!(wf.children(3).is_empty());
+        for idx in 5..9 {
+            assert_eq!(wf.signals[idx].parent, None);
+            assert_eq!(app.manual_parents.get(&idx), Some(&3));
+        }
+        let depths: Vec<usize> = app
+            .list_rows()
+            .iter()
+            .filter_map(|row| match row {
+                crate::app::ListRow::Signal { sig, depth } if (5..9).contains(sig) => Some(*depth),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(depths, vec![1, 1, 1, 1]);
     }
 
     #[test]
@@ -918,6 +998,79 @@ mod tests {
         // at t=15: b2=0 (MSB), b1=1, b0=1 -> 0b011
         let bits = bus.value_at(15).unwrap().to_bits_vec().unwrap();
         assert_eq!(bits, &[1, 1, 0]);
+        let new_index = app.wf.as_ref().unwrap().signals.len() - 1;
+        assert!(app.wf.as_ref().unwrap().children(new_index).is_empty());
+        for member in [0, 1, 2] {
+            assert_eq!(app.wf.as_ref().unwrap().signals[member].parent, None);
+            assert_eq!(app.manual_parents.get(&member), Some(&new_index));
+        }
+        assert_eq!(app.display, vec![new_index, 2, 1, 0]);
+        let rows: Vec<(usize, usize)> = app
+            .list_rows()
+            .iter()
+            .filter_map(|row| match row {
+                crate::app::ListRow::Signal { sig, depth } => Some((*sig, *depth)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows, vec![(new_index, 0), (2, 1), (1, 1), (0, 1)]);
+    }
+
+    #[test]
+    fn split_then_original_expands_independently() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![3]);
+        app.split_bus(3, 1);
+        let split_rows = app.display.clone();
+
+        app.toggle_signal_expand(3);
+        let automatic = app.wf.as_ref().unwrap().children(3);
+        assert_eq!(automatic, vec![9, 10, 11, 12]);
+        assert_eq!(app.display.len(), 9);
+        assert!(split_rows.iter().all(|sig| app.display.contains(sig)));
+
+        app.toggle_signal_expand(3);
+        assert_eq!(app.display, split_rows);
+        app.toggle_signal_expand(3);
+        assert_eq!(app.display.len(), 9);
+        assert!(automatic.iter().all(|sig| app.display.contains(sig)));
+        assert!(split_rows.iter().all(|sig| app.display.contains(sig)));
+    }
+
+    #[test]
+    fn original_expansion_before_split_is_preserved() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![3]);
+        app.toggle_signal_expand(3);
+        let automatic = app.wf.as_ref().unwrap().children(3);
+        assert_eq!(automatic, vec![5, 6, 7, 8]);
+        app.split_bus(3, 2);
+
+        app.toggle_signal_expand(3);
+        assert_eq!(app.display, vec![3, 9, 10]);
+        assert!(automatic.iter().all(|sig| !app.display.contains(sig)));
+        app.toggle_signal_expand(3);
+        assert!(automatic.iter().all(|sig| app.display.contains(sig)));
+        assert!(app.display.contains(&9));
+        assert!(app.display.contains(&10));
+    }
+
+    #[test]
+    fn create_bus_keeps_member_expansion_independent() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1, 2]);
+        app.selection = vec![0, 1, 2];
+        app.open_create_bus(0);
+        app.bus_builder_reverse();
+        app.bus_builder_commit();
+        let new_index = app.wf.as_ref().unwrap().signals.len() - 1;
+        let created_rows = app.display.clone();
+
+        app.toggle_signal_expand(new_index);
+        assert_eq!(app.display.len(), created_rows.len() + 3);
+        assert!(created_rows.iter().all(|sig| app.display.contains(sig)));
+        app.toggle_signal_expand(new_index);
+        assert_eq!(app.display, created_rows);
     }
 
     #[test]

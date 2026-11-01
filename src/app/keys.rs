@@ -550,10 +550,25 @@ fn add_signals_key(app: &mut App, key: KeyEvent) {
 }
 
 fn bus_builder_key(app: &mut App, key: KeyEvent) {
+    if key.code == KeyCode::Esc {
+        app.bus_builder_cancel();
+        return;
+    }
+    if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+        app.bus_builder_toggle_name_focus();
+        return;
+    }
+    if app.bus_builder().is_some_and(|builder| builder.name_focus) {
+        if key.code == KeyCode::Enter {
+            app.bus_builder_commit();
+        } else {
+            crate::ui::widgets::TextBox::handle_key(&mut app.input, key);
+        }
+        return;
+    }
     let reorder = key.modifiers.contains(KeyModifiers::SHIFT)
         || key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Esc => app.bus_builder_cancel(),
         KeyCode::Enter => app.bus_builder_commit(),
         KeyCode::Up if reorder => app.bus_builder_reorder(-1),
         KeyCode::Down if reorder => app.bus_builder_reorder(1),
@@ -941,6 +956,41 @@ mod tests {
         app.sel_row = Some(1);
         handle_key(&mut app, key(KeyCode::Char('x')));
         assert_eq!(app.display, vec![1]);
+    }
+
+    #[test]
+    fn create_bus_name_editor_supports_custom_and_default_names() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 ! a $end\n\
+            $var wire 1 \" b $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        app.set_display(vec![0, 1]);
+        app.selection = vec![0, 1];
+        app.open_create_bus(0);
+        handle_key(&mut app, key(KeyCode::Tab));
+        for c in "root".chars() {
+            handle_key(&mut app, key(KeyCode::Char(c)));
+        }
+        handle_key(&mut app, key(KeyCode::Tab));
+        handle_key(&mut app, key(KeyCode::Char('r')));
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(
+            app.wf.as_ref().unwrap().signals.last().unwrap().name,
+            "root"
+        );
+
+        let mut app = app_with(vcd);
+        app.set_display(vec![0, 1]);
+        app.selection = vec![0, 1];
+        app.input.set("stale");
+        app.open_create_bus(0);
+        assert!(app.input.as_string().is_empty());
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(
+            app.wf.as_ref().unwrap().signals.last().unwrap().name,
+            "a_bus[1:0]"
+        );
     }
 
     #[test]
