@@ -26,6 +26,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     app.sync_source_trace();
     let l = compute_layout(area, app.settings.splits);
     let t = &app.settings.theme;
+    let toolbar_cursor;
 
     {
         let buf = frame.buffer_mut();
@@ -41,7 +42,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             // The shared row between the top row and nWave follows the focus.
             wave::draw_nwave_frame(buf, &l, t, true);
         }
-        toolbar::draw(buf, &l, app);
+        toolbar_cursor = toolbar::draw(buf, &l, app);
         match &app.wf {
             None => status::draw_empty(buf, &l, t),
             Some(wf) => {
@@ -65,6 +66,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         add::draw(frame, l.area, app);
     } else if let Some(dialog) = app.dialog {
         dialog::draw(frame, &l, app, dialog);
+    }
+    if app.dialog.is_none() {
+        if let Some(position) = toolbar_cursor {
+            frame.set_cursor_position(position);
+        }
     }
 }
 
@@ -143,6 +149,19 @@ mod tests {
         let screen = render_app(&mut app, 100, 30);
         assert!(screen.contains("waverdi"));
         assert!(screen.contains("no waveform"));
+    }
+
+    #[test]
+    fn toolbar_renders_navigation_and_source_search() {
+        let mut app = App::new();
+        let screen = render_app(&mut app, 100, 30);
+        for text in ["↑", "↓", "←", "→", "Search source", "▼", "▲"] {
+            assert!(screen.contains(text), "missing {text}: {screen}");
+        }
+        app.focus_source_search();
+        app.input.set("rst");
+        let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("rst"), "{screen}");
     }
 
     #[test]
@@ -264,10 +283,18 @@ mod tests {
         app.set_display(vec![0]);
         app.cursor = 5; // clk 0 -> 1
         let screen = render_app(&mut app, 120, 30);
-        assert!(screen.contains('→'), "{screen}");
+        let wave = screen
+            .lines()
+            .nth(app.layout().rows.y as usize + 1)
+            .unwrap();
+        assert!(wave.contains('→'), "{wave}");
         app.cursor = 7; // between edges
         let screen = render_app(&mut app, 120, 30);
-        assert!(!screen.contains('→'), "{screen}");
+        let wave = screen
+            .lines()
+            .nth(app.layout().rows.y as usize + 1)
+            .unwrap();
+        assert!(!wave.contains('→'), "{wave}");
     }
 
     #[test]
@@ -281,10 +308,18 @@ mod tests {
         app.scale = 10.0;
         app.cursor = 11; // column 1 covers ticks 5..15
         let screen = render_app(&mut app, 120, 30);
-        assert!(screen.contains('→'), "{screen}");
+        let wave = screen
+            .lines()
+            .nth(app.layout().rows.y as usize + 1)
+            .unwrap();
+        assert!(wave.contains('→'), "{wave}");
         app.cursor = 26; // column 3 covers ticks 25..35, no edge
         let screen = render_app(&mut app, 120, 30);
-        assert!(!screen.contains('→'), "{screen}");
+        let wave = screen
+            .lines()
+            .nth(app.layout().rows.y as usize + 1)
+            .unwrap();
+        assert!(!wave.contains('→'), "{wave}");
     }
 
     #[test]

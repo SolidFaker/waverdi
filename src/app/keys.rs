@@ -17,6 +17,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if app.dialog.is_some() {
         return dialog_key(app, key);
     }
+    if app.toolbar_search {
+        return app.toolbar_search_key(key);
+    }
     if app.pending_g {
         app.pending_g = false;
         match key.code {
@@ -408,6 +411,24 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
     }
     if app.dialog == Some(Dialog::ColorPicker) {
         app.color_picker_key(key);
+        return false;
+    }
+    if app.dialog == Some(Dialog::Follow) {
+        match key.code {
+            KeyCode::Esc => app.dialog = None,
+            KeyCode::Up => app.follow_move(-1),
+            KeyCode::Down => app.follow_move(1),
+            KeyCode::PageUp => {
+                let rows = crate::ui::dialog::visible_rows(app.last_area, app, Dialog::Follow);
+                app.follow_move(-(rows as i64));
+            }
+            KeyCode::PageDown => {
+                let rows = crate::ui::dialog::visible_rows(app.last_area, app, Dialog::Follow);
+                app.follow_move(rows as i64);
+            }
+            KeyCode::Enter => app.follow_activate(),
+            _ => {}
+        }
         return false;
     }
     if app.dialog == Some(Dialog::Settings) && app.time_dropdown.open && app.time_dropdown_key(key)

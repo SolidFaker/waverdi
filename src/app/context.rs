@@ -20,6 +20,10 @@ pub enum CtxItem {
     ExpandAll,
     CollapseAll,
     RemoveGroup,
+    CopyFullPath,
+    CopyFilePath,
+    FollowSignal,
+    ExpandTreeLevel(Option<usize>),
     Highlight(Option<ratatui::style::Color>),
 }
 
@@ -96,10 +100,25 @@ pub const GROUP_MENU: &[CtxEntry] = &[
     CtxEntry::Item("Remove Group", CtxItem::RemoveGroup),
 ];
 
+const TREE_LEVEL_MENU: &[CtxEntry] = &[
+    CtxEntry::Item("All", CtxItem::ExpandTreeLevel(None)),
+    CtxEntry::Item("2 Levels", CtxItem::ExpandTreeLevel(Some(2))),
+    CtxEntry::Item("3 Levels", CtxItem::ExpandTreeLevel(Some(3))),
+    CtxEntry::Item("4 Levels", CtxItem::ExpandTreeLevel(Some(4))),
+    CtxEntry::Item("5 Levels", CtxItem::ExpandTreeLevel(Some(5))),
+];
+
+pub const SCOPE_MENU: &[CtxEntry] = &[
+    CtxEntry::Item("Copy Full Path", CtxItem::CopyFullPath),
+    CtxEntry::Submenu("Expand Tree by Level", TREE_LEVEL_MENU),
+];
+
 pub const SOURCE_MENU: &[CtxEntry] = &[
     CtxEntry::Item("Add to Waveform", CtxItem::AddToWaveform),
     CtxEntry::Submenu("Highlight", HIGHLIGHT_MENU),
     CtxEntry::Item("Select All Module Text", CtxItem::SelectAllSource),
+    CtxEntry::Item("Copy File Path", CtxItem::CopyFilePath),
+    CtxEntry::Item("Follow Signal", CtxItem::FollowSignal),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +126,8 @@ pub enum CtxTarget {
     Signal(usize),
     /// Stable group id.
     Group(u32),
+    /// Hierarchy scope id.
+    Scope(usize),
     /// RTL source pane (selection).
     Source,
 }
@@ -135,6 +156,7 @@ impl App {
     pub fn ctx_root(&self) -> &'static [CtxEntry] {
         match self.ctx_menu.as_ref().map(|menu| &menu.target) {
             Some(CtxTarget::Group(_)) => GROUP_MENU,
+            Some(CtxTarget::Scope(_)) => SCOPE_MENU,
             Some(CtxTarget::Source) => SOURCE_MENU,
             _ => SIGNAL_MENU,
         }
@@ -237,11 +259,27 @@ impl App {
                     self.remove_group(index);
                 }
             }
+            (CtxTarget::Scope(id), CtxItem::CopyFullPath) => {
+                let path = self.tree_path(id).unwrap_or_default();
+                self.copy_text(path, "full path");
+            }
+            (CtxTarget::Scope(id), CtxItem::ExpandTreeLevel(level)) => {
+                self.expand_scope_tree(id, level);
+            }
             (CtxTarget::Source, CtxItem::AddToWaveform) => self.add_source_selection(),
             (CtxTarget::Source, CtxItem::Highlight(color)) => {
                 self.highlight_source_word(color);
             }
             (CtxTarget::Source, CtxItem::SelectAllSource) => self.select_all_source(),
+            (CtxTarget::Source, CtxItem::CopyFilePath) => {
+                let path = self
+                    .source_view
+                    .as_ref()
+                    .map(|view| view.file.display().to_string())
+                    .unwrap_or_default();
+                self.copy_text(path, "file path");
+            }
+            (CtxTarget::Source, CtxItem::FollowSignal) => self.open_follow_signal(),
             _ => {}
         }
     }
@@ -1155,6 +1193,78 @@ mod tests {
         assert_eq!(app.list_rows().len(), 1);
         app.expand_all();
         assert_eq!(app.list_rows().len(), 2);
+    }
+
+    #[test]
+    fn scope_menu_copies_path_and_expands_selected_subtree() {
+        let vcd = "$timescale 1ns $end\n\
+            $scope module top $end\n\
+            $scope module sub $end\n\
+            $scope module leaf $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n\
+            $upscope $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        app.open_context_menu(CtxTarget::Scope(1), 5, 5);
+        let labels: Vec<&str> = app.ctx_root().iter().map(CtxEntry::label).collect();
+        assert_eq!(labels, vec!["Copy Full Path", "Expand Tree by Level"]);
+        app.open_ctx_submenu(1);
+        let levels: Vec<&str> = app.ctx_level().iter().map(CtxEntry::label).collect();
+        assert_eq!(
+            levels,
+            vec!["All", "2 Levels", "3 Levels", "4 Levels", "5 Levels"]
+        );
+        app.run_ctx_item(CtxItem::ExpandTreeLevel(Some(2)));
+        assert!(app.expanded.contains(&1));
+        assert!(app.expanded.contains(&2));
+        assert!(!app.expanded.contains(&3));
+        assert_eq!(app.tree_visible().len(), 4);
+
+        app.open_context_menu(CtxTarget::Scope(1), 5, 5);
+        app.run_ctx_item(CtxItem::ExpandTreeLevel(None));
+        assert!(app.expanded.contains(&3));
+        app.open_context_menu(CtxTarget::Scope(3), 5, 5);
+        app.run_ctx_item(CtxItem::CopyFullPath);
+        assert_eq!(
+            crate::app::take_clipboard(&mut app),
+            vec!["design.top.sub.leaf".to_string()]
+        );
+    }
+
+    #[test]
+    fn source_menu_copies_current_file_path() {
+        use crate::rtl::{RtlDb, SourceSet};
+
+        let mut app = app_with(
+            "$timescale 1ns $end\n\
+            $scope module top $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n",
+        );
+        let dir = std::env::temp_dir().join(format!("waverdi_copy_source_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("top.sv");
+        std::fs::write(&file, "module top(input logic clk);\nendmodule\n").unwrap();
+        app.sources = Some(SourceSet::from_files(vec![file.clone()], "test"));
+        app.rtl = Some(RtlDb::parse_sources(app.sources.as_ref().unwrap()));
+        app.tree_sel = 1;
+        app.sync_source();
+        assert!(app.source_view.is_some());
+        app.open_context_menu(CtxTarget::Source, 5, 5);
+        assert!(app
+            .ctx_root()
+            .iter()
+            .any(|entry| entry.label() == "Copy File Path"));
+        app.run_ctx_item(CtxItem::CopyFilePath);
+        assert_eq!(
+            crate::app::take_clipboard(&mut app),
+            vec![file.display().to_string()]
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

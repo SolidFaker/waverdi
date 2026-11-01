@@ -1130,6 +1130,31 @@ impl App {
         self.tree_scroll_to_sel();
     }
 
+    pub fn expand_scope_tree(&mut self, id: usize, levels: Option<usize>) {
+        let Some(wf) = self.wf.as_ref() else {
+            return;
+        };
+        if id >= wf.tree.nodes.len() {
+            return;
+        }
+        let mut stack = vec![(id, 0usize)];
+        while let Some((node, depth)) = stack.pop() {
+            if levels.is_some_and(|limit| depth >= limit) {
+                continue;
+            }
+            self.expanded.insert(node);
+            for &child in &wf.tree.nodes[node].children {
+                stack.push((child, depth + 1));
+            }
+        }
+        self.touch_panes();
+        self.tree_scroll_to_sel();
+        match levels {
+            Some(level) => self.msg(format!("expanded subtree to {level} level(s)")),
+            None => self.msg("expanded entire subtree"),
+        }
+    }
+
     /// Hierarchical path from the root to `id`, e.g. `tb.u_dut`.
     pub fn tree_path(&self, id: usize) -> Option<String> {
         fn rec(wf: &Waveform, node: usize, target: usize, path: &mut Vec<String>) -> bool {

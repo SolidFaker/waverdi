@@ -280,6 +280,22 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
             return;
         }
     }
+    if dialog == Dialog::Follow && m.kind == MouseEventKind::Down(MouseButton::Left) {
+        let area = crate::ui::dialog::dialog_rect(app.layout().area, app, dialog);
+        let top = area.y + 2;
+        if m.column >= area.x + 2
+            && m.column < area.right().saturating_sub(2)
+            && m.row >= top
+            && m.row < area.bottom().saturating_sub(2)
+        {
+            let index = app.dialog_scroll + (m.row - top) as usize;
+            if index < app.follow_targets.len() {
+                app.follow_sel = index;
+                app.follow_activate();
+            }
+        }
+        return;
+    }
     let slider_drag = app
         .dragging
         .map(|drag| matches!(drag.mode, DragMode::SettingsSlider(_)))
@@ -392,6 +408,7 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
             }
         }
         Dialog::CreateBus => app.bus_builder_move(delta),
+        Dialog::Follow => app.follow_move(delta),
         Dialog::Settings => app.settings_move(delta),
         _ => {}
     }
@@ -414,6 +431,7 @@ fn dialog_scroll_to(app: &mut App, dialog: Dialog, row: u16) {
     let bottom = (scroll + area.rows.saturating_sub(1)).min(area.total.saturating_sub(1));
     match dialog {
         Dialog::Find => app.find_sel = bottom,
+        Dialog::Follow => app.follow_sel = bottom,
         Dialog::CreateBus => app.bus_builder_select(bottom),
         Dialog::Settings => app.select_settings_row(bottom),
         _ => {}
@@ -469,8 +487,8 @@ fn mouse_down(
         }
         return false;
     }
-    if pt_in(l.toolbar, col, row) {
-        return match toolbar::tool_at(l.toolbar, app, col) {
+    if pt_in(l.toolbar, col, row) || pt_in(l.nav_toolbar, col, row) {
+        return match toolbar::tool_at(l.toolbar, l.nav_toolbar, app, col, row) {
             Some(tool) => toolbar::run_tool(app, tool),
             None => false,
         };
@@ -544,8 +562,10 @@ fn mouse_down(
         if let Some(node) = nodes.get(k).copied() {
             app.tree_sel = k;
             app.focus = Focus::Tree;
-            if is_double {
-                let TreeNode::Scope { id, .. } = node;
+            let TreeNode::Scope { id, .. } = node;
+            if btn == MouseButton::Right {
+                app.open_context_menu(CtxTarget::Scope(id), col, row);
+            } else if is_double {
                 app.toggle_scope(id);
                 app.locate_scope_in_source();
             }
@@ -1679,6 +1699,32 @@ mod tests {
     }
 
     #[test]
+    fn hierarchy_right_click_opens_scope_menu() {
+        let vcd = "$timescale 1ns $end\n\
+            $scope module top $end\n\
+            $var wire 1 ! clk $end\n\
+            $upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        let inner = crate::ui::layout::tree_inner(&app.layout());
+        crate::app::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: inner.x + 2,
+                row: inner.y + 2,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.tree_sel, 1);
+        assert_eq!(app.focus, Focus::Tree);
+        assert_eq!(
+            app.ctx_menu.as_ref().map(|menu| menu.target),
+            Some(crate::app::CtxTarget::Scope(1))
+        );
+    }
+
+    #[test]
     fn create_bus_name_editor_supports_mouse_focus() {
         let vcd = "$timescale 1ns $end\n\
             $var wire 1 ! a $end\n\
@@ -1848,6 +1894,57 @@ mod tests {
         );
         assert!(app.dialog_scroll > 0);
         assert!(app.dragging.is_some());
+    }
+
+    #[test]
+    fn toolbar_navigation_buttons_and_search_input_work() {
+        use crate::ui::toolbar::Tool;
+
+        let mut app = app_with(VCD);
+        let l = app.layout();
+        for tool in [
+            Tool::HierarchyUp,
+            Tool::HierarchyDown,
+            Tool::Back,
+            Tool::Forward,
+            Tool::SearchDown,
+            Tool::SearchUp,
+        ] {
+            assert!((l.nav_toolbar.x..l.nav_toolbar.right()).any(|col| {
+                matches!(crate::ui::toolbar::tool_at(l.toolbar, l.nav_toolbar, &app, col, l.nav_toolbar.y), Some(found) if found == tool)
+            }), "missing toolbar button {tool:?}");
+        }
+        let col = (l.nav_toolbar.x..l.nav_toolbar.right())
+            .find(|col| {
+                matches!(
+                    crate::ui::toolbar::tool_at(
+                        l.toolbar,
+                        l.nav_toolbar,
+                        &app,
+                        *col,
+                        l.nav_toolbar.y
+                    ),
+                    Some(Tool::Search)
+                )
+            })
+            .expect("source search input");
+        crate::app::handle_mouse(&mut app, click(col, l.nav_toolbar.y));
+        assert!(app.toolbar_search);
+        for c in "rst".chars() {
+            crate::app::handle_key(
+                &mut app,
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    KeyModifiers::NONE,
+                ),
+            );
+        }
+        assert_eq!(app.input.as_string(), "rst");
+        crate::app::handle_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, KeyModifiers::NONE),
+        );
+        assert!(!app.toolbar_search);
     }
 
     #[test]

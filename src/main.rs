@@ -164,6 +164,9 @@ fn run_loop(term: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()
             }
             _ => false,
         };
+        for text in app::take_clipboard(app) {
+            crossterm::execute!(io::stdout(), crossterm::style::Print(app::osc52(&text)))?;
+        }
         if quit {
             break;
         }

@@ -6,6 +6,7 @@
 //! to trace a signal to its declaration, drivers and loads.
 
 mod db;
+mod follow;
 mod lexer;
 mod model;
 mod parser;
@@ -17,6 +18,7 @@ mod waveform;
 mod tests;
 
 pub use db::RtlDb;
+pub use follow::FollowTarget;
 #[allow(unused_imports)]
 pub use model::{
     AlwaysBlock, Assign, BinOp, Body, DefKind, Expr, GenBlock, GenFor, GenIf, Instance, Location,

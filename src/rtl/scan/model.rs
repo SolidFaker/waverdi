@@ -55,6 +55,8 @@ pub struct Instance {
     pub overrides: Vec<(String, Expr)>,
     /// Named port connections (`.port(...)`): port name and source line.
     pub ports: Vec<(String, usize)>,
+    /// Identifiers used by each named port expression: `(port, signal, line)`.
+    pub port_uses: Vec<(String, String, usize)>,
 }
 
 /// Small constant expression used for parameters and generate bounds.

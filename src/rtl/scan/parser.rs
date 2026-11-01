@@ -1467,6 +1467,7 @@ fn parse_instance(parser: &mut Parser, module: &ModuleDef) -> Option<Instance> {
     }
     parser.take_ident(); // instance name
     let mut ports = Vec::new();
+    let mut port_uses = Vec::new();
     if parser.eat_punct('(') {
         loop {
             match parser.peek() {
@@ -1478,10 +1479,8 @@ fn parse_instance(parser: &mut Parser, module: &ModuleDef) -> Option<Instance> {
                     parser.next();
                     let line = parser.line();
                     if let Some((name, _)) = parser.take_ident() {
-                        ports.push((name, line));
-                    }
-                    if matches!(parser.peek(), Some(Tok::Punct('('))) {
-                        parser.skip_balanced();
+                        ports.push((name.clone(), line));
+                        scan_port_expression(parser, &name, &mut port_uses);
                     }
                 }
                 Some(Tok::Punct(',')) => {
@@ -1503,7 +1502,42 @@ fn parse_instance(parser: &mut Parser, module: &ModuleDef) -> Option<Instance> {
         line,
         overrides,
         ports,
+        port_uses,
     })
+}
+
+fn scan_port_expression(parser: &mut Parser, port: &str, out: &mut Vec<(String, String, usize)>) {
+    if !parser.eat_punct('(') {
+        return;
+    }
+    let mut depth = 1i32;
+    while let Some(token) = parser.peek().cloned() {
+        let line = parser.line();
+        match token {
+            Tok::Ident(name) => {
+                if !is_keyword(&name) {
+                    out.push((port.to_string(), name, line));
+                }
+                parser.next();
+            }
+            Tok::Punct(c) => {
+                parser.next();
+                match c {
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {
+                parser.next();
+            }
+        }
+    }
 }
 
 /// `#(.WIDTH(8), .N(2))` parameter overrides.

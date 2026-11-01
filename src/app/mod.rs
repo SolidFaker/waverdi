@@ -1,14 +1,17 @@
 mod action;
 mod add;
 mod browser;
+mod clipboard;
 mod context;
 mod dialog;
+mod follow;
 mod input;
 pub(crate) mod keymap;
 mod keys;
 mod load;
 mod mouse;
 mod nav;
+mod navigation;
 mod preferences;
 mod value;
 mod view;
@@ -17,6 +20,7 @@ pub use action::Action;
 pub use add::{AddAction, AddFocus, AddSignals};
 pub(crate) use browser::is_waveform;
 pub use browser::{EntryKind, FileBrowser};
+pub use clipboard::{osc52, take_clipboard};
 pub use context::{BusBuilder, ContextMenu, CtxEntry, CtxTarget};
 pub use dialog::Dialog;
 pub use input::{parse_time_spec, InputState};
@@ -234,6 +238,14 @@ pub struct App {
     /// Last "Find Value" query, searched with `n` / `N`.
     pub value_query: Option<String>,
     pub ctx_menu: Option<ContextMenu>,
+    pub(crate) clipboard_writes: Vec<String>,
+    pub follow_targets: Vec<crate::rtl::scan::FollowTarget>,
+    pub follow_sel: usize,
+    pub follow_name: String,
+    pub toolbar_search: bool,
+    pub(crate) source_history: Vec<navigation::SourceLocation>,
+    pub(crate) source_history_index: Option<usize>,
+    pub(crate) history_restore: bool,
     /// Signal waiting for a split width from `Dialog::SplitBus`.
     pub pending_split: Option<usize>,
     /// Group being renamed by `Dialog::GroupName` (stable id).
@@ -356,6 +368,14 @@ impl App {
             source_highlight: HashMap::new(),
             value_query: None,
             ctx_menu: None,
+            clipboard_writes: Vec::new(),
+            follow_targets: Vec::new(),
+            follow_sel: 0,
+            follow_name: String::new(),
+            toolbar_search: false,
+            source_history: Vec::new(),
+            source_history_index: None,
+            history_restore: false,
             pending_split: None,
             renaming_group: None,
             bus_builder: None,
@@ -810,6 +830,13 @@ impl App {
         self.analog.clear();
         self.highlight.clear();
         self.source_highlight.clear();
+        self.follow_targets.clear();
+        self.follow_sel = 0;
+        self.follow_name.clear();
+        self.toolbar_search = false;
+        self.source_history.clear();
+        self.source_history_index = None;
+        self.history_restore = false;
         self.ctx_menu = None;
         self.pending_split = None;
         self.renaming_group = None;
@@ -887,6 +914,7 @@ impl App {
             }
         };
         let Some(line) = line else { return };
+        self.remember_source_location();
         self.sync_source();
         let col = self
             .source_view
@@ -1294,7 +1322,7 @@ impl App {
     }
 
     /// Instance scope of the selected tree node (without the design root).
-    fn selected_scope_steps(&self) -> Vec<String> {
+    pub(crate) fn selected_scope_steps(&self) -> Vec<String> {
         self.selected_scope_path()
             .map(|path| path.split('.').skip(1).map(str::to_string).collect())
             .unwrap_or_default()
@@ -1492,7 +1520,7 @@ impl App {
     /// Instance scope of `module` to use when adding a signal from code that
     /// belongs to another module of the same file. Prefers instances below the
     /// active scope, then parents, then siblings in the same top.
-    fn foreign_scope(&self, module: &str) -> Option<Vec<String>> {
+    pub(crate) fn foreign_scope(&self, module: &str) -> Option<Vec<String>> {
         let rtl = self.rtl.as_ref()?;
         let active = self.selected_scope_steps();
         let mut best: Option<(u32, Vec<String>)> = None;
@@ -1529,7 +1557,8 @@ impl App {
     }
 
     /// Move the Instance pane selection to a dump scope, expanding ancestors.
-    fn switch_scope(&mut self, scope: &[String]) -> bool {
+    pub(crate) fn switch_scope(&mut self, scope: &[String]) -> bool {
+        self.remember_source_location();
         let (node, ancestors) = {
             let Some(wf) = self.wf.as_ref() else {
                 return false;

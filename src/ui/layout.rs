@@ -5,6 +5,7 @@ use ratatui::layout::{Constraint, Layout as TuiLayout, Rect};
 pub struct Layout {
     pub area: Rect,
     pub menu: Rect,
+    pub nav_toolbar: Rect,
     pub toolbar: Rect,
     /// Instance (hierarchy) pane, top-left.
     pub tree: Rect,
@@ -66,6 +67,7 @@ impl Layout {
 }
 
 const MENUBAR_H: u16 = 1;
+const NAV_TOOLBAR_H: u16 = 1;
 const TOOLBAR_H: u16 = 1;
 const MESSAGE_H: u16 = 3;
 const STATUS_H: u16 = 1;
@@ -74,12 +76,13 @@ const RULER_H: u16 = 2;
 pub fn compute_layout(area: Rect, splits: Splits) -> Layout {
     let rows = TuiLayout::vertical([
         Constraint::Length(MENUBAR_H),
+        Constraint::Length(NAV_TOOLBAR_H),
         Constraint::Fill(1),
         Constraint::Length(MESSAGE_H),
         Constraint::Length(STATUS_H),
     ])
     .split(area);
-    let (menu, main, msg, status) = (rows[0], rows[1], rows[2], rows[3]);
+    let (menu, nav_toolbar, main, msg, status) = (rows[0], rows[1], rows[2], rows[3], rows[4]);
 
     // Top row: Instance | Source. Bottom: nWave (list + waveforms). The panes
     // share the border row between the two rows.
@@ -168,6 +171,7 @@ pub fn compute_layout(area: Rect, splits: Splits) -> Layout {
     Layout {
         area,
         menu,
+        nav_toolbar,
         toolbar,
         tree,
         source,
@@ -207,6 +211,8 @@ mod tests {
         let l = compute_layout(Rect::new(0, 0, 120, 40), Splits::default());
         assert_eq!(l.menu.y, 0);
         assert_eq!(l.menu.height, 1);
+        assert_eq!(l.nav_toolbar.y, l.menu.bottom());
+        assert_eq!(l.toolbar.height, 1);
         assert_eq!(l.toolbar.y, l.nwave.y + 1);
         assert_eq!(l.toolbar.x, l.nwave.x + 1);
         // Instance and source share their border column.
