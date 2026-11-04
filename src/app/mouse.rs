@@ -24,6 +24,24 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
     if let Some(dialog) = app.dialog {
         // While a dialog owns the focus, mouse input goes to it only.
         let l = app.layout();
+        if app.window_drag.is_some() {
+            match m.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    app.drag_window_to(col, row);
+                    return false;
+                }
+                MouseEventKind::Up(_) => {
+                    app.end_window_drag();
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        if m.kind == MouseEventKind::Down(MouseButton::Left)
+            && app.begin_window_drag(dialog, col, row)
+        {
+            return false;
+        }
         if dialog == Dialog::ColorPicker {
             if m.kind == MouseEventKind::Down(MouseButton::Left)
                 && pt_in(
@@ -174,7 +192,7 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
 }
 
 fn browser_wheel(app: &mut App, delta: i64) {
-    let rows = crate::ui::dialog::browser_rows(app.layout().area);
+    let rows = crate::ui::dialog::browser_rows_for(app.layout().area, app);
     if let Some(browser) = app.browser.as_mut() {
         browser.move_sel(delta, rows);
     }
@@ -191,7 +209,7 @@ fn add_signals_mouse(app: &mut App, m: MouseEvent) {
             } else {
                 WHEEL_STEP as i64
             };
-            if let Some(pane) = crate::ui::add::pane_at(app.last_area, m.column, m.row) {
+            if let Some(pane) = crate::ui::add::pane_at(app.last_area, app, m.column, m.row) {
                 app.add_action(AddAction::Scroll { pane, rows });
             }
         }
@@ -507,7 +525,7 @@ fn dialog_scroll_to(app: &mut App, dialog: Dialog, row: u16) {
 
 fn browser_click(app: &mut App, col: u16, row: u16) {
     let l = app.layout();
-    let rect = crate::ui::dialog::open_rect(l.area);
+    let rect = crate::ui::dialog::dialog_rect(l.area, app, Dialog::Open);
     let list_top = rect.y + 3;
     let list_bottom = rect.bottom().saturating_sub(1);
     if col < rect.x || col >= rect.right() || row < list_top || row >= list_bottom {

@@ -492,7 +492,7 @@ impl App {
 
     /// Drag a pane's scrollbar to a screen row.
     pub fn add_scroll_to_row(&mut self, pane: AddFocus, row: u16) {
-        let l = crate::ui::add::layout(self.last_area);
+        let l = crate::ui::add::layout_for(self.last_area, self);
         let rect = match pane {
             AddFocus::Tree => l.tree,
             AddFocus::Instances => l.instances,

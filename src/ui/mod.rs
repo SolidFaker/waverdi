@@ -1465,7 +1465,8 @@ mod tests {
         // The working directory holds more entries than fit on screen: scroll
         // the browser to Cargo.toml before rendering.
         {
-            let rows = super::dialog::browser_rows(ratatui::layout::Rect::new(0, 0, 100, 30));
+            let rows =
+                super::dialog::browser_rows_for(ratatui::layout::Rect::new(0, 0, 100, 30), &app);
             let browser = app.browser.as_mut().unwrap();
             let index = browser
                 .entries

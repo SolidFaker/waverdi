@@ -86,7 +86,6 @@ fn main() {
     } else if cli.no_gui {
         app.use_gui = false;
     }
-
     app.load_workspace(cli.file.is_none());
 
     if let Some(file) = &cli.file {

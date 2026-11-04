@@ -680,7 +680,7 @@ fn bus_builder_key(app: &mut App, key: KeyEvent) {
 }
 
 fn browser_key(app: &mut App, key: KeyEvent) {
-    let rows = crate::ui::dialog::browser_rows(app.layout().area);
+    let rows = crate::ui::dialog::browser_rows_for(app.layout().area, app);
     let cmd = {
         let Some(browser) = app.browser.as_mut() else {
             return;

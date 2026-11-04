@@ -30,12 +30,23 @@ pub fn layout(screen: Rect) -> AddLayout {
         .min(screen.height.saturating_sub(2))
         .max(10)
         .min(screen.height);
-    let outer = Rect {
+    layout_outer(Rect {
         x: screen.x + screen.width.saturating_sub(width) / 2,
         y: screen.y + screen.height.saturating_sub(height) / 2,
         width,
         height,
-    };
+    })
+}
+
+pub fn layout_for(screen: Rect, app: &App) -> AddLayout {
+    layout_outer(crate::ui::dialog::dialog_rect(
+        screen,
+        app,
+        crate::app::Dialog::AddSignals,
+    ))
+}
+
+fn layout_outer(outer: Rect) -> AddLayout {
     let inner = Rect {
         x: outer.x + 1,
         y: outer.y + 1,
@@ -140,7 +151,7 @@ fn grid_geometry(rect: Rect, items: &[String]) -> GridGeometry {
 
 /// Columns of a picker pane (the tree is a single column).
 pub fn pane_cols(screen: Rect, app: &App, pane: AddFocus) -> usize {
-    let l = layout(screen);
+    let l = layout_for(screen, app);
     match pane {
         AddFocus::Tree => 1,
         AddFocus::Instances => grid_geometry(l.instances, &app.add_pane(pane).1).cols,
@@ -150,7 +161,7 @@ pub fn pane_cols(screen: Rect, app: &App, pane: AddFocus) -> usize {
 
 /// Items visible at once in a picker pane.
 pub fn pane_visible(screen: Rect, app: &App, pane: AddFocus) -> usize {
-    let l = layout(screen);
+    let l = layout_for(screen, app);
     match pane {
         AddFocus::Tree => l.tree.height as usize,
         AddFocus::Instances => grid_geometry(l.instances, &app.add_pane(pane).1).visible,
@@ -173,8 +184,8 @@ pub fn scroll_from_track(track: usize, len: usize, visible: usize, row: usize) -
 }
 
 /// Picker pane under the pointer, if any.
-pub fn pane_at(screen: Rect, col: u16, row: u16) -> Option<AddFocus> {
-    let l = layout(screen);
+pub fn pane_at(screen: Rect, app: &App, col: u16, row: u16) -> Option<AddFocus> {
+    let l = layout_for(screen, app);
     let inside =
         |rect: Rect| col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom();
     if inside(l.tree) {
@@ -193,7 +204,7 @@ pub fn draw(frame: &mut ratatui::Frame, screen: Rect, app: &App) {
     let Some(add) = app.add_signals.as_ref() else {
         return;
     };
-    let l = layout(screen);
+    let l = layout_for(screen, app);
     let inner = Rect {
         x: l.outer.x + 1,
         y: l.outer.y + 1,
@@ -444,7 +455,7 @@ pub enum AddHit {
 
 pub fn hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<AddHit> {
     app.add_signals.as_ref()?;
-    let l = layout(screen);
+    let l = layout_for(screen, app);
     let inside =
         |rect: Rect| col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom();
     // Scrollbars are the last column of every pane.

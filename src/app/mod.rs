@@ -3,8 +3,8 @@ mod add;
 mod browser;
 mod clipboard;
 mod compare;
-mod dataflow;
 mod context;
+mod dataflow;
 mod dialog;
 mod export;
 mod follow;
@@ -19,6 +19,7 @@ mod navigation;
 mod preferences;
 mod value;
 mod view;
+mod window;
 mod workspace;
 
 pub use action::Action;
@@ -258,6 +259,8 @@ pub struct App {
     pub export_format: crate::waveform::ExportFormat,
     pub(crate) pending_export: Option<export::PendingExport>,
     pub(crate) export_job: Option<export::ExportJob>,
+    pub(crate) dialog_windows: HashMap<Dialog, window::WindowState>,
+    pub(crate) window_drag: Option<window::WindowDrag>,
     pub toolbar_search: bool,
     pub search_case_sensitive: bool,
     pub search_regex: bool,
@@ -404,6 +407,8 @@ impl App {
             export_format: crate::waveform::ExportFormat::Csv,
             pending_export: None,
             export_job: None,
+            dialog_windows: HashMap::new(),
+            window_drag: None,
             toolbar_search: false,
             search_case_sensitive: false,
             search_regex: false,
@@ -491,7 +496,8 @@ impl App {
     /// True while a mouse drag is in progress; the event loop then polls
     /// faster and forwards `Moved` events instead of dropping them.
     pub fn is_dragging(&self) -> bool {
-        self.dragging.is_some()
+        (self.window_drag.is_some() && self.dialog.is_some())
+            || self.dragging.is_some()
             || self
                 .color_picker
                 .as_ref()
@@ -1747,6 +1753,7 @@ impl App {
     pub fn open_dialog(&mut self, dialog: Dialog) {
         self.pending_g = false;
         self.pending_d = false;
+        self.end_window_drag();
         self.dialog = Some(dialog);
         self.dialog_scroll = 0;
     }

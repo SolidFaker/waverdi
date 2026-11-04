@@ -33,14 +33,22 @@ pub fn open_rect(screen: Rect) -> Rect {
 }
 
 /// Number of file rows shown by the built-in browser.
-pub fn browser_rows(screen: Rect) -> usize {
-    open_rect(screen).height.saturating_sub(4) as usize
+pub fn browser_rows_for(screen: Rect, app: &App) -> usize {
+    dialog_rect(screen, app, Dialog::Open)
+        .height
+        .saturating_sub(4) as usize
 }
 
 /// Outer rectangle of a dialog box.
 pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
+    if let Some(area) = app.dialog_window_area(dialog, screen) {
+        return area;
+    }
     if dialog == Dialog::Open {
         return open_rect(screen);
+    }
+    if dialog == Dialog::AddSignals {
+        return crate::ui::add::layout(screen).outer;
     }
     let wanted_width = match dialog {
         Dialog::Settings => 92,
@@ -614,7 +622,7 @@ fn draw_settings(buf: &mut Buffer, area: Rect, app: &App) {
                 let value_width = if view.color.is_some() {
                     row_area.width.saturating_sub(38)
                 } else {
-                    row_area.width.saturating_sub(30)
+                    row_area.width.saturating_sub(31)
                 };
                 Label::new(&view.value, value_width as usize)
                     .align(Alignment::Right)
