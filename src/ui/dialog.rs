@@ -44,6 +44,7 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
     }
     let wanted_width = match dialog {
         Dialog::Settings => 92,
+        Dialog::Compare => 88,
         Dialog::ColorPicker => 68,
         _ => 64,
     };
@@ -51,6 +52,12 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
         Dialog::Find => 14,
         Dialog::Follow => (app.follow_targets.len() as u16 + 4).min(16),
         Dialog::Dataflow => (app.dataflow_edges.len() as u16 + 4).min(16),
+        Dialog::Compare => (app
+            .compare
+            .as_ref()
+            .map(|session| session.rows.len() as u16 + 4)
+            .unwrap_or(7))
+        .min(18),
         Dialog::Markers => (app.markers.len() as u16 + 4).min(16),
         Dialog::Keys => keymap::help_len() as u16 + 4,
         Dialog::CreateBus => app
@@ -83,7 +90,7 @@ pub fn visible_rows(screen: Rect, app: &App, dialog: Dialog) -> usize {
     }
     let reserved = match dialog {
         Dialog::Find => 5,
-        Dialog::Follow | Dialog::Dataflow | Dialog::Markers => 4,
+        Dialog::Follow | Dialog::Dataflow | Dialog::Compare | Dialog::Markers => 4,
         _ => 2,
     };
     (area.height as usize).saturating_sub(reserved).max(1)
@@ -202,6 +209,14 @@ pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea
             area.height.saturating_sub(4) as usize,
             app.dataflow_edges.len(),
         ),
+        Dialog::Compare => (
+            area.y + 2,
+            area.height.saturating_sub(4) as usize,
+            app.compare
+                .as_ref()
+                .map(|session| session.rows.len())
+                .unwrap_or(0),
+        ),
         Dialog::Markers => (
             area.y + 2,
             area.height.saturating_sub(4) as usize,
@@ -228,12 +243,17 @@ pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea
 pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
     let t = &app.settings.theme;
     let title = match dialog {
+        Dialog::Open if app.browser_mode == crate::app::BrowserMode::Compare => {
+            "Select Reference Waveform"
+        }
         Dialog::Open => "Open Waveform",
         Dialog::Goto => "Go to Time",
         Dialog::Find => "Search Signal",
         Dialog::FindValue => "Find Value",
         Dialog::Follow => "Follow Signal",
         Dialog::Dataflow => "Dataflow",
+        Dialog::Compare => "Compare Waveform",
+        Dialog::Export => "Export Signals",
         Dialog::Markers => "Markers",
         Dialog::SplitBus => "Split Bus",
         Dialog::CreateBus => "Create Bus",
@@ -307,6 +327,10 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
             }
             Dialog::Follow => draw_follow(buf, area, inner_x, inner_w, app),
             Dialog::Dataflow => draw_dataflow(buf, area, inner_x, inner_w, app),
+            Dialog::Compare => draw_compare(buf, area, inner_x, inner_w, app),
+            Dialog::Export => {
+                cursor = Some(draw_export(buf, area, app));
+            }
             Dialog::Markers => draw_markers(buf, area, inner_x, inner_w, app),
             Dialog::SplitBus => {
                 cursor = draw_input(
@@ -1330,6 +1354,162 @@ fn draw_dataflow(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) 
         &text::trunc("Enter: locate  ↑/↓: select  Esc: cancel", width),
         Style::new().fg(t.dim),
     );
+}
+
+fn draw_compare(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
+    let t = &app.settings.theme;
+    let Some(session) = app.compare.as_ref() else {
+        text::put(
+            buf,
+            x,
+            area.y + 1,
+            "no reference waveform",
+            Style::new().fg(t.dim),
+        );
+        return;
+    };
+    let header = session
+        .error
+        .as_ref()
+        .map(|error| format!("error: {error}"))
+        .unwrap_or_else(|| format!("reference: {}", session.path));
+    text::put(
+        buf,
+        x,
+        area.y + 1,
+        &text::trunc(&header, width),
+        Style::new().fg(t.dim),
+    );
+    if session.rows.is_empty() {
+        text::put(
+            buf,
+            x,
+            area.y + 2,
+            if session.error.is_some() {
+                "cannot compare reference"
+            } else {
+                "loading reference or no displayed signals"
+            },
+            Style::new().fg(t.dim),
+        );
+        return;
+    }
+    let rows = area.height.saturating_sub(4) as usize;
+    let selected = app.compare_sel.min(session.rows.len() - 1);
+    let max_scroll = session.rows.len().saturating_sub(rows);
+    let mut scroll = app.dialog_scroll.min(max_scroll);
+    if selected >= scroll + rows {
+        scroll = selected + 1 - rows;
+    } else if selected < scroll {
+        scroll = selected;
+    }
+    for (index, row) in session.rows.iter().enumerate().skip(scroll).take(rows) {
+        let style = if index == selected {
+            Style::new().fg(Color::Black).bg(t.accent)
+        } else {
+            Style::new().fg(t.text)
+        };
+        let status = if row.right.is_none() {
+            "missing in reference".to_string()
+        } else if !row.supported {
+            "unsupported timescale or aggregate".to_string()
+        } else if let Some(comparison) = row.comparison.as_ref() {
+            if comparison.total == 0 {
+                "identical".to_string()
+            } else {
+                format!(
+                    "{} difference(s){}",
+                    comparison.total,
+                    if comparison.total > comparison.differences.len() {
+                        " (truncated)"
+                    } else {
+                        ""
+                    }
+                )
+            }
+        } else {
+            "loading values".to_string()
+        };
+        text::put(
+            buf,
+            x,
+            area.y + 2 + (index - scroll) as u16,
+            &text::trunc(&format!("{}: {status}", row.name), width.saturating_sub(1)),
+            style,
+        );
+    }
+    draw_scrollbar(
+        buf,
+        area.right().saturating_sub(2),
+        area.y + 2,
+        rows,
+        scroll,
+        session.rows.len(),
+        t,
+    );
+    text::put(
+        buf,
+        x,
+        area.bottom().saturating_sub(2),
+        &text::trunc("Enter/n/N: diff  r: refresh  x: close  Esc: hide", width),
+        Style::new().fg(t.dim),
+    );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportHit {
+    Format,
+    Accept,
+    Cancel,
+}
+
+fn export_parts(area: Rect) -> (Rect, Rect, Rect, Rect) {
+    let format = Rect::new(area.x + 2, area.y + 1, 24, 1);
+    let path = Rect::new(area.x + 2, area.y + 3, area.width.saturating_sub(4), 1);
+    let accept = Rect::new(
+        area.right().saturating_sub(22),
+        area.bottom().saturating_sub(2),
+        10,
+        1,
+    );
+    let cancel = Rect::new(
+        area.right().saturating_sub(11),
+        area.bottom().saturating_sub(2),
+        9,
+        1,
+    );
+    (format, path, accept, cancel)
+}
+
+pub fn export_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<ExportHit> {
+    let area = dialog_rect(screen, app, Dialog::Export);
+    let (format, _, accept, cancel) = export_parts(area);
+    if format.contains(Position::new(col, row)) {
+        Some(ExportHit::Format)
+    } else if accept.contains(Position::new(col, row)) {
+        Some(ExportHit::Accept)
+    } else if cancel.contains(Position::new(col, row)) {
+        Some(ExportHit::Cancel)
+    } else {
+        None
+    }
+}
+
+fn draw_export(buf: &mut Buffer, area: Rect, app: &App) -> Position {
+    let t = &app.settings.theme;
+    let (format, path, accept, cancel) = export_parts(area);
+    text::put(
+        buf,
+        format.x,
+        format.y,
+        &format!("Format: {} (Tab)", app.export_format.label()),
+        Style::new().fg(t.text),
+    );
+    text::put(buf, area.x + 2, area.y + 2, "File:", Style::new().fg(t.dim));
+    let caret = crate::ui::widgets::TextBox::new(&app.input, path).draw(buf, t);
+    crate::ui::widgets::Button::new("Export", accept).draw(buf, t);
+    crate::ui::widgets::Button::new("Cancel", cancel).draw(buf, t);
+    caret
 }
 
 fn draw_markers(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {

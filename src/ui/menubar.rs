@@ -13,6 +13,8 @@ pub const MENUS: [(&str, &[(&str, Action)]); 5] = [
             ("Open Waveform...", Action::Open),
             ("Open in TUI Browser...", Action::OpenTui),
             ("Load Filelist...", Action::LoadFilelist),
+            ("Compare Waveform...", Action::Compare),
+            ("Export Signals...", Action::Export),
             ("Quit", Action::Quit),
         ],
     ),

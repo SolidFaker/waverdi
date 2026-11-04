@@ -1,9 +1,13 @@
 mod arrays;
+mod compare;
+mod export;
 mod signal;
 mod time;
 mod tree;
 mod value;
 
+pub use compare::{compare_signals, Comparison};
+pub use export::{export_indices, export_waveform, ExportFormat, ExportReport};
 pub use signal::{Change, SigKind, SigState, Signal};
 pub use time::{format_time, format_time_base, nice_step, TimeBase, TimeScale};
 pub use tree::ScopeTree;

@@ -1171,10 +1171,53 @@ mod tests {
             crate::app::Dialog::Settings,
             crate::app::Dialog::Keys,
             crate::app::Dialog::About,
+            crate::app::Dialog::Compare,
+            crate::app::Dialog::Export,
         ] {
             app.dialog = Some(dialog);
             let _ = render_app(&mut app, 100, 30);
         }
+    }
+
+    #[test]
+    fn compare_and_export_dialogs_show_actual_state() {
+        let dir = std::env::temp_dir().join(format!("waverdi_compare_ui_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let reference = dir.join("reference.vcd");
+        std::fs::write(
+            &reference,
+            "$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n#0\n0!\n#5\n0!\n",
+        )
+        .unwrap();
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.set_display(vec![0]);
+        app.start_compare(&reference.display().to_string());
+        for _ in 0..500 {
+            app.poll_load();
+            app.poll_compare();
+            if app.compare.as_ref().is_some_and(|session| {
+                session
+                    .rows
+                    .first()
+                    .is_some_and(|row| row.comparison.is_some())
+            }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("Compare Waveform"), "{screen}");
+        assert!(screen.contains("clk: 2 difference(s)"), "{screen}");
+        app.close_compare();
+        app.open_export();
+        let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("Export Signals"), "{screen}");
+        assert!(screen.contains("Format: CSV"), "{screen}");
+        assert!(screen.contains("File:"), "{screen}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

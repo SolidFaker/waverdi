@@ -176,6 +176,18 @@ pub fn draw_status(buf: &mut Buffer, l: &Layout, app: &App) {
         return;
     }
 
+    if app.export_active() {
+        write_segment(buf, l, &mut x, " ", Style::new().fg(t.path));
+        write_segment(
+            buf,
+            l,
+            &mut x,
+            &format!("export: {}", app.export_status()),
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+        );
+        return;
+    }
+
     let mut cache = app.status_cache.borrow_mut();
     // The three parts are borrowed one after another so the shared cache is
     // only mutably borrowed while its own segments are painted.

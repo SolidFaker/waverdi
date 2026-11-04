@@ -6,6 +6,8 @@ pub enum Dialog {
     FindValue,
     Follow,
     Dataflow,
+    Compare,
+    Export,
     Markers,
     SplitBus,
     CreateBus,

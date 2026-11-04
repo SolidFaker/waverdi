@@ -183,6 +183,22 @@ const BINDINGS: &[Binding] = &[
         keys: "M",
         description: "show markers",
     },
+    Binding {
+        patterns: &[KeyPattern::F(6)],
+        action: Action::Compare,
+        needs_waveform: true,
+        category: "General",
+        keys: "F6",
+        description: "compare with a reference waveform",
+    },
+    Binding {
+        patterns: &[KeyPattern::F(7)],
+        action: Action::Export,
+        needs_waveform: true,
+        category: "General",
+        keys: "F7",
+        description: "export displayed signals as CSV or VCD",
+    },
 ];
 
 pub(crate) fn bindings() -> &'static [Binding] {

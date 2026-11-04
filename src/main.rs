@@ -135,7 +135,9 @@ fn run_loop(term: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()
             app.save_workspace();
             last_save = Instant::now();
         }
-        let loading = app.load.as_ref().is_some_and(|job| !job.finished);
+        let loading = app.load.as_ref().is_some_and(|job| !job.finished)
+            || app.compare_active()
+            || app.export_active();
         // Idle frames are skipped: the dirty flag is set by every input event,
         // by loader events and by the idle tick when it changes state.
         if app.needs_redraw || loading || app.is_dragging() {

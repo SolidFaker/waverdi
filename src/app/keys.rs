@@ -449,6 +449,38 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         }
         return false;
     }
+    if app.dialog == Some(Dialog::Compare) {
+        match key.code {
+            KeyCode::Esc => app.dialog = None,
+            KeyCode::Up => app.compare_move(-1),
+            KeyCode::Down => app.compare_move(1),
+            KeyCode::PageUp => {
+                let rows = crate::ui::dialog::visible_rows(app.last_area, app, Dialog::Compare);
+                app.compare_move(-(rows as i64));
+            }
+            KeyCode::PageDown => {
+                let rows = crate::ui::dialog::visible_rows(app.last_area, app, Dialog::Compare);
+                app.compare_move(rows as i64);
+            }
+            KeyCode::Enter | KeyCode::Char('n') => app.compare_activate(true),
+            KeyCode::Char('N') => app.compare_activate(false),
+            KeyCode::Char('r') => app.compare_refresh(),
+            KeyCode::Char('x') => app.close_compare(),
+            _ => {}
+        }
+        return false;
+    }
+    if app.dialog == Some(Dialog::Export) {
+        match key.code {
+            KeyCode::Esc => app.dialog = None,
+            KeyCode::Tab => app.cycle_export_format(),
+            KeyCode::Enter => app.begin_export(),
+            _ => {
+                crate::ui::widgets::TextBox::handle_key(&mut app.input, key);
+            }
+        }
+        return false;
+    }
     if app.dialog == Some(Dialog::Markers) {
         match key.code {
             KeyCode::Esc => app.dialog = None,

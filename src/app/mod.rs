@@ -2,9 +2,11 @@ mod action;
 mod add;
 mod browser;
 mod clipboard;
+mod compare;
 mod dataflow;
 mod context;
 mod dialog;
+mod export;
 mod follow;
 mod input;
 pub(crate) mod keymap;
@@ -24,6 +26,7 @@ pub use add::{AddAction, AddFocus, AddSignals};
 pub(crate) use browser::is_waveform;
 pub use browser::{EntryKind, FileBrowser};
 pub use clipboard::{osc52, take_clipboard};
+pub use compare::CompareSession;
 pub use context::{BusBuilder, ContextMenu, CtxEntry, CtxTarget};
 pub use dialog::Dialog;
 pub use input::{parse_time_spec, InputState};
@@ -167,12 +170,12 @@ pub enum TreeNode {
     Scope { id: usize, depth: usize },
 }
 
-/// Purpose of the built-in browser / native file dialog (`Open Waveform`
-/// versus `Load Filelist`).
+/// Purpose of the built-in browser / native file dialog.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BrowserMode {
     Waveform,
     Filelist,
+    Compare,
 }
 
 pub struct App {
@@ -250,6 +253,11 @@ pub struct App {
     pub dataflow_sel: usize,
     pub dataflow_origin: Option<(Vec<String>, String)>,
     pub dataflow_name: String,
+    pub compare: Option<CompareSession>,
+    pub compare_sel: usize,
+    pub export_format: crate::waveform::ExportFormat,
+    pub(crate) pending_export: Option<export::PendingExport>,
+    pub(crate) export_job: Option<export::ExportJob>,
     pub toolbar_search: bool,
     pub search_case_sensitive: bool,
     pub search_regex: bool,
@@ -391,6 +399,11 @@ impl App {
             dataflow_sel: 0,
             dataflow_origin: None,
             dataflow_name: String::new(),
+            compare: None,
+            compare_sel: 0,
+            export_format: crate::waveform::ExportFormat::Csv,
+            pending_export: None,
+            export_job: None,
             toolbar_search: false,
             search_case_sensitive: false,
             search_regex: false,
@@ -540,6 +553,8 @@ impl App {
     /// Start loading a waveform on a background thread; the status line shows
     /// progress while it runs.
     pub fn start_load(&mut self, path: &str) {
+        self.compare = None;
+        self.pending_export = None;
         if let Some(job) = &self.load {
             job.cancel();
         }
@@ -767,6 +782,7 @@ impl App {
                 self.load_filelist(path);
                 self.dialog = None;
             }
+            BrowserMode::Compare => self.start_compare(path),
         }
         self.browser_mode = BrowserMode::Waveform;
     }
@@ -2091,6 +2107,8 @@ pub fn set_title(path: &str) {
 pub fn tick(app: &mut App) {
     app.tick_source_drag();
     app.poll_load();
+    app.poll_compare();
+    app.poll_export();
 }
 
 #[cfg(test)]
