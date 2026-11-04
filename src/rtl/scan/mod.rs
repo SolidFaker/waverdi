@@ -18,7 +18,7 @@ mod waveform;
 mod tests;
 
 pub use db::RtlDb;
-pub use follow::FollowTarget;
+pub use follow::{DataflowEdge, DataflowKind, FollowTarget};
 #[allow(unused_imports)]
 pub use model::{
     AlwaysBlock, Assign, BinOp, Body, DefKind, Expr, GenBlock, GenFor, GenIf, Instance, Location,

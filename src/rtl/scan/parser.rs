@@ -3,8 +3,8 @@ use std::path::Path;
 
 use super::lexer::{lex, Tok, Token};
 use super::model::{
-    AlwaysBlock, Assign, BinOp, Body, DefKind, Expr, GenBlock, GenFor, GenIf, Instance, ModuleDef,
-    ParamEnv, SignalDecl, TypeDef,
+    reference_base, AlwaysBlock, Assign, BinOp, Body, DefKind, Expr, GenBlock, GenFor, GenIf,
+    Instance, ModuleDef, ParamEnv, SignalDecl, TypeDef,
 };
 use super::resolve::eval;
 
@@ -1214,6 +1214,31 @@ fn looks_like_user_decl(parser: &Parser, module: &ModuleDef) -> bool {
     ) || module.typedefs.contains_key(first)
 }
 
+fn take_reference(parser: &mut Parser) -> Option<(String, usize)> {
+    let (name, line) = parser.take_ident()?;
+    let mut reference = name;
+    take_reference_tail(parser, &mut reference);
+    Some((reference, line))
+}
+
+fn take_reference_tail(parser: &mut Parser, reference: &mut String) {
+    loop {
+        while matches!(parser.peek(), Some(Tok::Punct('['))) {
+            reference.push('[');
+            reference.push_str(&collect_range(parser));
+            reference.push(']');
+        }
+        if !parser.eat_punct('.') {
+            break;
+        }
+        let Some((member, _)) = parser.take_ident() else {
+            break;
+        };
+        reference.push('.');
+        reference.push_str(&member);
+    }
+}
+
 fn parse_assign(parser: &mut Parser, module: &mut ModuleDef) {
     let line = parser.line();
     let mut lhs = String::new();
@@ -1238,15 +1263,18 @@ fn parse_assign(parser: &mut Parser, module: &mut ModuleDef) {
                 after_eq = true;
                 parser.next();
             }
-            Tok::Ident(name) if depth == 0 && !after_eq && lhs.is_empty() => {
-                lhs = name.clone();
-                parser.next();
-            }
-            Tok::Ident(name) => {
-                if after_eq || depth > 0 {
-                    uses.push((name.clone(), parser.line()));
+            Tok::Ident(_) if depth == 0 && !after_eq && lhs.is_empty() => {
+                if let Some((reference, _)) = take_reference(parser) {
+                    lhs = reference_base(&reference).to_string();
                 }
-                parser.next();
+            }
+            Tok::Ident(_) => {
+                let line = parser.line();
+                if let Some((reference, _)) = take_reference(parser) {
+                    if after_eq || depth > 0 {
+                        uses.push((reference, line));
+                    }
+                }
             }
             _ => {
                 parser.next();
@@ -1278,7 +1306,9 @@ fn parse_process(parser: &mut Parser, module: &mut ModuleDef) {
                     }
                 }
                 Tok::Ident(name) if !is_keyword(name) => {
-                    sensitivity.push((name.clone(), line));
+                    let mut reference = name.clone();
+                    take_reference_tail(parser, &mut reference);
+                    sensitivity.push((reference, line));
                 }
                 Tok::Punct(';') if !paren => break,
                 _ => {}
@@ -1352,14 +1382,20 @@ fn scan_statement(parser: &mut Parser) -> (Idents, Idents, usize) {
                     "if" | "while" | "for" | "case" | "casex" | "casez"
                 );
                 if !is_keyword(name) {
-                    uses.push((name.clone(), line));
+                    let Some((reference, _)) = take_reference(parser) else {
+                        parser.next();
+                        continue;
+                    };
+                    let driver = reference_base(&reference).to_string();
+                    uses.push((reference, line));
                     if depth <= 0 && cond_depth.is_none() {
-                        lhs_base = Some((name.clone(), line));
+                        lhs_base = Some((driver.clone(), line));
                     }
-                    pending = Some((name.clone(), line));
+                    pending = Some((driver, line));
+                } else {
+                    parser.next();
                 }
                 last_punct = None;
-                parser.next();
             }
             Tok::Punct(c) => {
                 let c = *c;
@@ -1516,9 +1552,12 @@ fn scan_port_expression(parser: &mut Parser, port: &str, out: &mut Vec<(String, 
         match token {
             Tok::Ident(name) => {
                 if !is_keyword(&name) {
-                    out.push((port.to_string(), name, line));
+                    if let Some((reference, _)) = take_reference(parser) {
+                        out.push((port.to_string(), reference, line));
+                    }
+                } else {
+                    parser.next();
                 }
-                parser.next();
             }
             Tok::Punct(c) => {
                 parser.next();

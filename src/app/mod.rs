@@ -2,6 +2,7 @@ mod action;
 mod add;
 mod browser;
 mod clipboard;
+mod dataflow;
 mod context;
 mod dialog;
 mod follow;
@@ -245,6 +246,10 @@ pub struct App {
     pub follow_targets: Vec<crate::rtl::scan::FollowTarget>,
     pub follow_sel: usize,
     pub follow_name: String,
+    pub dataflow_edges: Vec<crate::rtl::scan::DataflowEdge>,
+    pub dataflow_sel: usize,
+    pub dataflow_origin: Option<(Vec<String>, String)>,
+    pub dataflow_name: String,
     pub toolbar_search: bool,
     pub search_case_sensitive: bool,
     pub search_regex: bool,
@@ -382,6 +387,10 @@ impl App {
             follow_targets: Vec::new(),
             follow_sel: 0,
             follow_name: String::new(),
+            dataflow_edges: Vec::new(),
+            dataflow_sel: 0,
+            dataflow_origin: None,
+            dataflow_name: String::new(),
             toolbar_search: false,
             search_case_sensitive: false,
             search_regex: false,
@@ -854,6 +863,10 @@ impl App {
         self.follow_targets.clear();
         self.follow_sel = 0;
         self.follow_name.clear();
+        self.dataflow_edges.clear();
+        self.dataflow_sel = 0;
+        self.dataflow_origin = None;
+        self.dataflow_name.clear();
         self.toolbar_search = false;
         self.source_history.clear();
         self.source_history_index = None;
@@ -993,12 +1006,11 @@ impl App {
     /// drivers and loads of the selected Signal List signal in the module
     /// under the Source cursor.
     pub fn source_trace_line(&self) -> Option<String> {
-        let view = self.source_view.as_ref()?;
+        self.source_view.as_ref()?;
         let wf = self.wf.as_ref()?;
-        let signal = wf.signals.get(self.selected_signal()?)?.name.clone();
-        let module = view.module_at_line(view.line);
+        let signal = wf.signals.get(self.selected_signal()?)?;
         let rtl = self.rtl.as_ref()?;
-        let trace = rtl.trace(module, &signal)?;
+        let (module, trace) = rtl.trace_at_scope(&signal.scope, &signal.name)?;
         let lines = |locations: &[crate::rtl::scan::Location]| {
             locations
                 .iter()
@@ -1007,7 +1019,7 @@ impl App {
                 .join(",")
         };
         let always = rtl
-            .module(module)
+            .module(&module)
             .and_then(|def| {
                 trace.drivers.iter().find_map(|loc| {
                     def.always
@@ -1018,7 +1030,8 @@ impl App {
             .map(|block| format!("  always {}-{}", block.start, block.end))
             .unwrap_or_default();
         Some(format!(
-            "{signal}: decl {}  drivers [{}]  loads [{}]{always}",
+            "{}: decl {}  drivers [{}]  loads [{}]{always}",
+            signal.name,
             trace.decl.as_ref().map(|loc| loc.line).unwrap_or(0),
             lines(&trace.drivers),
             lines(&trace.loads)
@@ -1430,7 +1443,14 @@ impl App {
         let (base, bindings) = if module == active {
             match rtl.scope_info(&self.selected_scope_steps()) {
                 Some(found) => (found.instance_scope, found.env),
-                None => (self.selected_scope_steps(), Default::default()),
+                None => {
+                    let steps = self.selected_scope_steps();
+                    let owner = rtl
+                        .signal_owner(&steps)
+                        .map(|(scope, _)| scope)
+                        .unwrap_or(steps);
+                    (owner, Default::default())
+                }
             }
         } else {
             (self.foreign_scope(module)?, Default::default())
@@ -1656,15 +1676,13 @@ impl App {
         let mut drivers: Option<(Vec<String>, usize)> = None;
         let mut decl: Option<(Vec<String>, usize)> = None;
         if let Some(rtl) = self.rtl.as_ref() {
-            if let Some(def) = rtl.module_at_scope(&scope) {
-                module = def.name.clone();
-                if let Some(trace) = rtl.trace(&module, &name) {
-                    if let Some(location) = trace.drivers.first() {
-                        drivers = Some((scope.clone(), location.line));
-                    }
-                    if let Some(location) = trace.decl.as_ref() {
-                        decl = Some((scope.clone(), location.line));
-                    }
+            if let Some((owner, trace)) = rtl.trace_at_scope(&scope, &name) {
+                module = owner;
+                if let Some(location) = trace.drivers.first() {
+                    drivers = Some((scope.clone(), location.line));
+                }
+                if let Some(location) = trace.decl.as_ref() {
+                    decl = Some((scope.clone(), location.line));
                 }
             }
         }

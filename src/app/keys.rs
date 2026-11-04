@@ -431,6 +431,24 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         }
         return false;
     }
+    if app.dialog == Some(Dialog::Dataflow) {
+        match key.code {
+            KeyCode::Esc => app.dialog = None,
+            KeyCode::Up => app.dataflow_move(-1),
+            KeyCode::Down => app.dataflow_move(1),
+            KeyCode::PageUp => {
+                let rows = crate::ui::dialog::visible_rows(app.last_area, app, Dialog::Dataflow);
+                app.dataflow_move(-(rows as i64));
+            }
+            KeyCode::PageDown => {
+                let rows = crate::ui::dialog::visible_rows(app.last_area, app, Dialog::Dataflow);
+                app.dataflow_move(rows as i64);
+            }
+            KeyCode::Enter => app.dataflow_activate(),
+            _ => {}
+        }
+        return false;
+    }
     if app.dialog == Some(Dialog::Markers) {
         match key.code {
             KeyCode::Esc => app.dialog = None,

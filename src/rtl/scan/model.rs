@@ -205,6 +205,10 @@ impl ModuleDef {
 pub(super) fn base_name(text: &str) -> &str {
     text.split('[').next().unwrap_or(text)
 }
+
+pub(super) fn reference_base(text: &str) -> String {
+    text.split('.').map(base_name).collect::<Vec<_>>().join(".")
+}
 /// Declaration, drivers and loads of one signal inside a module.
 #[derive(Clone, Debug, Default)]
 pub struct SignalTrace {

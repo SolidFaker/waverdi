@@ -427,8 +427,33 @@ fn identifier_chain(chars: &[char], start: usize) -> Vec<String> {
     while i > 0 && chars[i - 1] == '.' {
         let end = i - 1;
         let mut begin = end;
-        while begin > 0 && is_ident_char(chars[begin - 1]) {
-            begin -= 1;
+        loop {
+            while begin > 0 && is_ident_char(chars[begin - 1]) {
+                begin -= 1;
+            }
+            if begin > 0 && chars[begin - 1] == ']' {
+                let mut depth = 0i32;
+                let mut closed = false;
+                while begin > 0 {
+                    begin -= 1;
+                    match chars[begin] {
+                        ']' => depth += 1,
+                        '[' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                closed = true;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if !closed {
+                    return Vec::new();
+                }
+                continue;
+            }
+            break;
         }
         if begin == end {
             break;
@@ -859,5 +884,16 @@ mod tests {
         assert_eq!(view.word_at_cursor().as_deref(), Some("next"));
         view.set_cursor(0, 1, 10); // `module` keyword
         assert_eq!(view.word_at_cursor(), None);
+    }
+
+    #[test]
+    fn qualifier_chain_keeps_struct_array_indices() {
+        let mut view = view("qualifier");
+        view.lines.push("assign x = mem[0][1].r;".to_string());
+        let line = view.lines.len() - 1;
+        assert_eq!(
+            view.qualifier_chain(line, view.lines[line].rfind('r').unwrap()),
+            vec!["mem[0][1]".to_string()]
+        );
     }
 }

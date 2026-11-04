@@ -50,6 +50,7 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
     let wanted_height = match dialog {
         Dialog::Find => 14,
         Dialog::Follow => (app.follow_targets.len() as u16 + 4).min(16),
+        Dialog::Dataflow => (app.dataflow_edges.len() as u16 + 4).min(16),
         Dialog::Markers => (app.markers.len() as u16 + 4).min(16),
         Dialog::Keys => keymap::help_len() as u16 + 4,
         Dialog::CreateBus => app
@@ -82,7 +83,7 @@ pub fn visible_rows(screen: Rect, app: &App, dialog: Dialog) -> usize {
     }
     let reserved = match dialog {
         Dialog::Find => 5,
-        Dialog::Follow | Dialog::Markers => 4,
+        Dialog::Follow | Dialog::Dataflow | Dialog::Markers => 4,
         _ => 2,
     };
     (area.height as usize).saturating_sub(reserved).max(1)
@@ -196,6 +197,11 @@ pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea
             area.height.saturating_sub(4) as usize,
             app.follow_targets.len(),
         ),
+        Dialog::Dataflow => (
+            area.y + 2,
+            area.height.saturating_sub(4) as usize,
+            app.dataflow_edges.len(),
+        ),
         Dialog::Markers => (
             area.y + 2,
             area.height.saturating_sub(4) as usize,
@@ -227,6 +233,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
         Dialog::Find => "Search Signal",
         Dialog::FindValue => "Find Value",
         Dialog::Follow => "Follow Signal",
+        Dialog::Dataflow => "Dataflow",
         Dialog::Markers => "Markers",
         Dialog::SplitBus => "Split Bus",
         Dialog::CreateBus => "Create Bus",
@@ -299,6 +306,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
                 );
             }
             Dialog::Follow => draw_follow(buf, area, inner_x, inner_w, app),
+            Dialog::Dataflow => draw_dataflow(buf, area, inner_x, inner_w, app),
             Dialog::Markers => draw_markers(buf, area, inner_x, inner_w, app),
             Dialog::SplitBus => {
                 cursor = draw_input(
@@ -1236,6 +1244,83 @@ fn draw_follow(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
         rows,
         scroll,
         app.follow_targets.len(),
+        t,
+    );
+    text::put(
+        buf,
+        x,
+        area.bottom().saturating_sub(2),
+        &text::trunc("Enter: locate  ↑/↓: select  Esc: cancel", width),
+        Style::new().fg(t.dim),
+    );
+}
+
+fn draw_dataflow(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
+    let t = &app.settings.theme;
+    text::put(
+        buf,
+        x,
+        area.y + 1,
+        &text::trunc(&format!("signal: {}", app.dataflow_name), width),
+        Style::new().fg(t.dim),
+    );
+    if app.dataflow_edges.is_empty() {
+        text::put(
+            buf,
+            x,
+            area.y + 2,
+            "no local connections",
+            Style::new().fg(t.dim),
+        );
+        return;
+    }
+    let rows = area.height.saturating_sub(4) as usize;
+    let selected = app.dataflow_sel.min(app.dataflow_edges.len() - 1);
+    let max_scroll = app.dataflow_edges.len().saturating_sub(rows);
+    let mut scroll = app.dialog_scroll.min(max_scroll);
+    if selected >= scroll + rows {
+        scroll = selected + 1 - rows;
+    } else if selected < scroll {
+        scroll = selected;
+    }
+    for (index, edge) in app
+        .dataflow_edges
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(rows)
+    {
+        let style = if index == selected {
+            Style::new().fg(Color::Black).bg(t.accent)
+        } else {
+            Style::new().fg(t.text)
+        };
+        let kind = match edge.kind {
+            crate::rtl::scan::DataflowKind::Assign => "assign",
+            crate::rtl::scan::DataflowKind::Port => "port",
+        };
+        let label = format!(
+            "{}.{} -> {}.{} [{kind}]",
+            edge.from.scope.join("."),
+            edge.from.signal,
+            edge.to.scope.join("."),
+            edge.to.signal
+        );
+        text::put(
+            buf,
+            x,
+            area.y + 2 + (index - scroll) as u16,
+            &text::trunc(&label, width.saturating_sub(1)),
+            style,
+        );
+    }
+    draw_scrollbar(
+        buf,
+        area.right().saturating_sub(2),
+        area.y + 2,
+        rows,
+        scroll,
+        app.dataflow_edges.len(),
         t,
     );
     text::put(

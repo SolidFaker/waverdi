@@ -282,6 +282,20 @@ impl RtlDb {
         self.scope_info(steps).map(|found| found.module)
     }
 
+    /// Instance that owns the signals of a hierarchy or value scope. Struct
+    /// members use the enclosing instance; the value-scope suffix is retained
+    /// by the caller as part of the signal reference.
+    pub fn signal_owner(&self, steps: &[String]) -> Option<(Vec<String>, &ModuleDef)> {
+        for k in (1..=steps.len()).rev() {
+            if let Some(found) = self.scope_info(&steps[..k]) {
+                if found.instance_scope.len() == k {
+                    return Some((found.instance_scope, found.module));
+                }
+            }
+        }
+        None
+    }
+
     /// Like [`module_at_scope`](Self::module_at_scope) but also resolves
     /// scopes that are values rather than hierarchy: a struct variable or an
     /// interface port (`tb.u_dut.clk_fetch`) reports the module that declares
@@ -606,6 +620,9 @@ impl RtlDb {
                 .unwrap_or_else(|| name.to_string());
             return Some((path, signal));
         }
+        if path.last().is_some_and(|head| target.declares(head)) {
+            return Some((path, name.to_string()));
+        }
         // `sig.field`: the head signal is the target, the field is a slice.
         if let Some(head) = chain.first() {
             if def.declares(head) {
@@ -629,6 +646,9 @@ impl RtlDb {
             return Some((Vec::new(), def));
         }
         let step = &chain[0];
+        if def.declares(step) && !def.instances.iter().any(|inst| inst.name == *step) {
+            return Some((chain.to_vec(), def));
+        }
         // Direct children: instances and explicitly named generate blocks.
         let mut unnamed = 0usize;
         for item in items {

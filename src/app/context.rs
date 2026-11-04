@@ -23,6 +23,10 @@ pub enum CtxItem {
     CopyFullPath,
     CopyFilePath,
     FollowSignal,
+    ShowDefinition,
+    ShowCalling,
+    ShowReference,
+    Dataflow,
     ExpandTreeLevel(Option<usize>),
     Highlight(Option<ratatui::style::Color>),
 }
@@ -118,7 +122,11 @@ pub const SOURCE_MENU: &[CtxEntry] = &[
     CtxEntry::Submenu("Highlight", HIGHLIGHT_MENU),
     CtxEntry::Item("Select All Module Text", CtxItem::SelectAllSource),
     CtxEntry::Item("Copy File Path", CtxItem::CopyFilePath),
+    CtxEntry::Item("Show Definition", CtxItem::ShowDefinition),
+    CtxEntry::Item("Show Calling", CtxItem::ShowCalling),
+    CtxEntry::Item("Show Reference", CtxItem::ShowReference),
     CtxEntry::Item("Follow Signal", CtxItem::FollowSignal),
+    CtxEntry::Item("Dataflow", CtxItem::Dataflow),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -279,7 +287,11 @@ impl App {
                     .unwrap_or_default();
                 self.copy_text(path, "file path");
             }
+            (CtxTarget::Source, CtxItem::ShowDefinition) => self.open_definition(),
+            (CtxTarget::Source, CtxItem::ShowCalling) => self.open_reference(true),
+            (CtxTarget::Source, CtxItem::ShowReference) => self.open_reference(false),
             (CtxTarget::Source, CtxItem::FollowSignal) => self.open_follow_signal(),
+            (CtxTarget::Source, CtxItem::Dataflow) => self.open_dataflow(),
             _ => {}
         }
     }

@@ -296,6 +296,22 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
         }
         return;
     }
+    if dialog == Dialog::Dataflow && m.kind == MouseEventKind::Down(MouseButton::Left) {
+        let area = crate::ui::dialog::dialog_rect(app.layout().area, app, dialog);
+        let top = area.y + 2;
+        if m.column >= area.x + 2
+            && m.column < area.right().saturating_sub(2)
+            && m.row >= top
+            && m.row < area.bottom().saturating_sub(2)
+        {
+            let index = app.dialog_scroll + (m.row - top) as usize;
+            if index < app.dataflow_edges.len() {
+                app.dataflow_sel = index;
+                app.dataflow_activate();
+            }
+        }
+        return;
+    }
     if dialog == Dialog::Markers && m.kind == MouseEventKind::Down(MouseButton::Left) {
         let area = crate::ui::dialog::dialog_rect(app.layout().area, app, dialog);
         let top = area.y + 2;
@@ -425,6 +441,7 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
         }
         Dialog::CreateBus => app.bus_builder_move(delta),
         Dialog::Follow => app.follow_move(delta),
+        Dialog::Dataflow => app.dataflow_move(delta),
         Dialog::Markers => app.marker_move(delta),
         Dialog::Settings => app.settings_move(delta),
         _ => {}
@@ -449,6 +466,7 @@ fn dialog_scroll_to(app: &mut App, dialog: Dialog, row: u16) {
     match dialog {
         Dialog::Find => app.find_sel = bottom,
         Dialog::Follow => app.follow_sel = bottom,
+        Dialog::Dataflow => app.dataflow_sel = bottom,
         Dialog::Markers => app.marker_sel = bottom,
         Dialog::CreateBus => app.bus_builder_select(bottom),
         Dialog::Settings => app.select_settings_row(bottom),
