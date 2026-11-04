@@ -431,6 +431,26 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         }
         return false;
     }
+    if app.dialog == Some(Dialog::Markers) {
+        match key.code {
+            KeyCode::Esc => app.dialog = None,
+            KeyCode::Up => app.marker_move(-1),
+            KeyCode::Down => app.marker_move(1),
+            KeyCode::PageUp => {
+                let rows = crate::ui::dialog::visible_rows(app.last_area, app, Dialog::Markers);
+                app.marker_move(-(rows as i64));
+            }
+            KeyCode::PageDown => {
+                let rows = crate::ui::dialog::visible_rows(app.last_area, app, Dialog::Markers);
+                app.marker_move(rows as i64);
+            }
+            KeyCode::Enter => app.marker_activate(),
+            KeyCode::Char('d') => app.delete_selected_marker(),
+            KeyCode::Char('c') => app.clear_markers(),
+            _ => {}
+        }
+        return false;
+    }
     if app.dialog == Some(Dialog::Settings) && app.time_dropdown.open && app.time_dropdown_key(key)
     {
         return false;

@@ -59,9 +59,10 @@ impl fmt::Display for TimeScale {
 }
 
 /// User-selectable time base for the ruler and status readouts.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub enum TimeBase {
     /// The dump's timescale, with a fitting unit chosen per value.
+    #[default]
     Scale,
     Fs,
     Ps,

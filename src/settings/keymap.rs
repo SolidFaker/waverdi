@@ -100,6 +100,10 @@ impl KeymapSettings {
         self.overrides.len()
     }
 
+    pub fn entries(&self) -> impl Iterator<Item = (usize, KeyChord)> + '_ {
+        self.overrides.iter().map(|(index, chord)| (*index, *chord))
+    }
+
     fn bump(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }

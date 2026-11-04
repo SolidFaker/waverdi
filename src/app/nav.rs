@@ -23,7 +23,7 @@ pub enum ListRow {
 
 /// A user-defined Signal List group. Groups partition `App::display` into
 /// contiguous blocks of `count` signals each.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct Group {
     pub id: u32,
     pub name: String,

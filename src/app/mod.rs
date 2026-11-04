@@ -9,12 +9,14 @@ mod input;
 pub(crate) mod keymap;
 mod keys;
 mod load;
+mod marker;
 mod mouse;
 mod nav;
 mod navigation;
 mod preferences;
 mod value;
 mod view;
+mod workspace;
 
 pub use action::Action;
 pub use add::{AddAction, AddFocus, AddSignals};
@@ -26,6 +28,7 @@ pub use dialog::Dialog;
 pub use input::{parse_time_spec, InputState};
 pub use keys::handle_key;
 pub use load::{LoadEvent, LoadJob};
+pub use marker::Marker;
 pub use mouse::handle_mouse;
 pub use nav::{Group, ListRow};
 pub use preferences::{SettingRow, SettingsButton, SettingsPane};
@@ -245,6 +248,11 @@ pub struct App {
     pub toolbar_search: bool,
     pub search_case_sensitive: bool,
     pub search_regex: bool,
+    pub recent_files: Vec<String>,
+    pub(crate) pending_workspace: Option<workspace::WorkspaceView>,
+    pub markers: Vec<Marker>,
+    pub marker_sel: usize,
+    pub next_marker_id: u32,
     pub(crate) source_history: Vec<navigation::SourceLocation>,
     pub(crate) source_history_index: Option<usize>,
     pub(crate) history_restore: bool,
@@ -377,6 +385,11 @@ impl App {
             toolbar_search: false,
             search_case_sensitive: false,
             search_regex: false,
+            recent_files: Vec::new(),
+            pending_workspace: None,
+            markers: Vec::new(),
+            marker_sel: 0,
+            next_marker_id: 0,
             source_history: Vec::new(),
             source_history_index: None,
             history_restore: false,
@@ -809,7 +822,8 @@ impl App {
         for warning in warnings {
             self.msg(format!("  warn: {warning}"));
         }
-        self.path = path;
+        self.path = path.clone();
+        self.remember_file(&path);
         self.expanded.clear();
         self.expanded.insert(wf.tree.root);
         self.display.clear();
@@ -851,6 +865,9 @@ impl App {
         self.manual_parents.clear();
         self.find_sel = 0;
         self.value_query = None;
+        self.markers.clear();
+        self.marker_sel = 0;
+        self.next_marker_id = 0;
         self.cursor = wf.start;
         // Eagerly parsed dumps arrive with every member value present: fill
         // the synthesized transition-time caches once instead of per draw.
@@ -867,6 +884,7 @@ impl App {
         self.add_signals = None;
         // A filelist may already be loaded (CLI `-f`, or a previous file).
         self.merge_generate_scopes();
+        self.restore_workspace_view();
     }
 
     /// Add RTL generate scopes that the dump does not record to the Instance

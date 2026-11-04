@@ -1202,6 +1202,22 @@ mod tests {
     }
 
     #[test]
+    fn markers_dialog_shows_names_and_ab_delta() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.cursor = 5;
+        app.add_marker();
+        app.cursor = 15;
+        app.add_marker();
+        app.open_markers();
+        let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("A-B: 10ns"), "{screen}");
+        assert!(screen.contains("M0 @ 5ns"), "{screen}");
+        assert!(screen.contains("M1 @ 15ns"), "{screen}");
+    }
+
+    #[test]
     fn settings_dialog_renders_categories_items_and_effective_shortcuts() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();

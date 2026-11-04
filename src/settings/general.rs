@@ -1,7 +1,7 @@
 pub const BUS_BITS_OPTIONS: [u32; 5] = [1_024, 2_048, 4_096, 8_192, 16_384];
 pub const BUS_WORK_OPTIONS: [usize; 5] = [1_000_000, 4_000_000, 8_000_000, 16_000_000, 64_000_000];
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum WaveValueOverflow {
     #[default]
     Hide,
@@ -23,7 +23,7 @@ impl WaveValueOverflow {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct GeneralSettings {
     pub bus_split_bits: u32,
     pub bus_split_work: usize,

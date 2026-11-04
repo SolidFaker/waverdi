@@ -5,6 +5,7 @@ pub enum Dialog {
     Find,
     FindValue,
     Follow,
+    Markers,
     SplitBus,
     CreateBus,
     GroupName,

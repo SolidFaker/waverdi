@@ -9,6 +9,8 @@ description = "Verdi-style terminal RTL waveform viewer (VCD/FST/FSDB)"
 ratatui = "0.29"
 crossterm = "0.28"
 regex = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
 clap = { version = "4", features = ["derive"] }
 # Desktop portal backend: pure Rust, no GTK/Wayland development headers needed.
 rfd = { version = "0.17.2", optional = true, default-features = false, features = ["xdg-portal"] }

@@ -1,8 +1,9 @@
 use ratatui::style::Color;
 
 /// Selectable colour scheme.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub enum ThemeKind {
+    #[default]
     Dark,
     Light,
     /// Dark waveform panes with light chrome.

@@ -1,5 +1,5 @@
 /// Horizontal pane proportions, adjustable by dragging the pane borders.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct Splits {
     pub tree_pct: u16,
     pub list_pct: u16,

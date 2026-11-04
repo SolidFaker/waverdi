@@ -24,6 +24,8 @@ pub const MENUS: [(&str, &[(&str, Action)]); 5] = [
             ("Fit to Screen", Action::Fit),
             ("Center Cursor", Action::Center),
             ("Go to Time...", Action::Goto),
+            ("Add Marker", Action::AddMarker),
+            ("Markers...", Action::Markers),
             ("Settings...", Action::Settings),
         ],
     ),

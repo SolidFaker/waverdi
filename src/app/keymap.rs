@@ -167,6 +167,22 @@ const BINDINGS: &[Binding] = &[
         keys: ", / .",
         description: "previous / next transition",
     },
+    Binding {
+        patterns: &[KeyPattern::Char('m')],
+        action: Action::AddMarker,
+        needs_waveform: true,
+        category: "View",
+        keys: "m",
+        description: "add marker at cursor",
+    },
+    Binding {
+        patterns: &[KeyPattern::Char('M')],
+        action: Action::Markers,
+        needs_waveform: true,
+        category: "View",
+        keys: "M",
+        description: "show markers",
+    },
 ];
 
 pub(crate) fn bindings() -> &'static [Binding] {

@@ -19,7 +19,7 @@ use clap::Parser;
 use crossterm::event::{Event, MouseEventKind};
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use waveform::Waveform;
 
 #[derive(Parser)]
@@ -87,6 +87,8 @@ fn main() {
         app.use_gui = false;
     }
 
+    app.load_workspace(cli.file.is_none());
+
     if let Some(file) = &cli.file {
         if cli.list_signals {
             match dump::parse(file) {
@@ -127,7 +129,12 @@ fn run_tui(mut app: App) -> io::Result<()> {
 
 fn run_loop(term: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()> {
     crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
+    let mut last_save = Instant::now();
     loop {
+        if last_save.elapsed() >= Duration::from_secs(5) {
+            app.save_workspace();
+            last_save = Instant::now();
+        }
         let loading = app.load.as_ref().is_some_and(|job| !job.finished);
         // Idle frames are skipped: the dirty flag is set by every input event,
         // by loader events and by the idle tick when it changes state.
@@ -171,5 +178,6 @@ fn run_loop(term: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()
             break;
         }
     }
+    app.save_workspace();
     Ok(())
 }

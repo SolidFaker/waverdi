@@ -50,6 +50,7 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
     let wanted_height = match dialog {
         Dialog::Find => 14,
         Dialog::Follow => (app.follow_targets.len() as u16 + 4).min(16),
+        Dialog::Markers => (app.markers.len() as u16 + 4).min(16),
         Dialog::Keys => keymap::help_len() as u16 + 4,
         Dialog::CreateBus => app
             .bus_builder()
@@ -81,7 +82,7 @@ pub fn visible_rows(screen: Rect, app: &App, dialog: Dialog) -> usize {
     }
     let reserved = match dialog {
         Dialog::Find => 5,
-        Dialog::Follow => 4,
+        Dialog::Follow | Dialog::Markers => 4,
         _ => 2,
     };
     (area.height as usize).saturating_sub(reserved).max(1)
@@ -195,6 +196,11 @@ pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea
             area.height.saturating_sub(4) as usize,
             app.follow_targets.len(),
         ),
+        Dialog::Markers => (
+            area.y + 2,
+            area.height.saturating_sub(4) as usize,
+            app.markers.len(),
+        ),
         Dialog::Settings => (area.y + 1, settings_layout(area).rows, app.settings_len()),
         _ => return None,
     };
@@ -221,6 +227,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
         Dialog::Find => "Search Signal",
         Dialog::FindValue => "Find Value",
         Dialog::Follow => "Follow Signal",
+        Dialog::Markers => "Markers",
         Dialog::SplitBus => "Split Bus",
         Dialog::CreateBus => "Create Bus",
         Dialog::GroupName => "Rename Group",
@@ -292,6 +299,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
                 );
             }
             Dialog::Follow => draw_follow(buf, area, inner_x, inner_w, app),
+            Dialog::Markers => draw_markers(buf, area, inner_x, inner_w, app),
             Dialog::SplitBus => {
                 cursor = draw_input(
                     buf,
@@ -1235,6 +1243,80 @@ fn draw_follow(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
         x,
         area.bottom().saturating_sub(2),
         &text::trunc("Enter: locate  ↑/↓: select  Esc: cancel", width),
+        Style::new().fg(t.dim),
+    );
+}
+
+fn draw_markers(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
+    let t = &app.settings.theme;
+    let delta = app.marker_delta().map(|delta| {
+        app.wf.as_ref().map(|wf| {
+            crate::waveform::format_time_base(delta as f64, &wf.ts, app.settings.time_base)
+        })
+    });
+    let summary = match delta {
+        Some(Some(delta)) => format!("A-B: {delta}"),
+        _ => "A-B: add two markers".to_string(),
+    };
+    text::put(buf, x, area.y + 1, &summary, Style::new().fg(t.accent));
+    if app.markers.is_empty() {
+        text::put(
+            buf,
+            x,
+            area.y + 2,
+            "no markers (m adds one at the cursor)",
+            Style::new().fg(t.dim),
+        );
+        return;
+    }
+    let rows = area.height.saturating_sub(4) as usize;
+    let selected = app.marker_sel.min(app.markers.len() - 1);
+    let max_scroll = app.markers.len().saturating_sub(rows);
+    let mut scroll = app.dialog_scroll.min(max_scroll);
+    if selected >= scroll + rows {
+        scroll = selected + 1 - rows;
+    } else if selected < scroll {
+        scroll = selected;
+    }
+    if let Some(wf) = &app.wf {
+        for (index, marker) in app.markers.iter().enumerate().skip(scroll).take(rows) {
+            let style = if index == selected {
+                Style::new().fg(Color::Black).bg(t.accent)
+            } else {
+                Style::new().fg(t.text)
+            };
+            let label = format!(
+                "{} @ {}",
+                marker.name,
+                crate::waveform::format_time_base(
+                    marker.time as f64,
+                    &wf.ts,
+                    app.settings.time_base
+                )
+            );
+            text::put(
+                buf,
+                x,
+                area.y + 2 + (index - scroll) as u16,
+                &text::trunc(&label, width.saturating_sub(1)),
+                style,
+            );
+        }
+    }
+    draw_scrollbar(
+        buf,
+        area.right().saturating_sub(2),
+        area.y + 2,
+        rows,
+        scroll,
+        app.markers.len(),
+        t,
+    );
+    text::put(
+        buf,
+        x,
+        area.bottom().saturating_sub(2),
+        &text::trunc("Enter: jump  d: delete  c: clear  Esc: close", width),
         Style::new().fg(t.dim),
     );
 }

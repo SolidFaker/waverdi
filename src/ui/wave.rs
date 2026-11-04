@@ -89,6 +89,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App, wf: &Waveform) {
     }
 
     draw_range(buf, l, app);
+    draw_markers(buf, l, app);
     draw_cursor(buf, l, app);
     draw_scrollbars(buf, l, app);
 }
@@ -111,6 +112,37 @@ fn draw_group_row(buf: &mut Buffer, l: &Layout, t: &Theme, selected: bool, y: u1
         "─".repeat(l.rows.width as usize),
         Style::new().fg(t.wave_dim).bg(bg),
     );
+}
+
+fn draw_markers(buf: &mut Buffer, l: &Layout, app: &App) {
+    let t = &app.settings.theme;
+    for (index, marker) in app.markers.iter().enumerate() {
+        let col = app.x_at_tick(marker.time);
+        if col < 0 || col as usize >= l.cols {
+            continue;
+        }
+        let x = l.rows.x + col as u16;
+        let color = if index == app.marker_sel {
+            t.cursor
+        } else {
+            t.accent
+        };
+        for y in l.rows.y..l.rows.bottom() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                if cell.symbol() == " " {
+                    cell.set_symbol("│");
+                }
+                cell.set_fg(color);
+            }
+        }
+        text::put(
+            buf,
+            x,
+            l.rows.y,
+            &marker.name,
+            Style::new().fg(color).add_modifier(Modifier::BOLD),
+        );
+    }
 }
 
 /// Pane label; highlighted while the waveform pane owns the focus.
