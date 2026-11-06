@@ -175,7 +175,7 @@ impl App {
         if self.settings_pane == SettingsPane::Buttons {
             match self.settings_button {
                 SettingsButton::Reset => self.settings_reset(),
-                SettingsButton::Close => self.dialog = None,
+                SettingsButton::Close => self.close_dialog(),
             }
             return;
         }
@@ -335,6 +335,17 @@ impl App {
             self.set_time_base(base);
         }
         changed
+    }
+
+    pub fn time_dropdown_scroll_to(&mut self, row: u16) {
+        let bounds = crate::ui::dialog::settings_popup_bounds(self.last_area, self);
+        let anchor = crate::ui::dialog::time_dropdown_anchor(self.last_area, self);
+        let options: Vec<&str> = TimeBase::CYCLE.iter().map(|base| base.label()).collect();
+        Dropdown::new(&options, self.time_dropdown, anchor).scroll_to(
+            &mut self.time_dropdown,
+            row,
+            bounds,
+        );
     }
 
     pub fn open_color_picker(&mut self, setting: SettingId) {

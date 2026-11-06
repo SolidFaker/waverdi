@@ -1157,6 +1157,96 @@ mod tests {
     }
 
     #[test]
+    fn source_horizontal_scroll_preserves_ascii_and_unicode_text() {
+        let dir = std::env::temp_dir().join(format!("waverdi_src_scroll_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("counter.sv");
+        std::fs::write(
+            &file,
+            "module counter;\nlogic count;\n\
+             assign count = 32'h1234_abcd; // ascii_tail_with_a_longer_suffix\n\
+             assign count = 32'h5678_efab; // 注释_tail_with_a_longer_suffix\nendmodule\n",
+        )
+        .unwrap();
+        let set = crate::rtl::SourceSet::from_files(vec![file], "test");
+        let db = crate::rtl::RtlDb::parse_sources(&set);
+        let view = crate::rtl::SourceView::load(db.module("counter").unwrap(), &db).unwrap();
+        let mut app = App::new();
+        app.source_view = Some(view);
+        app.rtl = Some(db);
+        app.focus = crate::app::Focus::Source;
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 40, 24));
+
+        for select_all in [false, true] {
+            if select_all {
+                app.select_all_source();
+            }
+            for h in [0, 13, 29] {
+                app.source_h_scroll = h;
+                let layout = app.layout();
+                let code = super::source::code_rect(&layout);
+                let view = app.source_view.as_ref().unwrap();
+                let gutter = super::source::gutter_width(view);
+                let text_w = (code.width as usize).saturating_sub(gutter as usize);
+                assert!(h <= view.max_width.saturating_sub(text_w));
+                let mut buffer = ratatui::buffer::Buffer::empty(layout.area);
+                super::source::draw(&mut buffer, &layout, &app);
+                for line in 2..4 {
+                    let actual: String = (0..text_w)
+                        .map(|column| {
+                            buffer
+                                .cell((code.x + gutter + column as u16, code.y + line as u16))
+                                .unwrap()
+                                .symbol()
+                        })
+                        .collect();
+                    let expected: String = view.lines[line]
+                        .chars()
+                        .skip(h)
+                        .chain(std::iter::repeat(' '))
+                        .take(text_w)
+                        .collect();
+                    assert_eq!(actual, expected, "line {line}, horizontal offset {h}");
+                }
+                if select_all {
+                    assert_eq!(
+                        buffer.cell((code.x + gutter, code.y + 2)).unwrap().bg,
+                        app.settings.theme.row_sel_bg
+                    );
+                }
+            }
+        }
+        let row_text = |app: &App, row: usize| {
+            let layout = app.layout();
+            let code = super::source::code_rect(&layout);
+            let view = app.source_view.as_ref().unwrap();
+            let gutter = super::source::gutter_width(view);
+            let width = (code.width as usize).saturating_sub(gutter as usize);
+            let mut buffer = ratatui::buffer::Buffer::empty(layout.area);
+            super::source::draw(&mut buffer, &layout, app);
+            (0..width)
+                .map(|column| {
+                    buffer
+                        .cell((code.x + gutter + column as u16, code.y + row as u16))
+                        .unwrap()
+                        .symbol()
+                })
+                .collect::<String>()
+        };
+        app.source_view.as_mut().unwrap().scroll_by(1, 10);
+        let expected = row_text(&app, 1);
+        assert_eq!(row_text(&app, 0), expected, "new row after scrolling down");
+        app.source_view.as_mut().unwrap().scroll_by(-1, 10);
+        assert_eq!(
+            row_text(&app, 1),
+            expected,
+            "restored row after scrolling up"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn dialogs_render() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();
@@ -1499,6 +1589,39 @@ mod tests {
             ] {
                 app.open_dialog(dialog);
                 let _ = render_app(&mut app, w, h);
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_dialogs_degrade_gracefully_when_they_cannot_fit() {
+        for dialog in [
+            crate::app::Dialog::AddSignals,
+            crate::app::Dialog::LogicOperation,
+            crate::app::Dialog::Settings,
+        ] {
+            let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+            let mut app = App::new();
+            app.apply_parsed("<test>", out);
+            app.set_display(vec![0]);
+            match dialog {
+                crate::app::Dialog::AddSignals => app.open_add_signals(),
+                crate::app::Dialog::LogicOperation => app.open_logic_operation(0),
+                _ => app.open_settings(),
+            }
+            let screen = render_app(&mut app, 30, 8);
+            assert!(screen.contains("Terminal too small"), "{screen}");
+            let area = super::dialog::dialog_rect(app.last_area, &app, dialog);
+            let close = super::dialog::close_button(app.last_area, &app, dialog);
+            assert!(close.x >= area.x && close.right() <= area.right());
+            match dialog {
+                crate::app::Dialog::AddSignals => {
+                    assert_eq!(super::add::hit(app.last_area, &app, 0, 0), None)
+                }
+                crate::app::Dialog::LogicOperation => {
+                    assert_eq!(super::dialog::logic_hit(app.last_area, &app, 0, 0), None)
+                }
+                _ => assert_eq!(super::dialog::settings_hit(app.last_area, &app, 0, 0), None),
             }
         }
     }

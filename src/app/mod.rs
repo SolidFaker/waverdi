@@ -20,7 +20,7 @@ mod navigation;
 mod preferences;
 mod value;
 mod view;
-mod window;
+pub(crate) mod window;
 mod workspace;
 
 pub use action::Action;
@@ -143,6 +143,7 @@ pub(crate) enum DragMode {
     ListHScroll,
     DialogScroll,
     SettingsSlider(GeneralSetting),
+    SettingsDropdownScroll,
     /// Dragging the scrollbar of one "Add Signals" picker pane.
     AddScroll(AddFocus),
     SplitTree,
@@ -504,10 +505,14 @@ impl App {
         self.waveform_version = self.waveform_version.wrapping_add(1);
     }
 
+    pub(crate) fn is_window_dragging(&self) -> bool {
+        self.window_drag.is_some() && self.dialog.is_some()
+    }
+
     /// True while a mouse drag is in progress; the event loop then polls
     /// faster and forwards `Moved` events instead of dropping them.
     pub fn is_dragging(&self) -> bool {
-        (self.window_drag.is_some() && self.dialog.is_some())
+        self.is_window_dragging()
             || self.dragging.is_some()
             || self
                 .color_picker
@@ -1257,12 +1262,7 @@ impl App {
         let gutter = crate::ui::source::gutter_width(view) as usize;
         let vbar = crate::ui::source::scrollbar_col(&l, view).is_some();
         let text_w = (code.width as usize).saturating_sub(gutter + usize::from(vbar));
-        let content = view
-            .lines
-            .iter()
-            .map(|line| line.chars().count())
-            .max()
-            .unwrap_or(0);
+        let content = view.max_width;
         let max = content.saturating_sub(text_w);
         let col = view.col;
         let h = self.source_h_scroll.min(max);
@@ -1770,6 +1770,30 @@ impl App {
         self.end_window_drag();
         self.dialog = Some(dialog);
         self.dialog_scroll = 0;
+    }
+
+    pub fn close_dialog(&mut self) {
+        let Some(dialog) = self.dialog else {
+            return;
+        };
+        self.dragging = None;
+        self.end_window_drag();
+        self.time_dropdown.open = false;
+        self.renaming_group = None;
+        match dialog {
+            Dialog::ColorPicker => self.close_color_picker(),
+            Dialog::BindKey => {
+                self.key_capture = None;
+                self.dialog = Some(Dialog::Settings);
+            }
+            Dialog::AddSignals => self.close_add_signals(),
+            Dialog::LogicOperation => self.logic_cancel(),
+            Dialog::CreateBus => self.bus_builder_cancel(),
+            _ => self.dialog = None,
+        }
+        if !matches!(dialog, Dialog::ColorPicker | Dialog::BindKey) {
+            self.dialog_scroll = 0;
+        }
     }
 
     pub fn radix_for(&self, idx: usize) -> Radix {

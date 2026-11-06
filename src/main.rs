@@ -126,9 +126,22 @@ fn run_tui(mut app: App) -> io::Result<()> {
     result
 }
 
+const DRAG_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+fn drag_frame_wait(last_draw: Option<Instant>, requested: bool, now: Instant) -> Option<Duration> {
+    if !requested {
+        return None;
+    }
+    Some(match last_draw {
+        Some(last) => DRAG_FRAME_INTERVAL.saturating_sub(now.saturating_duration_since(last)),
+        None => Duration::ZERO,
+    })
+}
+
 fn run_loop(term: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()> {
     crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
     let mut last_save = Instant::now();
+    let mut last_draw = None;
     loop {
         if last_save.elapsed() >= Duration::from_secs(5) {
             app.save_workspace();
@@ -138,21 +151,26 @@ fn run_loop(term: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()
             || app.compare_active()
             || app.export_active()
             || app.logic_active();
-        // Idle frames are skipped: the dirty flag is set by every input event,
-        // by loader events and by the idle tick when it changes state.
-        if app.needs_redraw || loading || app.is_dragging() {
+        let requested = app.needs_redraw || loading;
+        let dragging = app.is_dragging();
+        let wait = drag_frame_wait(last_draw, requested, Instant::now());
+        if requested && (!dragging || wait == Some(Duration::ZERO)) {
             // Draw also resizes the terminal buffer after a Resize event.
             term.draw(|f| ui::render(f, app))?;
             app.take_needs_redraw();
+            last_draw = Some(Instant::now());
         }
-        // Poll faster while something is moving (load progress, drag, scroll
-        // auto-repeat) and slower when the app is fully idle.
-        let timeout = if loading || app.is_dragging() {
-            50
+        // Drag updates are coalesced, but a drag with no pending change never
+        // spins or redraws. Other drag ticks retain their faster polling.
+        let timeout = if dragging {
+            drag_frame_wait(last_draw, app.needs_redraw || loading, Instant::now())
+                .unwrap_or(Duration::from_millis(50))
+        } else if loading || app.is_dragging() {
+            Duration::from_millis(50)
         } else {
-            250
+            Duration::from_millis(250)
         };
-        if !crossterm::event::poll(Duration::from_millis(timeout))? {
+        if !crossterm::event::poll(timeout)? {
             app::tick(app);
             continue;
         }
@@ -182,4 +200,41 @@ fn run_loop(term: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()
     }
     app.save_workspace();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drag_frame_pacing_coalesces_events_without_idle_spinning() {
+        let now = Instant::now();
+        assert_eq!(drag_frame_wait(None, true, now), Some(Duration::ZERO));
+        assert_eq!(
+            drag_frame_wait(Some(now), true, now),
+            Some(DRAG_FRAME_INTERVAL)
+        );
+        assert_eq!(
+            drag_frame_wait(Some(now), true, now + Duration::from_millis(8)),
+            Some(DRAG_FRAME_INTERVAL - Duration::from_millis(8))
+        );
+        assert_eq!(
+            drag_frame_wait(Some(now), true, now + DRAG_FRAME_INTERVAL),
+            Some(Duration::ZERO)
+        );
+
+        let mut last_draw = None;
+        let mut frames = 0;
+        for _ in 0..1_000 {
+            if drag_frame_wait(last_draw, true, now) == Some(Duration::ZERO) {
+                frames += 1;
+                last_draw = Some(now);
+            }
+        }
+        assert_eq!(frames, 1, "a burst becomes one frame, not 1000 frames");
+        assert_eq!(
+            drag_frame_wait(last_draw, false, now + DRAG_FRAME_INTERVAL),
+            None
+        );
+    }
 }

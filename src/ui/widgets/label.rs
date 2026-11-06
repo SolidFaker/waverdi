@@ -32,11 +32,12 @@ impl<'a> Label<'a> {
     }
 
     pub fn draw(self, buf: &mut Buffer, x: u16, y: u16, style: Style) -> Rect {
-        let area = Rect::new(x, y, self.width as u16, 1);
-        if self.width == 0 {
+        let area = Rect::new(x, y, self.width.min(u16::MAX as usize) as u16, 1);
+        let visible = area.intersection(*buf.area());
+        if visible.width == 0 || visible.height == 0 {
             return area;
         }
-        buf.set_style(area, style);
+        buf.set_style(visible, style);
         let shown = text::trunc(self.text, self.width);
         let used = shown.chars().count();
         let offset = match self.alignment {

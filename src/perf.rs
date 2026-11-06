@@ -93,6 +93,107 @@ fn list_frame_performance() {
 
 #[test]
 #[ignore = "performance comparison; run explicitly in release mode"]
+fn window_drag_frame_performance() {
+    let signals = (0..2_000)
+        .map(|index| {
+            let changes = (0..256)
+                .map(|time| Change {
+                    t: time,
+                    v: Value::Small(time & 1, 1),
+                })
+                .collect();
+            let mut signal = signal(format!("signal_{index}"), 1, changes);
+            signal.scope = (0..8).map(|depth| format!("scope_{depth}")).collect();
+            signal
+        })
+        .collect();
+    let mut app = App::new();
+    app.apply_waveform("<perf>".to_string(), waveform(signals), Vec::new());
+    app.set_display((0..2_000).collect());
+    app.show_full_names = true;
+    app.open_settings();
+    let backend = ratatui::backend::TestBackend::new(160, 60);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let area = ratatui::layout::Rect::new(0, 0, 160, 60);
+    app.sync_layout(area);
+    let dialog = crate::app::Dialog::Settings;
+    let rect = crate::ui::dialog::dialog_rect(area, &app, dialog);
+    assert!(app.begin_window_drag(dialog, rect.x + 4, rect.y));
+    let mut offset = 0u16;
+    measure("settings window drag full frames", 12, || {
+        app.drag_window_to(rect.x + 4 + offset % 8, rect.y + offset % 3);
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        black_box(crate::ui::dialog::dialog_rect(area, &app, dialog));
+        offset += 1;
+    });
+}
+
+#[test]
+#[ignore = "performance comparison; run explicitly in release mode"]
+fn source_frame_performance() {
+    let dir = std::env::temp_dir().join(format!("waverdi_source_perf_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("perf.sv");
+    let mut text = String::from("module perf;\n");
+    for index in 0..100 {
+        text.push_str(&format!("logic signal_{index};\n"));
+    }
+    for index in 0..12_000 {
+        text.push_str(&format!(
+            "assign value_{index} = signal_{} + 32'h1234_abcd; // padded RTL source for horizontal scrolling ...............................................\n",
+            index % 100
+        ));
+    }
+    text.push_str("endmodule\n");
+    std::fs::write(&file, text).unwrap();
+    let set = crate::rtl::SourceSet::from_files(vec![file], "perf");
+    let db = crate::rtl::RtlDb::parse_sources(&set);
+    let view = crate::rtl::SourceView::load(db.module("perf").unwrap(), &db).unwrap();
+    let mut wf = waveform(Vec::new());
+    let root = wf.tree.root;
+    wf.tree
+        .add_scope(root, "perf".to_string(), "perf".to_string());
+    let mut app = App::new();
+    app.apply_waveform("<perf>".to_string(), wf, Vec::new());
+    app.rtl = Some(db);
+    app.sources = Some(set);
+    app.source_view = Some(view);
+    app.tree_sel = 1;
+    app.focus = crate::app::Focus::Source;
+    app.sync_layout(ratatui::layout::Rect::new(0, 0, 160, 60));
+    let backend = ratatui::backend::TestBackend::new(160, 60);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::ui::render(frame, &mut app))
+        .unwrap();
+
+    let mut offset = 0i64;
+    measure("source vertical scroll frames", 12, || {
+        app.scroll_source(1);
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        black_box(app.source_view.as_ref().unwrap().scroll);
+        offset += 1;
+    });
+    app.select_all_source();
+    measure("source selected cursor scroll frames", 12, || {
+        let line = app.source_view.as_ref().unwrap().line;
+        app.set_source_cursor(line, 40 + (offset as usize % 80));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        black_box(app.source_view.as_ref().unwrap().scroll);
+        offset += 1;
+    });
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "performance comparison; run explicitly in release mode"]
 fn aggregate_merge_performance() {
     const MEMBERS: usize = 256;
     const CHANGES: usize = 1_000;

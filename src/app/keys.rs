@@ -510,10 +510,7 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         return false;
     }
     match key.code {
-        KeyCode::Esc => {
-            app.dialog = None;
-            app.renaming_group = None;
-        }
+        KeyCode::Esc => app.close_dialog(),
         KeyCode::Up if app.dialog == Some(Dialog::Settings) => app.settings_move(-1),
         KeyCode::Down if app.dialog == Some(Dialog::Settings) => app.settings_move(1),
         KeyCode::Left | KeyCode::Right if app.dialog == Some(Dialog::Settings) => {

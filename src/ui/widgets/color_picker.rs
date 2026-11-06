@@ -398,7 +398,7 @@ impl<'a> ColorPicker<'a> {
         text::put(buf, controls_x, y + 4, "Hex", focused(ColorField::Hex));
         let mut cursor = None;
         if self.state.focus == ColorField::Hex {
-            cursor = Some(TextBox::new(&self.state.hex, layout.hex).draw(buf, theme));
+            cursor = TextBox::new(&self.state.hex, layout.hex).draw(buf, theme);
         } else {
             Label::new(&self.state.hex.as_string(), layout.hex.width as usize).draw(
                 buf,

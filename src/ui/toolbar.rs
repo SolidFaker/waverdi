@@ -358,7 +358,7 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) -> Option<Position> {
         text::put(buf, rect.right(), rect.y, "│", Style::new().fg(t.dim));
     }
     if app.toolbar_search && cache.search.width > 0 {
-        return Some(crate::ui::widgets::TextBox::new(&app.input, cache.search).draw(buf, t));
+        return crate::ui::widgets::TextBox::new(&app.input, cache.search).draw(buf, t);
     }
     let value = app.input.as_string();
     let (value, fg) = if value.is_empty() {

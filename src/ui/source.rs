@@ -7,6 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Widget as _};
+use std::fmt::Write as _;
 
 /// Inner area of the Source frame (inside the border).
 pub fn inner_rect(l: &Layout) -> Rect {
@@ -117,7 +118,6 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
     let gutter = gutter_width(view);
     let focused = app.focus == crate::app::Focus::Source;
     let scrollbar = scrollbar_col(l, view);
-    // Keep the scrollbar column free of code.
     let text_right = scrollbar
         .map(|_| code.right().saturating_sub(1))
         .unwrap_or(code.right());
@@ -126,8 +126,10 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
     let max_h = content_w.saturating_sub(text_w);
     let h = app.source_h_scroll.min(max_h);
     let rows = code.height.saturating_sub(1) as usize;
-    // Highlight lookups are per-name and do not change between rows.
     let highlights = app.highlighted_source_names();
+    let has_highlights = !highlights.is_empty();
+    let target = &mut *buf;
+    let mut number = String::with_capacity(digits + 1);
     for row in 0..rows {
         let index = view.scroll + row;
         let Some(spans) = view.spans.get(index) else {
@@ -142,8 +144,9 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
         } else {
             t.bg
         };
-        let number = format!("{:>digits$} ", index + 1);
-        text::put(buf, code.x, y, &number, Style::new().fg(t.dim).bg(bg));
+        number.clear();
+        let _ = write!(number, "{:>digits$} ", index + 1);
+        text::put(target, code.x, y, &number, Style::new().fg(t.dim).bg(bg));
 
         let text_x = code.x + gutter;
         let mut x = text_x;
@@ -151,8 +154,6 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
         let active = view.module_at_line(index) == view.module;
         let inactive = view.inactive.get(index).copied().unwrap_or(false);
         'line: for span in spans {
-            // Code of other modules in the same file, and code in generate
-            // branches that are not instantiated, is shown dimmed.
             let fg = if !active || inactive {
                 t.dim
             } else {
@@ -166,15 +167,67 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
                     HlKind::Signal => t.src_signal,
                 }
             };
-            let highlight_bg = highlights.get(span.text.as_str()).copied();
-            // One stack buffer per span: encoding a char must not allocate.
+            let highlight_bg = if has_highlights {
+                highlights.get(span.text.as_str()).copied()
+            } else {
+                None
+            };
+            let mut chars = span.text.chars();
+            if span.ascii {
+                let skip = h.saturating_sub(col).min(span.text.len());
+                col += skip;
+                let visible = &span.text[skip..];
+                let end = col + visible.len();
+                let cursor_in_span =
+                    focused && index == view.line && view.col >= col && view.col < end;
+                let uniform_selection = match interval {
+                    None => Some(false),
+                    Some((from, to)) if from == to || to <= col || from >= end => Some(false),
+                    Some((from, to)) if from <= col && to >= end => Some(true),
+                    _ => None,
+                };
+                if highlight_bg.is_none() && !cursor_in_span {
+                    if let Some(selected) = uniform_selection {
+                        let count = visible.len().min(text_right.saturating_sub(x) as usize);
+                        if count == 0 && !visible.is_empty() {
+                            break 'line;
+                        }
+                        let style = if selected && span.kind == HlKind::Signal {
+                            Style::new().fg(t.bg).bg(t.src_signal)
+                        } else if selected {
+                            Style::new().fg(fg).bg(t.row_sel_bg)
+                        } else {
+                            Style::new().fg(fg).bg(bg)
+                        };
+                        let mut enc = [0u8; 4];
+                        for &byte in &visible.as_bytes()[..count] {
+                            let Some(cell) = target.cell_mut((x, y)) else {
+                                break 'line;
+                            };
+                            cell.set_symbol((byte as char).encode_utf8(&mut enc));
+                            cell.set_style(style);
+                            x += 1;
+                        }
+                        col += count;
+                        if count < visible.len() {
+                            break 'line;
+                        }
+                        continue;
+                    }
+                }
+                chars = visible.chars();
+            } else {
+                for _ in 0..h.saturating_sub(col) {
+                    if chars.next().is_none() {
+                        break;
+                    }
+                    col += 1;
+                }
+            }
             let mut enc = [0u8; 4];
-            for ch in span.text.chars() {
+            for ch in chars {
                 let column = col;
                 col += 1;
-                if column < h {
-                    continue;
-                }
                 if x >= text_right {
                     break 'line;
                 }
@@ -184,22 +237,20 @@ pub fn draw(buf: &mut Buffer, l: &Layout, app: &App) {
                 let (fg, bg) = if focused && index == view.line && column == view.col {
                     (t.bg, t.cursor)
                 } else if let Some(color) = highlight_bg {
-                    // A user highlight stays visible even inside a selection.
                     (fg, color)
                 } else if in_sel && span.kind == HlKind::Signal {
-                    // Selected signal names stand out.
                     (t.bg, t.src_signal)
                 } else if in_sel {
                     (fg, t.row_sel_bg)
                 } else {
                     (fg, bg)
                 };
-                text::set_cell(buf, x, y, ch.encode_utf8(&mut enc), fg, bg);
+                text::set_cell(target, x, y, ch.encode_utf8(&mut enc), fg, bg);
                 x += 1;
             }
         }
         if focused && index == view.line && view.col >= col && x < text_right {
-            if let Some(cell) = buf.cell_mut((x, y)) {
+            if let Some(cell) = target.cell_mut((x, y)) {
                 cell.set_bg(t.cursor);
             }
         }

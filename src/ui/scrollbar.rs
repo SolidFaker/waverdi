@@ -98,6 +98,19 @@ pub fn proportional_geometry(
     Some((start, len))
 }
 
+pub fn scroll_from_track(track: usize, len: usize, visible: usize, row: usize) -> usize {
+    if len <= visible || track == 0 || visible == 0 {
+        return 0;
+    }
+    let max_start = len - visible;
+    let thumb = ((track * visible) / len).max(1).min(track);
+    let span = track.saturating_sub(thumb);
+    if span == 0 {
+        return 0;
+    }
+    row.min(span) * max_start / span
+}
+
 /// Draw a horizontal scrollbar track from `x0` to `x1` (exclusive) on `y`.
 #[allow(clippy::too_many_arguments)]
 pub fn h_scrollbar(

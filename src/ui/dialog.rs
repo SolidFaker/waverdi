@@ -76,12 +76,14 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
         Dialog::Settings | Dialog::ColorPicker => 22,
         _ => 7,
     };
+    let (min_width, min_height) = crate::app::window::min_size(dialog);
     let width = wanted_width
         .min(screen.width.saturating_sub(8))
-        .max(28)
+        .max(min_width)
         .min(screen.width);
     let height = wanted_height
         .min(screen.height.saturating_sub(4))
+        .max(min_height)
         .min(screen.height);
     Rect {
         x: screen.x + screen.width.saturating_sub(width) / 2,
@@ -97,15 +99,19 @@ pub fn visible_rows(screen: Rect, app: &App, dialog: Dialog) -> usize {
     if dialog == Dialog::Settings {
         return settings_layout(area).rows;
     }
-    if dialog == Dialog::LogicOperation {
-        return (area.height as usize).saturating_sub(10).max(1);
+    if matches!(
+        dialog,
+        Dialog::Find
+            | Dialog::CreateBus
+            | Dialog::Follow
+            | Dialog::Dataflow
+            | Dialog::Compare
+            | Dialog::LogicOperation
+            | Dialog::Markers
+    ) {
+        return dialog_list(screen, app, dialog).rows();
     }
-    let reserved = match dialog {
-        Dialog::Find => 5,
-        Dialog::Follow | Dialog::Dataflow | Dialog::Compare | Dialog::Markers => 4,
-        _ => 2,
-    };
-    (area.height as usize).saturating_sub(reserved).max(1)
+    (area.height as usize).saturating_sub(2).max(1)
 }
 /// Right-edge scrollbar for a scrolled list.
 fn draw_scrollbar(
@@ -148,10 +154,10 @@ pub struct ScrollArea {
 pub fn close_button(screen: Rect, app: &App, dialog: Dialog) -> Rect {
     let area = dialog_rect(screen, app, dialog);
     Rect {
-        x: area.right().saturating_sub(4),
+        x: area.right().saturating_sub(3).max(area.x),
         y: area.y,
-        width: 3,
-        height: 1,
+        width: 3.min(area.width),
+        height: 1.min(area.height),
     }
 }
 
@@ -192,71 +198,94 @@ fn keys_line_count(inner_w: usize, settings: &KeymapSettings) -> usize {
     keys_lines(inner_w, settings).len()
 }
 
-/// Scrollable body of a dialog: `None` when everything fits.
-pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea> {
-    let area = dialog_rect(screen, app, dialog);
-    let (top, rows, total) = match dialog {
-        Dialog::Keys => (
-            area.y + 1,
-            area.height.saturating_sub(2) as usize,
-            keys_line_count(area.width.saturating_sub(4) as usize, &app.settings.keys),
+pub fn dialog_list(screen: Rect, app: &App, dialog: Dialog) -> crate::ui::widgets::ListView {
+    let outer = dialog_rect(screen, app, dialog);
+    let (top, bottom, total, selected) = match dialog {
+        Dialog::Open => (
+            3,
+            1,
+            app.browser.as_ref().map(|b| b.entries.len()).unwrap_or(0),
+            app.browser.as_ref().map(|b| b.sel).unwrap_or(0),
         ),
-        Dialog::Find => (
-            area.y + 4,
-            (area.height as usize).saturating_sub(5),
-            app.find_matches().len(),
-        ),
+        Dialog::Find => (4, 1, app.find_matches().len(), app.find_sel),
         Dialog::CreateBus => (
-            area.y + 2,
-            area.height.saturating_sub(5) as usize,
+            2,
+            3,
             app.bus_builder().map(|b| b.items.len()).unwrap_or(0),
+            app.bus_builder().map(|b| b.sel).unwrap_or(0),
         ),
-        Dialog::Follow => (
-            area.y + 2,
-            area.height.saturating_sub(4) as usize,
-            app.follow_targets.len(),
-        ),
-        Dialog::Dataflow => (
-            area.y + 2,
-            area.height.saturating_sub(4) as usize,
-            app.dataflow_edges.len(),
-        ),
+        Dialog::Follow => (2, 2, app.follow_targets.len(), app.follow_sel),
+        Dialog::Dataflow => (2, 2, app.dataflow_edges.len(), app.dataflow_sel),
         Dialog::Compare => (
-            area.y + 2,
-            area.height.saturating_sub(4) as usize,
+            2,
+            2,
             app.compare
                 .as_ref()
                 .map(|session| session.rows.len())
                 .unwrap_or(0),
+            app.compare_sel,
         ),
         Dialog::LogicOperation => (
-            area.y + 8,
-            visible_rows(screen, app, dialog),
+            8,
+            2,
             app.logic_builder()
                 .map(|builder| builder.signals.len())
                 .unwrap_or(0),
+            app.logic_builder().map(|builder| builder.sel).unwrap_or(0),
         ),
-        Dialog::Markers => (
-            area.y + 2,
-            area.height.saturating_sub(4) as usize,
-            app.markers.len(),
+        Dialog::Markers => (2, 2, app.markers.len(), app.marker_sel),
+        _ => (2, 2, 0, 0),
+    };
+    let selected = selected.min(total.saturating_sub(1));
+    let requested = if dialog == Dialog::Open {
+        app.browser.as_ref().map(|b| b.scroll).unwrap_or(0)
+    } else {
+        app.dialog_scroll
+    };
+    crate::ui::widgets::ListView::dialog(outer, top, bottom, total, requested, selected)
+}
+
+/// Scrollable body of a dialog: `None` when everything fits.
+pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea> {
+    let area = dialog_rect(screen, app, dialog);
+    let (bar, rows, total) = match dialog {
+        Dialog::Keys => (
+            Rect {
+                x: area.right().saturating_sub(2),
+                y: area.y + 1,
+                width: 1,
+                height: area.height.saturating_sub(2),
+            },
+            area.height.saturating_sub(2) as usize,
+            keys_line_count(area.width.saturating_sub(4) as usize, &app.settings.keys),
         ),
-        Dialog::Settings => (area.y + 1, settings_layout(area).rows, app.settings_len()),
+        Dialog::Settings => (
+            Rect {
+                x: area.right().saturating_sub(2),
+                y: area.y + 1,
+                width: 1,
+                height: settings_layout(area).rows as u16,
+            },
+            settings_layout(area).rows,
+            app.settings_len(),
+        ),
+        Dialog::Open
+        | Dialog::Find
+        | Dialog::CreateBus
+        | Dialog::Follow
+        | Dialog::Dataflow
+        | Dialog::Compare
+        | Dialog::LogicOperation
+        | Dialog::Markers => {
+            let list = dialog_list(screen, app, dialog);
+            (list.bar, list.rows(), list.total)
+        }
         _ => return None,
     };
     if rows == 0 || total <= rows {
         return None;
     }
-    Some(ScrollArea {
-        bar: Rect {
-            x: area.right().saturating_sub(2),
-            y: top,
-            width: 1,
-            height: rows as u16,
-        },
-        rows,
-        total,
-    })
+    Some(ScrollArea { bar, rows, total })
 }
 
 pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
@@ -316,6 +345,22 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
 
         let inner_x = area.x + 2;
         let inner_w = area.width.saturating_sub(4) as usize;
+        let (min_width, min_height) = crate::app::window::min_size(dialog);
+        if area.width < min_width || area.height < min_height {
+            let message = if dialog == Dialog::ColorPicker {
+                "Increase the terminal size to edit colours."
+            } else {
+                "Terminal too small; resize to show this window."
+            };
+            text::put(
+                buf,
+                inner_x,
+                area.y + 1,
+                &text::trunc(message, inner_w),
+                Style::new().fg(t.dim),
+            );
+            return;
+        }
         match dialog {
             Dialog::AddSignals => {}
             Dialog::Open => draw_browser(buf, area, app),
@@ -349,7 +394,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
             Dialog::Dataflow => draw_dataflow(buf, area, inner_x, inner_w, app),
             Dialog::Compare => draw_compare(buf, area, inner_x, inner_w, app),
             Dialog::Export => {
-                cursor = Some(draw_export(buf, area, app));
+                cursor = draw_export(buf, area, app);
             }
             Dialog::LogicOperation => {
                 cursor = draw_logic_operation(buf, area, app);
@@ -778,6 +823,7 @@ pub enum SettingsHit {
         value: usize,
     },
     Dropdown(usize),
+    DropdownScroll,
     DismissDropdown,
     Reset,
     Close,
@@ -788,6 +834,10 @@ pub fn settings_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<Setti
     use crate::ui::widgets::{Checkbox, Dropdown, RadioGroup, Toggle};
 
     let area = dialog_rect(screen, app, Dialog::Settings);
+    let (min_width, min_height) = crate::app::window::min_size(Dialog::Settings);
+    if area.width < min_width || area.height < min_height {
+        return None;
+    }
     let layout = settings_layout(area);
     if app.time_dropdown.open {
         let options: Vec<&str> = crate::waveform::TimeBase::CYCLE
@@ -796,7 +846,11 @@ pub fn settings_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<Setti
             .collect();
         let anchor = time_dropdown_anchor(screen, app);
         let dropdown = Dropdown::new(&options, app.time_dropdown, anchor);
-        if let Some(index) = dropdown.option_at(col, row, settings_popup_bounds(screen, app)) {
+        let bounds = settings_popup_bounds(screen, app);
+        if dropdown.scrollbar_at(col, row, bounds) {
+            return Some(SettingsHit::DropdownScroll);
+        }
+        if let Some(index) = dropdown.option_at(col, row, bounds) {
             return Some(SettingsHit::Dropdown(index));
         }
         return Some(SettingsHit::DismissDropdown);
@@ -964,16 +1018,15 @@ fn draw_browser(buf: &mut Buffer, area: Rect, app: &App) {
         return;
     }
 
-    let rows = area.height.saturating_sub(4) as usize;
-    let label_width = area.width.saturating_sub(4) as usize;
-    for row in 0..rows {
-        let k = browser.scroll + row;
-        if k >= browser.entries.len() {
-            break;
-        }
-        let entry = &browser.entries[k];
-        let selected = k == browser.sel;
-        let style = if selected {
+    let list = dialog_list(app.last_area, app, Dialog::Open);
+    for (index, entry) in browser
+        .entries
+        .iter()
+        .enumerate()
+        .skip(list.scroll)
+        .take(list.rows())
+    {
+        let style = if index == browser.sel {
             Style::new().fg(Color::Black).bg(t.accent)
         } else {
             match entry.kind {
@@ -989,27 +1042,13 @@ fn draw_browser(buf: &mut Buffer, area: Rect, app: &App) {
         };
         text::put(
             buf,
-            area.x + 2,
-            area.y + 3 + row as u16,
-            &text::trunc(&label, label_width),
+            list.area.x,
+            list.area.y + (index - list.scroll) as u16,
+            &text::trunc(&label, list.area.width as usize),
             style,
         );
     }
-
-    let total = browser.entries.len();
-    if total > rows && rows > 0 {
-        let x = area.right().saturating_sub(2);
-        let thumb = ((rows as f64 / total as f64) * rows as f64).max(1.0) as usize;
-        let top = ((browser.scroll as f64 / total as f64) * rows as f64) as usize;
-        for row in 0..rows {
-            let symbol = if row >= top && row < top + thumb {
-                "█"
-            } else {
-                "│"
-            };
-            text::set_cell(buf, x, area.y + 3 + row as u16, symbol, t.dim, t.bg);
-        }
-    }
+    list.draw_scrollbar(buf, t);
 }
 
 fn bus_name_row(area: Rect) -> Rect {
@@ -1051,7 +1090,7 @@ fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) -> Option<Position>
     let value = app.input.as_string();
     let mut caret = None;
     if builder.name_focus && input_area.width > 0 {
-        caret = Some(crate::ui::widgets::TextBox::new(&app.input, input_area).draw(buf, t));
+        caret = crate::ui::widgets::TextBox::new(&app.input, input_area).draw(buf, t);
     } else {
         let (value, fg) = if value.is_empty() {
             (app.bus_builder_default_name(), t.dim)
@@ -1069,15 +1108,14 @@ fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) -> Option<Position>
     let inner = area.width.saturating_sub(2) as usize;
     let count = builder.items.len();
     let total: u32 = builder.items.iter().map(|item| item.width()).sum();
-    let rows = area.height.saturating_sub(5) as usize;
-    let max_scroll = count.saturating_sub(rows);
-    let mut scroll = app.dialog_scroll.min(max_scroll);
-    if builder.sel >= scroll + rows {
-        scroll = builder.sel + 1 - rows;
-    } else if builder.sel < scroll {
-        scroll = builder.sel;
-    }
-    for (k, item) in builder.items.iter().enumerate().skip(scroll).take(rows) {
+    let list = dialog_list(app.last_area, app, Dialog::CreateBus);
+    for (k, item) in builder
+        .items
+        .iter()
+        .enumerate()
+        .skip(list.scroll)
+        .take(list.rows())
+    {
         let Some(signal) = app.wf.as_ref().and_then(|wf| wf.signals.get(item.sig)) else {
             continue;
         };
@@ -1099,28 +1137,15 @@ fn draw_bus_builder(buf: &mut Buffer, area: Rect, app: &App) -> Option<Position>
             signal.full_name(),
             item.width()
         );
-        let style = if k == builder.sel {
-            Style::new().fg(Color::Black).bg(t.accent)
-        } else {
-            Style::new().fg(t.text)
-        };
         text::put(
             buf,
-            area.x + 2,
-            area.y + 2 + (k - scroll) as u16,
-            &text::trunc(&label, inner),
-            style,
+            list.area.x,
+            list.area.y + (k - list.scroll) as u16,
+            &text::trunc(&label, list.area.width as usize),
+            crate::ui::widgets::ListView::row_style(t, k == builder.sel),
         );
     }
-    draw_scrollbar(
-        buf,
-        area.right().saturating_sub(2),
-        area.y + 2,
-        rows,
-        scroll,
-        count,
-        t,
-    );
+    list.draw_scrollbar(buf, t);
     let hint_top = " Tab name/list  ↑↓ select  ⇧↑↓ reorder  h/l LSB  H/L MSB";
     let hint_bottom = format!(" s/S sort   r rev   Enter create   Esc cancel   {total} bits ");
     text::put(
@@ -1166,7 +1191,7 @@ fn draw_input(
         &text::trunc(hint, width),
         Style::new().fg(t.dim),
     );
-    Some(caret)
+    caret
 }
 
 fn draw_find(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) -> Option<Position> {
@@ -1196,42 +1221,25 @@ fn draw_find(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) -> O
     );
 
     let matches = app.find_matches();
-    let selected = app.find_sel.min(matches.len().saturating_sub(1));
-    let rows = (area.height as usize).saturating_sub(5);
-    let max_scroll = matches.len().saturating_sub(rows);
-    let mut scroll = app.dialog_scroll.min(max_scroll);
-    if selected >= scroll + rows {
-        scroll = selected + 1 - rows;
-    } else if selected < scroll {
-        scroll = selected;
-    }
+    let list = dialog_list(app.last_area, app, Dialog::Find);
     if let Some(wf) = &app.wf {
-        for (k, &sig) in matches.iter().enumerate().skip(scroll).take(rows) {
-            let name = wf.signals[sig].full_name();
-            let style = if k == selected {
-                Style::new().fg(Color::Black).bg(t.accent)
-            } else {
-                Style::new().fg(t.text)
-            };
+        for (index, &sig) in matches
+            .iter()
+            .enumerate()
+            .skip(list.scroll)
+            .take(list.rows())
+        {
             text::put(
                 buf,
-                x,
-                area.y + 4 + (k - scroll) as u16,
-                &text::trunc(&name, width.saturating_sub(1)),
-                style,
+                list.area.x,
+                list.area.y + (index - list.scroll) as u16,
+                &text::trunc(&wf.signals[sig].full_name(), list.area.width as usize),
+                crate::ui::widgets::ListView::row_style(t, index == app.find_sel),
             );
         }
     }
-    draw_scrollbar(
-        buf,
-        area.right().saturating_sub(2),
-        area.y + 4,
-        rows,
-        scroll,
-        matches.len(),
-        t,
-    );
-    Some(caret)
+    list.draw_scrollbar(buf, t);
+    caret
 }
 
 fn draw_follow(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
@@ -1253,27 +1261,14 @@ fn draw_follow(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
         );
         return;
     }
-    let rows = area.height.saturating_sub(4) as usize;
-    let selected = app.follow_sel.min(app.follow_targets.len() - 1);
-    let max_scroll = app.follow_targets.len().saturating_sub(rows);
-    let mut scroll = app.dialog_scroll.min(max_scroll);
-    if selected >= scroll + rows {
-        scroll = selected + 1 - rows;
-    } else if selected < scroll {
-        scroll = selected;
-    }
+    let list = dialog_list(app.last_area, app, Dialog::Follow);
     for (index, target) in app
         .follow_targets
         .iter()
         .enumerate()
-        .skip(scroll)
-        .take(rows)
+        .skip(list.scroll)
+        .take(list.rows())
     {
-        let style = if index == selected {
-            Style::new().fg(Color::Black).bg(t.accent)
-        } else {
-            Style::new().fg(t.text)
-        };
         let label = format!(
             "-->{} ({}) {}:{}",
             target.scope.join("."),
@@ -1283,21 +1278,13 @@ fn draw_follow(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
         );
         text::put(
             buf,
-            x,
-            area.y + 2 + (index - scroll) as u16,
-            &text::trunc(&label, width.saturating_sub(1)),
-            style,
+            list.area.x,
+            list.area.y + (index - list.scroll) as u16,
+            &text::trunc(&label, list.area.width as usize),
+            crate::ui::widgets::ListView::row_style(t, index == app.follow_sel),
         );
     }
-    draw_scrollbar(
-        buf,
-        area.right().saturating_sub(2),
-        area.y + 2,
-        rows,
-        scroll,
-        app.follow_targets.len(),
-        t,
-    );
+    list.draw_scrollbar(buf, t);
     text::put(
         buf,
         x,
@@ -1326,27 +1313,14 @@ fn draw_dataflow(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) 
         );
         return;
     }
-    let rows = area.height.saturating_sub(4) as usize;
-    let selected = app.dataflow_sel.min(app.dataflow_edges.len() - 1);
-    let max_scroll = app.dataflow_edges.len().saturating_sub(rows);
-    let mut scroll = app.dialog_scroll.min(max_scroll);
-    if selected >= scroll + rows {
-        scroll = selected + 1 - rows;
-    } else if selected < scroll {
-        scroll = selected;
-    }
+    let list = dialog_list(app.last_area, app, Dialog::Dataflow);
     for (index, edge) in app
         .dataflow_edges
         .iter()
         .enumerate()
-        .skip(scroll)
-        .take(rows)
+        .skip(list.scroll)
+        .take(list.rows())
     {
-        let style = if index == selected {
-            Style::new().fg(Color::Black).bg(t.accent)
-        } else {
-            Style::new().fg(t.text)
-        };
         let kind = match edge.kind {
             crate::rtl::scan::DataflowKind::Assign => "assign",
             crate::rtl::scan::DataflowKind::Port => "port",
@@ -1360,21 +1334,13 @@ fn draw_dataflow(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) 
         );
         text::put(
             buf,
-            x,
-            area.y + 2 + (index - scroll) as u16,
-            &text::trunc(&label, width.saturating_sub(1)),
-            style,
+            list.area.x,
+            list.area.y + (index - list.scroll) as u16,
+            &text::trunc(&label, list.area.width as usize),
+            crate::ui::widgets::ListView::row_style(t, index == app.dataflow_sel),
         );
     }
-    draw_scrollbar(
-        buf,
-        area.right().saturating_sub(2),
-        area.y + 2,
-        rows,
-        scroll,
-        app.dataflow_edges.len(),
-        t,
-    );
+    list.draw_scrollbar(buf, t);
     text::put(
         buf,
         x,
@@ -1422,21 +1388,14 @@ fn draw_compare(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
         );
         return;
     }
-    let rows = area.height.saturating_sub(4) as usize;
-    let selected = app.compare_sel.min(session.rows.len() - 1);
-    let max_scroll = session.rows.len().saturating_sub(rows);
-    let mut scroll = app.dialog_scroll.min(max_scroll);
-    if selected >= scroll + rows {
-        scroll = selected + 1 - rows;
-    } else if selected < scroll {
-        scroll = selected;
-    }
-    for (index, row) in session.rows.iter().enumerate().skip(scroll).take(rows) {
-        let style = if index == selected {
-            Style::new().fg(Color::Black).bg(t.accent)
-        } else {
-            Style::new().fg(t.text)
-        };
+    let list = dialog_list(app.last_area, app, Dialog::Compare);
+    for (index, row) in session
+        .rows
+        .iter()
+        .enumerate()
+        .skip(list.scroll)
+        .take(list.rows())
+    {
         let status = if row.right.is_none() {
             "missing in reference".to_string()
         } else if !row.supported {
@@ -1460,21 +1419,13 @@ fn draw_compare(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
         };
         text::put(
             buf,
-            x,
-            area.y + 2 + (index - scroll) as u16,
-            &text::trunc(&format!("{}: {status}", row.name), width.saturating_sub(1)),
-            style,
+            list.area.x,
+            list.area.y + (index - list.scroll) as u16,
+            &text::trunc(&format!("{}: {status}", row.name), list.area.width as usize),
+            crate::ui::widgets::ListView::row_style(t, index == app.compare_sel),
         );
     }
-    draw_scrollbar(
-        buf,
-        area.right().saturating_sub(2),
-        area.y + 2,
-        rows,
-        scroll,
-        session.rows.len(),
-        t,
-    );
+    list.draw_scrollbar(buf, t);
     text::put(
         buf,
         x,
@@ -1511,6 +1462,10 @@ fn export_parts(area: Rect) -> (Rect, Rect, Rect, Rect) {
 
 pub fn export_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<ExportHit> {
     let area = dialog_rect(screen, app, Dialog::Export);
+    let (min_width, min_height) = crate::app::window::min_size(Dialog::Export);
+    if area.width < min_width || area.height < min_height {
+        return None;
+    }
     let (format, _, accept, cancel) = export_parts(area);
     if format.contains(Position::new(col, row)) {
         Some(ExportHit::Format)
@@ -1523,7 +1478,7 @@ pub fn export_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<ExportH
     }
 }
 
-fn draw_export(buf: &mut Buffer, area: Rect, app: &App) -> Position {
+fn draw_export(buf: &mut Buffer, area: Rect, app: &App) -> Option<Position> {
     let t = &app.settings.theme;
     let (format, path, accept, cancel) = export_parts(area);
     text::put(
@@ -1583,50 +1538,54 @@ const LOGIC_OPERATORS: [[(&str, &str); 12]; 2] = [
     ],
 ];
 
-fn logic_layout(area: Rect) -> (Rect, Rect, Rect, Rect, Rect, Rect) {
-    let name = Rect::new(area.x + 12, area.y + 1, area.width.saturating_sub(14), 1);
-    let expression = Rect::new(area.x + 2, area.y + 3, area.width.saturating_sub(4), 1);
-    let clear = Rect::new(
-        area.right().saturating_sub(36),
-        area.bottom().saturating_sub(2),
-        10,
-        1,
-    );
-    let create = Rect::new(
-        area.right().saturating_sub(24),
-        area.bottom().saturating_sub(2),
-        12,
-        1,
-    );
-    let cancel = Rect::new(
-        area.right().saturating_sub(11),
-        area.bottom().saturating_sub(2),
-        9,
-        1,
-    );
-    (
-        name,
-        expression,
-        clear,
-        create,
-        cancel,
-        Rect::new(
-            area.x + 2,
-            area.y + 8,
-            area.width.saturating_sub(5),
-            area.height.saturating_sub(10),
-        ),
-    )
+struct LogicLayout {
+    name: Rect,
+    expression: Rect,
+    operators: [Rect; 24],
+    add: Rect,
+    clear: Rect,
+    create: Rect,
+    cancel: Rect,
 }
 
-fn logic_add_area(area: Rect) -> Rect {
-    Rect::new(area.right().saturating_sub(10), area.y + 7, 8, 1)
+fn logic_layout(area: Rect) -> LogicLayout {
+    LogicLayout {
+        name: Rect::new(area.x + 12, area.y + 1, area.width.saturating_sub(14), 1),
+        expression: Rect::new(area.x + 2, area.y + 3, area.width.saturating_sub(4), 1),
+        operators: std::array::from_fn(|index| {
+            Rect::new(
+                area.x + 2 + (index % 12) as u16 * 7,
+                area.y + 5 + (index / 12) as u16,
+                7,
+                1,
+            )
+        }),
+        add: Rect::new(area.right().saturating_sub(10), area.y + 7, 8, 1),
+        clear: Rect::new(
+            area.right().saturating_sub(36),
+            area.bottom().saturating_sub(2),
+            10,
+            1,
+        ),
+        create: Rect::new(
+            area.right().saturating_sub(24),
+            area.bottom().saturating_sub(2),
+            12,
+            1,
+        ),
+        cancel: Rect::new(
+            area.right().saturating_sub(11),
+            area.bottom().saturating_sub(2),
+            9,
+            1,
+        ),
+    }
 }
 
 fn draw_logic_operation(buf: &mut Buffer, area: Rect, app: &App) -> Option<Position> {
     let t = &app.settings.theme;
     let builder = app.logic_builder()?;
-    let (name, expression, clear, create, cancel, _) = logic_layout(area);
+    let layout = logic_layout(area);
     text::put(buf, area.x + 2, area.y + 1, "Name:", Style::new().fg(t.dim));
     text::put(
         buf,
@@ -1635,9 +1594,9 @@ fn draw_logic_operation(buf: &mut Buffer, area: Rect, app: &App) -> Option<Posit
         "Expression:",
         Style::new().fg(t.dim),
     );
-    let name_caret = crate::ui::widgets::TextBox::new(&builder.name, name).draw(buf, t);
+    let name_caret = crate::ui::widgets::TextBox::new(&builder.name, layout.name).draw(buf, t);
     let expression_caret =
-        crate::ui::widgets::TextBox::new(&builder.expression, expression).draw(buf, t);
+        crate::ui::widgets::TextBox::new(&builder.expression, layout.expression).draw(buf, t);
     if let Some(error) = builder.error.as_ref() {
         text::put(
             buf,
@@ -1647,18 +1606,10 @@ fn draw_logic_operation(buf: &mut Buffer, area: Rect, app: &App) -> Option<Posit
             Style::new().fg(if builder.creating { t.dim } else { t.xcol }),
         );
     }
-    for (row, operators) in LOGIC_OPERATORS.iter().enumerate() {
-        for (column, &(label, _)) in operators.iter().enumerate() {
-            let rect = Rect::new(
-                area.x + 2 + column as u16 * 7,
-                area.y + 5 + row as u16,
-                7,
-                1,
-            );
-            crate::ui::widgets::Button::new(label, rect)
-                .enabled(!builder.creating)
-                .draw(buf, t);
-        }
+    for (index, rect) in layout.operators.iter().enumerate() {
+        crate::ui::widgets::Button::new(LOGIC_OPERATORS[index / 12][index % 12].0, *rect)
+            .enabled(!builder.creating)
+            .draw(buf, t);
     }
     text::put(
         buf,
@@ -1667,101 +1618,91 @@ fn draw_logic_operation(buf: &mut Buffer, area: Rect, app: &App) -> Option<Posit
         "Signals (click to insert):",
         Style::new().fg(t.dim),
     );
-    crate::ui::widgets::Button::new("Add", logic_add_area(area))
+    crate::ui::widgets::Button::new("Add", layout.add)
         .enabled(!builder.creating)
         .draw(buf, t);
-    let rows = visible_rows(app.last_area, app, Dialog::LogicOperation);
-    let scroll = app
-        .dialog_scroll
-        .min(builder.signals.len().saturating_sub(rows));
-    for (row, &index) in builder.signals.iter().skip(scroll).take(rows).enumerate() {
-        let selected = row + scroll == builder.sel;
-        let style = if selected && builder.focus == crate::app::LogicFocus::Signals {
-            Style::new().fg(Color::Black).bg(t.accent)
-        } else {
-            Style::new().fg(t.text)
-        };
+    let list = dialog_list(app.last_area, app, Dialog::LogicOperation);
+    for (row, &index) in builder
+        .signals
+        .iter()
+        .skip(list.scroll)
+        .take(list.rows())
+        .enumerate()
+    {
         let Some(signal) = app.wf.as_ref().and_then(|wf| wf.signals.get(index)) else {
             continue;
         };
+        let selected = row + list.scroll == builder.sel;
         text::put(
             buf,
-            area.x + 2,
-            area.y + 8 + row as u16,
+            list.area.x,
+            list.area.y + row as u16,
             &text::trunc(
                 &format!("{} : {} bit", signal.full_name(), signal.bits),
-                area.width.saturating_sub(5) as usize,
+                list.area.width as usize,
             ),
-            style,
+            crate::ui::widgets::ListView::row_style(
+                t,
+                selected && builder.focus == crate::app::LogicFocus::Signals,
+            ),
         );
     }
-    draw_scrollbar(
-        buf,
-        area.right().saturating_sub(2),
-        area.y + 8,
-        rows,
-        scroll,
-        builder.signals.len(),
-        t,
-    );
-    crate::ui::widgets::Button::new("Clear", clear)
+    list.draw_scrollbar(buf, t);
+    crate::ui::widgets::Button::new("Clear", layout.clear)
         .enabled(!builder.creating)
         .draw(buf, t);
-    crate::ui::widgets::Button::new("Create", create)
+    crate::ui::widgets::Button::new("Create", layout.create)
         .enabled(!builder.creating)
         .selected(builder.focus == crate::app::LogicFocus::Create)
         .draw(buf, t);
-    crate::ui::widgets::Button::new("Close", cancel).draw(buf, t);
+    crate::ui::widgets::Button::new("Close", layout.cancel).draw(buf, t);
     match builder.focus {
-        crate::app::LogicFocus::Name => Some(name_caret),
-        crate::app::LogicFocus::Expression => Some(expression_caret),
+        crate::app::LogicFocus::Name => name_caret,
+        crate::app::LogicFocus::Expression => expression_caret,
         crate::app::LogicFocus::Signals | crate::app::LogicFocus::Create => None,
     }
 }
 
 pub fn logic_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<LogicHit> {
     let area = dialog_rect(screen, app, Dialog::LogicOperation);
+    let (min_width, min_height) = crate::app::window::min_size(Dialog::LogicOperation);
+    if area.width < min_width || area.height < min_height {
+        return None;
+    }
     let builder = app.logic_builder()?;
-    let (name, expression, clear, create, cancel, list) = logic_layout(area);
-    if cancel.contains(Position::new(col, row)) {
+    let layout = logic_layout(area);
+    let point = Position::new(col, row);
+    if layout.cancel.contains(point) {
         return Some(LogicHit::Cancel);
     }
     if builder.creating {
         return None;
     }
-    if logic_add_area(area).contains(Position::new(col, row)) {
+    if layout.add.contains(point) {
         return Some(LogicHit::Add);
     }
-    if clear.contains(Position::new(col, row)) {
+    if layout.clear.contains(point) {
         return Some(LogicHit::Clear);
     }
-    if create.contains(Position::new(col, row)) {
+    if layout.create.contains(point) {
         return Some(LogicHit::Create);
     }
-    if name.contains(Position::new(col, row)) {
+    if layout.name.contains(point) {
         return Some(LogicHit::Name);
     }
-    if expression.contains(Position::new(col, row)) {
+    if layout.expression.contains(point) {
         return Some(LogicHit::Expression);
     }
-    for (operator_row, operators) in LOGIC_OPERATORS.iter().enumerate() {
-        for (column, &(_, operator)) in operators.iter().enumerate() {
-            let rect = Rect::new(
-                area.x + 2 + column as u16 * 7,
-                area.y + 5 + operator_row as u16,
-                7,
-                1,
-            );
-            if rect.contains(Position::new(col, row)) {
-                return Some(LogicHit::Operator(operator));
-            }
+    for (index, rect) in layout.operators.iter().enumerate() {
+        if rect.contains(point) {
+            return Some(LogicHit::Operator(
+                LOGIC_OPERATORS[index / 12][index % 12].1,
+            ));
         }
     }
-    if list.contains(Position::new(col, row)) {
-        let index = app.dialog_scroll + (row - list.y) as usize;
-        return (index < builder.signals.len()).then_some(LogicHit::Signal(index));
-    }
-    None
+    dialog_list(screen, app, Dialog::LogicOperation)
+        .row_at(col, row)
+        .map(LogicHit::Signal)
 }
 
 fn draw_markers(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
@@ -1786,22 +1727,15 @@ fn draw_markers(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
         );
         return;
     }
-    let rows = area.height.saturating_sub(4) as usize;
-    let selected = app.marker_sel.min(app.markers.len() - 1);
-    let max_scroll = app.markers.len().saturating_sub(rows);
-    let mut scroll = app.dialog_scroll.min(max_scroll);
-    if selected >= scroll + rows {
-        scroll = selected + 1 - rows;
-    } else if selected < scroll {
-        scroll = selected;
-    }
+    let list = dialog_list(app.last_area, app, Dialog::Markers);
     if let Some(wf) = &app.wf {
-        for (index, marker) in app.markers.iter().enumerate().skip(scroll).take(rows) {
-            let style = if index == selected {
-                Style::new().fg(Color::Black).bg(t.accent)
-            } else {
-                Style::new().fg(t.text)
-            };
+        for (index, marker) in app
+            .markers
+            .iter()
+            .enumerate()
+            .skip(list.scroll)
+            .take(list.rows())
+        {
             let label = format!(
                 "{} @ {}",
                 marker.name,
@@ -1813,22 +1747,14 @@ fn draw_markers(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {
             );
             text::put(
                 buf,
-                x,
-                area.y + 2 + (index - scroll) as u16,
-                &text::trunc(&label, width.saturating_sub(1)),
-                style,
+                list.area.x,
+                list.area.y + (index - list.scroll) as u16,
+                &text::trunc(&label, list.area.width as usize),
+                crate::ui::widgets::ListView::row_style(t, index == app.marker_sel),
             );
         }
     }
-    draw_scrollbar(
-        buf,
-        area.right().saturating_sub(2),
-        area.y + 2,
-        rows,
-        scroll,
-        app.markers.len(),
-        t,
-    );
+    list.draw_scrollbar(buf, t);
     text::put(
         buf,
         x,

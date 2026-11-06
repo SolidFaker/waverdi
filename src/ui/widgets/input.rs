@@ -16,31 +16,31 @@ impl<'a> TextBox<'a> {
         Self { state, area }
     }
 
-    pub fn draw(self, buf: &mut Buffer, theme: &Theme) -> Position {
+    pub fn draw(self, buf: &mut Buffer, theme: &Theme) -> Option<Position> {
+        let area = self.area.intersection(*buf.area());
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
         let style = Style::new().fg(theme.text).bg(theme.input_bg);
-        buf.set_style(self.area, style);
-        let width = self.area.width as usize;
+        buf.set_style(area, style);
+        let width = area.width as usize;
         let value = self.state.as_string();
         let cursor = self.state.cursor();
         let len = value.chars().count();
-        let start = if width == 0 {
-            0
-        } else {
-            cursor
-                .saturating_add(1)
-                .saturating_sub(width)
-                .min(len.saturating_sub(width))
-        };
+        let start = cursor
+            .saturating_add(1)
+            .saturating_sub(width)
+            .min(len.saturating_sub(width));
         let shown = text::scroll_slice(&value, start, width);
-        text::put(buf, self.area.x, self.area.y, &shown, style);
+        text::put(buf, area.x, area.y, &shown, style);
         let caret = cursor.saturating_sub(start).min(width.saturating_sub(1)) as u16;
-        let x = self.area.x + caret;
-        let y = self.area.y;
+        let x = area.x + caret;
+        let y = area.y;
         if let Some(cell) = buf.cell_mut((x, y)) {
             cell.set_bg(theme.text);
             cell.set_fg(Color::Black);
         }
-        Position::new(x, y)
+        Some(Position::new(x, y))
     }
 
     pub fn handle_key(state: &mut InputState, key: KeyEvent) -> bool {
@@ -96,7 +96,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(4, 1);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let theme = Theme::DARK;
-        let mut caret = Position::new(0, 0);
+        let mut caret = None;
         terminal
             .draw(|frame| {
                 caret =
@@ -108,6 +108,21 @@ mod tests {
             .map(|x| buffer.cell((x, 0)).unwrap().symbol())
             .collect();
         assert_eq!(text, "…ghi");
-        assert_eq!(caret, Position::new(3, 0));
+        assert_eq!(caret, Some(Position::new(3, 0)));
+    }
+
+    #[test]
+    fn invisible_text_box_has_no_cursor() {
+        let mut state = InputState::default();
+        state.set("text");
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
+        assert_eq!(
+            TextBox::new(&state, Rect::new(0, 0, 4, 0)).draw(&mut buffer, &Theme::DARK),
+            None
+        );
+        assert_eq!(
+            TextBox::new(&state, Rect::new(5, 0, 4, 1)).draw(&mut buffer, &Theme::DARK),
+            None
+        );
     }
 }

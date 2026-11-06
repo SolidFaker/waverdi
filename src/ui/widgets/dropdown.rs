@@ -59,6 +59,7 @@ impl<'a> Dropdown<'a> {
         let Some(popup) = self.popup(bounds) else {
             return;
         };
+        ratatui::widgets::Widget::render(ratatui::widgets::Clear, popup.area, buf);
         for offset in 0..popup.visible {
             let index = popup.first + offset;
             let rect = option_rect(popup, index);
@@ -145,10 +146,33 @@ impl<'a> Dropdown<'a> {
 
     pub fn option_at(&self, col: u16, row: u16, bounds: Rect) -> Option<usize> {
         let popup = self.popup(bounds)?;
-        if !crate::ui::layout::pt_in(popup.area, col, row) {
+        if !crate::ui::layout::pt_in(popup.area, col, row)
+            || (popup.scrollable && col == popup.area.right().saturating_sub(1))
+        {
             return None;
         }
         Some(popup.first + (row - popup.area.y) as usize)
+    }
+
+    pub fn scrollbar_at(&self, col: u16, row: u16, bounds: Rect) -> bool {
+        self.popup(bounds).is_some_and(|popup| {
+            popup.scrollable
+                && col == popup.area.right().saturating_sub(1)
+                && row >= popup.area.y
+                && row < popup.area.bottom()
+        })
+    }
+
+    pub fn scroll_to(&self, state: &mut DropdownState, row: u16, bounds: Rect) {
+        let Some(popup) = self.popup_for(*state, bounds) else {
+            return;
+        };
+        state.scroll = crate::ui::scrollbar::scroll_from_track(
+            popup.visible,
+            self.options.len(),
+            popup.visible,
+            row.saturating_sub(popup.area.y) as usize,
+        );
     }
 
     fn popup(&self, bounds: Rect) -> Option<Popup> {
@@ -379,5 +403,33 @@ mod tests {
         assert!(bar.contains('█'));
         assert!(bar.contains('│'));
         assert_eq!(state.scroll, 0);
+    }
+
+    #[test]
+    fn popup_clears_underlying_text_and_scrollbar_does_not_select() {
+        let options = [
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        ];
+        let bounds = Rect::new(0, 0, 24, 16);
+        let (dropdown, mut state) = opened(&options, Rect::new(2, 1, 12, 1));
+        let popup = dropdown.popup(bounds).unwrap();
+        let mut buffer = Buffer::empty(bounds);
+        for cell in &mut buffer.content {
+            cell.set_symbol("x");
+        }
+        dropdown.draw_options(&mut buffer, &Theme::DARK, bounds);
+        assert_eq!(
+            buffer
+                .cell((popup.area.right() - 2, popup.area.y))
+                .unwrap()
+                .symbol(),
+            " "
+        );
+        let bar_x = popup.area.right() - 1;
+        assert!(dropdown.scrollbar_at(bar_x, popup.area.y, bounds));
+        assert_eq!(dropdown.option_at(bar_x, popup.area.y, bounds), None);
+        dropdown.scroll_to(&mut state, popup.area.bottom() - 1, bounds);
+        assert_eq!(state.scroll, options.len() - popup.visible);
+        assert_eq!(state.selected, 0);
     }
 }

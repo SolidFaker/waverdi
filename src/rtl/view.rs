@@ -26,6 +26,14 @@ pub enum HlKind {
 pub struct Span {
     pub text: String,
     pub kind: HlKind,
+    pub(crate) ascii: bool,
+}
+
+impl Span {
+    fn new(text: String, kind: HlKind) -> Self {
+        let ascii = text.is_ascii();
+        Self { text, kind, ascii }
+    }
 }
 
 /// Loaded source of the instance's module with a (line, column) cursor.
@@ -33,6 +41,7 @@ pub struct SourceView {
     pub module: String,
     pub file: PathBuf,
     pub lines: Vec<String>,
+    pub(crate) line_widths: Vec<usize>,
     /// Width in characters of the widest line; precomputed because the pane
     /// needs it every frame for the horizontal scrollbar.
     pub max_width: usize,
@@ -89,11 +98,8 @@ impl SourceView {
         if lines.is_empty() {
             return None;
         }
-        let max_width = lines
-            .iter()
-            .map(|line| line.chars().count())
-            .max()
-            .unwrap_or(0);
+        let line_widths: Vec<usize> = lines.iter().map(|line| line.chars().count()).collect();
+        let max_width = line_widths.iter().copied().max().unwrap_or(0);
         let line_modules = module_lines(&lines, def, db);
         let names_by_module = module_signal_names(db);
         let qualified = qualified_references(&lines, &line_modules, db);
@@ -125,6 +131,7 @@ impl SourceView {
             module: def.name.clone(),
             file: def.file.clone(),
             lines,
+            line_widths,
             max_width,
             line_modules,
             spans,
@@ -146,26 +153,27 @@ impl SourceView {
             .unwrap_or(&self.module)
     }
 
+    pub(crate) fn line_len(&self, line: usize) -> usize {
+        self.line_widths.get(line).copied().unwrap_or_else(|| {
+            self.lines
+                .get(line)
+                .map(|text| text.chars().count())
+                .unwrap_or(0)
+        })
+    }
+
     pub fn move_cursor(&mut self, delta_line: i64, delta_col: i64, rows: usize) {
         self.clear_selection();
         let last = self.lines.len().saturating_sub(1) as i64;
         self.line = (self.line as i64 + delta_line).clamp(0, last.max(0)) as usize;
-        let len = self
-            .lines
-            .get(self.line)
-            .map(|line| line.chars().count())
-            .unwrap_or(0) as i64;
+        let len = self.line_len(self.line) as i64;
         self.col = (self.col as i64 + delta_col).clamp(0, len) as usize;
         self.ensure_visible(rows);
     }
 
     pub fn set_cursor(&mut self, line: usize, col: usize, rows: usize) {
         self.line = line.min(self.lines.len().saturating_sub(1));
-        let len = self
-            .lines
-            .get(self.line)
-            .map(|line| line.chars().count())
-            .unwrap_or(0);
+        let len = self.line_len(self.line);
         self.col = col.min(len);
         self.ensure_visible(rows);
     }
@@ -183,11 +191,7 @@ impl SourceView {
 
     fn clamp_pos(&self, line: usize, col: usize) -> (usize, usize) {
         let line = line.min(self.lines.len().saturating_sub(1));
-        let len = self
-            .lines
-            .get(line)
-            .map(|text| text.chars().count())
-            .unwrap_or(0);
+        let len = self.line_len(line);
         (line, col.min(len))
     }
 
@@ -211,11 +215,7 @@ impl SourceView {
         }
         let last = self.lines.len().saturating_sub(1) as i64;
         let line = (self.line as i64 + delta_line).clamp(0, last.max(0)) as usize;
-        let len = self
-            .lines
-            .get(line)
-            .map(|text| text.chars().count())
-            .unwrap_or(0) as i64;
+        let len = self.line_len(line) as i64;
         let col = if delta_col == 0 {
             self.col.min(len as usize)
         } else {
@@ -244,7 +244,7 @@ impl SourceView {
         if last < first {
             return false;
         }
-        let len = self.lines[last].chars().count();
+        let len = self.line_len(last);
         self.anchor = Some((first, 0));
         self.sel = Some(((first, 0), (last, len)));
         self.line = first;
@@ -270,11 +270,7 @@ impl SourceView {
         if line < l0 || line > l1 {
             return None;
         }
-        let len = self
-            .lines
-            .get(line)
-            .map(|text| text.chars().count())
-            .unwrap_or(0);
+        let len = self.line_len(line);
         if l0 == l1 {
             return Some((c0.min(len), c1.min(len)));
         }
@@ -563,15 +559,12 @@ fn highlight_line(
 
     fn flush(spans: &mut Vec<Span>, plain: &mut String, kind: HlKind) {
         if !plain.is_empty() {
-            spans.push(Span {
-                text: std::mem::take(plain),
-                kind,
-            });
+            spans.push(Span::new(std::mem::take(plain), kind));
         }
     }
     fn push(spans: &mut Vec<Span>, text: String, kind: HlKind) {
         if !text.is_empty() {
-            spans.push(Span { text, kind });
+            spans.push(Span::new(text, kind));
         }
     }
 
@@ -673,10 +666,7 @@ fn highlight_line(
     }
     flush(&mut spans, &mut plain, HlKind::Plain);
     if spans.is_empty() {
-        spans.push(Span {
-            text: String::new(),
-            kind: HlKind::Plain,
-        });
+        spans.push(Span::new(String::new(), HlKind::Plain));
     }
     spans
 }

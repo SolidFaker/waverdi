@@ -71,6 +71,9 @@ impl App {
                 bottom,
             } => resize_area(drag.area, screen, min, dx, dy, left, right, top, bottom),
         };
+        if crate::ui::dialog::dialog_rect(screen, self, drag.dialog) == area {
+            return;
+        }
         self.dialog_windows
             .insert(drag.dialog, WindowState { area });
         self.needs_redraw = true;
@@ -119,11 +122,11 @@ fn window_hit(dialog: Dialog, area: Rect, close: Rect, col: u16, row: u16) -> Op
     None
 }
 
-fn min_size(dialog: Dialog) -> (u16, u16) {
+pub(crate) fn min_size(dialog: Dialog) -> (u16, u16) {
     match dialog {
         Dialog::Open => (30, 7),
         Dialog::AddSignals => (40, 10),
-        Dialog::Settings => (64, 12),
+        Dialog::Settings => (40, 8),
         Dialog::ColorPicker => (58, 18),
         Dialog::CreateBus => (40, 8),
         Dialog::LogicOperation => (88, 16),
@@ -241,6 +244,29 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_and_clamped_drag_positions_do_not_request_redraws() {
+        let mut app = app_with(VCD);
+        app.open_dialog(Dialog::Keys);
+        let before = crate::ui::dialog::dialog_rect(app.last_area, &app, Dialog::Keys);
+        assert!(app.begin_window_drag(Dialog::Keys, before.x + 5, before.y));
+        app.take_needs_redraw();
+        app.drag_window_to(before.x + 5, before.y);
+        assert!(!app.needs_redraw);
+
+        app.drag_window_to(before.x + 6, before.y);
+        assert!(app.needs_redraw);
+        app.drag_window_to(u16::MAX, u16::MAX);
+        let clamped = crate::ui::dialog::dialog_rect(app.last_area, &app, Dialog::Keys);
+        app.take_needs_redraw();
+        app.drag_window_to(u16::MAX, u16::MAX);
+        assert!(!app.needs_redraw);
+        assert_eq!(
+            crate::ui::dialog::dialog_rect(app.last_area, &app, Dialog::Keys),
+            clamped
+        );
+    }
+
+    #[test]
     fn borders_and_corners_resize_with_minimum_and_screen_limits() {
         let mut app = app_with(VCD);
         app.open_dialog(Dialog::Settings);
@@ -273,7 +299,7 @@ mod tests {
             mouse(MouseEventKind::Drag(MouseButton::Left), after.x + 500, 0),
         );
         let shrunk = crate::ui::dialog::dialog_rect(app.last_area, &app, Dialog::Settings);
-        assert_eq!((shrunk.width, shrunk.height), (64, 12));
+        assert_eq!((shrunk.width, shrunk.height), (40, 8));
         crate::app::handle_mouse(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 0, 0));
         assert!(!app.is_dragging());
     }

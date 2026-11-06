@@ -253,7 +253,7 @@ fn find_in_source(
             )
         };
         let text = &view.lines[line];
-        let boundary = start.unwrap_or_else(|| if forward { 0 } else { text.chars().count() });
+        let boundary = start.unwrap_or_else(|| if forward { 0 } else { view.line_len(line) });
         let byte = text
             .char_indices()
             .nth(boundary)
@@ -285,6 +285,7 @@ mod tests {
             module: "search".into(),
             file: PathBuf::new(),
             lines: vec!["alpha".into(), "beta alpha".into(), "gamma".into()],
+            line_widths: vec![5, 10, 5],
             max_width: 11,
             line_modules: vec!["search".into(); 3],
             spans: vec![Vec::new(); 3],
@@ -327,6 +328,7 @@ mod tests {
             module: "search".into(),
             file: PathBuf::new(),
             lines: vec!["Alpha".into(), "alpha".into(), "foo123".into()],
+            line_widths: vec![5, 5, 6],
             max_width: 6,
             line_modules: vec!["search".into(); 3],
             spans: vec![Vec::new(); 3],

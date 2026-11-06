@@ -65,9 +65,7 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
                 row,
             )
         {
-            app.dialog = None;
-            app.renaming_group = None;
-            app.dragging = None;
+            app.close_dialog();
             return false;
         }
         if matches!(m.kind, MouseEventKind::Up(_)) {
@@ -79,6 +77,13 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
                 MouseEventKind::ScrollUp => browser_wheel(app, -(WHEEL_STEP as i64)),
                 MouseEventKind::ScrollDown => browser_wheel(app, WHEEL_STEP as i64),
                 MouseEventKind::Down(MouseButton::Left) => browser_click(app, col, row),
+                MouseEventKind::Drag(MouseButton::Left)
+                    if app
+                        .dragging
+                        .is_some_and(|drag| drag.mode == DragMode::DialogScroll) =>
+                {
+                    dialog_scroll_to(app, Dialog::Open, row);
+                }
                 _ => {}
             }
         } else if dialog == Dialog::AddSignals {
@@ -255,6 +260,15 @@ fn add_signals_mouse(app: &mut App, m: MouseEvent) {
 }
 
 fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
+    if dialog == Dialog::Settings
+        && m.kind == MouseEventKind::Drag(MouseButton::Left)
+        && app
+            .dragging
+            .is_some_and(|drag| drag.mode == DragMode::SettingsDropdownScroll)
+    {
+        app.time_dropdown_scroll_to(m.row);
+        return;
+    }
     if let Some(area) = crate::ui::dialog::scroll_area(app.layout().area, app, dialog) {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) if pt_in(area.bar, m.column, m.row) => {
@@ -274,45 +288,53 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
             _ => {}
         }
     }
-    if dialog == Dialog::CreateBus && m.kind == MouseEventKind::Down(MouseButton::Left) {
-        let screen = app.layout().area;
-        if pt_in(
-            crate::ui::dialog::create_bus_name_area(screen, app),
-            m.column,
-            m.row,
-        ) {
+    if dialog == Dialog::Find && m.kind == MouseEventKind::Down(MouseButton::Left) {
+        if let Some(index) =
+            crate::ui::dialog::dialog_list(app.last_area, app, dialog).row_at(m.column, m.row)
+        {
+            app.find_sel = index;
+        }
+        return;
+    }
+    if matches!(
+        dialog,
+        Dialog::CreateBus | Dialog::Follow | Dialog::Dataflow | Dialog::Compare | Dialog::Markers
+    ) && m.kind == MouseEventKind::Down(MouseButton::Left)
+    {
+        if dialog == Dialog::CreateBus
+            && pt_in(
+                crate::ui::dialog::create_bus_name_area(app.last_area, app),
+                m.column,
+                m.row,
+            )
+        {
             app.bus_builder_focus_name();
             return;
         }
-        let area = crate::ui::dialog::dialog_rect(screen, app, dialog);
-        let top = area.y + 2;
-        if m.row >= top && m.row < area.bottom().saturating_sub(2) {
-            let index = app.dialog_scroll + (m.row - top) as usize;
-            if app
-                .bus_builder()
-                .is_some_and(|builder| index < builder.items.len())
-            {
-                app.bus_builder_select(index);
-            }
-            if let Some(builder) = app.bus_builder.as_mut() {
-                builder.name_focus = false;
-            }
+        let Some(index) =
+            crate::ui::dialog::dialog_list(app.last_area, app, dialog).row_at(m.column, m.row)
+        else {
             return;
-        }
-    }
-    if dialog == Dialog::Follow && m.kind == MouseEventKind::Down(MouseButton::Left) {
-        let area = crate::ui::dialog::dialog_rect(app.layout().area, app, dialog);
-        let top = area.y + 2;
-        if m.column >= area.x + 2
-            && m.column < area.right().saturating_sub(2)
-            && m.row >= top
-            && m.row < area.bottom().saturating_sub(2)
-        {
-            let index = app.dialog_scroll + (m.row - top) as usize;
-            if index < app.follow_targets.len() {
+        };
+        match dialog {
+            Dialog::CreateBus => app.bus_builder_select(index),
+            Dialog::Follow => {
                 app.follow_sel = index;
                 app.follow_activate();
             }
+            Dialog::Dataflow => {
+                app.dataflow_sel = index;
+                app.dataflow_activate();
+            }
+            Dialog::Compare => {
+                app.compare_sel = index;
+                app.compare_activate(true);
+            }
+            Dialog::Markers => {
+                app.marker_sel = index;
+                app.marker_activate();
+            }
+            _ => unreachable!(),
         }
         return;
     }
@@ -341,64 +363,12 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
         }
         return;
     }
-    if dialog == Dialog::Dataflow && m.kind == MouseEventKind::Down(MouseButton::Left) {
-        let area = crate::ui::dialog::dialog_rect(app.layout().area, app, dialog);
-        let top = area.y + 2;
-        if m.column >= area.x + 2
-            && m.column < area.right().saturating_sub(2)
-            && m.row >= top
-            && m.row < area.bottom().saturating_sub(2)
-        {
-            let index = app.dialog_scroll + (m.row - top) as usize;
-            if index < app.dataflow_edges.len() {
-                app.dataflow_sel = index;
-                app.dataflow_activate();
-            }
-        }
-        return;
-    }
-    if dialog == Dialog::Compare && m.kind == MouseEventKind::Down(MouseButton::Left) {
-        let area = crate::ui::dialog::dialog_rect(app.layout().area, app, dialog);
-        let top = area.y + 2;
-        if m.column >= area.x + 2
-            && m.column < area.right().saturating_sub(2)
-            && m.row >= top
-            && m.row < area.bottom().saturating_sub(2)
-        {
-            let index = app.dialog_scroll + (m.row - top) as usize;
-            if app
-                .compare
-                .as_ref()
-                .is_some_and(|session| index < session.rows.len())
-            {
-                app.compare_sel = index;
-                app.compare_activate(true);
-            }
-        }
-        return;
-    }
     if dialog == Dialog::Export && m.kind == MouseEventKind::Down(MouseButton::Left) {
         match crate::ui::dialog::export_hit(app.layout().area, app, m.column, m.row) {
             Some(crate::ui::dialog::ExportHit::Format) => app.cycle_export_format(),
             Some(crate::ui::dialog::ExportHit::Accept) => app.begin_export(),
-            Some(crate::ui::dialog::ExportHit::Cancel) => app.dialog = None,
+            Some(crate::ui::dialog::ExportHit::Cancel) => app.close_dialog(),
             None => {}
-        }
-        return;
-    }
-    if dialog == Dialog::Markers && m.kind == MouseEventKind::Down(MouseButton::Left) {
-        let area = crate::ui::dialog::dialog_rect(app.layout().area, app, dialog);
-        let top = area.y + 2;
-        if m.column >= area.x + 2
-            && m.column < area.right().saturating_sub(2)
-            && m.row >= top
-            && m.row < area.bottom().saturating_sub(2)
-        {
-            let index = app.dialog_scroll + (m.row - top) as usize;
-            if index < app.markers.len() {
-                app.marker_sel = index;
-                app.marker_activate();
-            }
         }
         return;
     }
@@ -459,11 +429,15 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
                     app.set_general_value(crate::settings::GeneralSetting::TimeBase, index);
                     app.time_dropdown.open = false;
                 }
+                crate::ui::dialog::SettingsHit::DropdownScroll => {
+                    app.time_dropdown_scroll_to(m.row);
+                    app.dragging = Some(new_drag(DragMode::SettingsDropdownScroll, m.column, 0.0));
+                }
                 crate::ui::dialog::SettingsHit::DismissDropdown => {
                     app.time_dropdown.open = false;
                 }
                 crate::ui::dialog::SettingsHit::Reset => app.settings_reset(),
-                crate::ui::dialog::SettingsHit::Close => app.dialog = None,
+                crate::ui::dialog::SettingsHit::Close => app.close_dialog(),
             }
             return;
         }
@@ -532,14 +506,27 @@ fn dialog_scroll_to(app: &mut App, dialog: Dialog, row: u16) {
     if dialog == Dialog::Settings {
         app.time_dropdown.open = false;
     }
-    let max = area.total.saturating_sub(area.rows);
-    let denom = area.rows.saturating_sub(1).max(1) as f64;
-    let rel = (row.saturating_sub(area.bar.y) as f64 / denom).clamp(0.0, 1.0);
-    let scroll = (rel * max as f64).round() as usize;
+    let scroll = if matches!(dialog, Dialog::Keys | Dialog::Settings) {
+        crate::ui::scrollbar::scroll_from_track(
+            area.bar.height as usize,
+            area.total,
+            area.rows,
+            row.saturating_sub(area.bar.y) as usize,
+        )
+    } else {
+        crate::ui::dialog::dialog_list(app.last_area, app, dialog)
+            .scroll_to(row)
+            .unwrap_or(0)
+    };
     app.dialog_scroll = scroll;
     // List dialogs keep their selection inside the visible window.
     let bottom = (scroll + area.rows.saturating_sub(1)).min(area.total.saturating_sub(1));
     match dialog {
+        Dialog::Open => {
+            if let Some(browser) = app.browser.as_mut() {
+                browser.scroll = scroll;
+            }
+        }
         Dialog::Find => app.find_sel = bottom,
         Dialog::Follow => app.follow_sel = bottom,
         Dialog::Dataflow => app.dataflow_sel = bottom,
@@ -557,16 +544,18 @@ fn dialog_scroll_to(app: &mut App, dialog: Dialog, row: u16) {
 }
 
 fn browser_click(app: &mut App, col: u16, row: u16) {
-    let l = app.layout();
-    let rect = crate::ui::dialog::dialog_rect(l.area, app, Dialog::Open);
-    let list_top = rect.y + 3;
-    let list_bottom = rect.bottom().saturating_sub(1);
-    if col < rect.x || col >= rect.right() || row < list_top || row >= list_bottom {
+    let list = crate::ui::dialog::dialog_list(app.last_area, app, Dialog::Open);
+    if pt_in(list.bar, col, row) {
+        if list.scroll_to(row).is_some() {
+            app.dragging = Some(new_drag(DragMode::DialogScroll, col, 0.0));
+            dialog_scroll_to(app, Dialog::Open, row);
+        }
         return;
     }
-    let rows = (list_bottom - list_top) as usize;
-    let index = app.browser.as_ref().map(|b| b.scroll).unwrap_or(0) + (row - list_top) as usize;
-
+    let Some(index) = list.row_at(col, row) else {
+        return;
+    };
+    let rows = list.rows();
     let is_double = app
         .last_click
         .map(|(c, r, at)| c == col && r == row && at.elapsed() < DOUBLE_CLICK)
@@ -1035,7 +1024,7 @@ fn mouse_drag(app: &mut App, col: u16, row: u16) {
     let Some(drag) = app.dragging else { return };
     let l = app.layout();
     match drag.mode {
-        DragMode::SettingsSlider(_) => {}
+        DragMode::SettingsSlider(_) | DragMode::SettingsDropdownScroll => {}
         DragMode::Cursor => {
             app.cursor = app.tick_at_x(col);
             let span = app.span();
@@ -1378,12 +1367,7 @@ fn scroll_source_h(app: &mut App, l: &Layout, col: u16) {
     let vbar = crate::ui::source::scrollbar_col(l, view).is_some();
     let text_x0 = code.x + gutter;
     let text_w = (code.width as usize).saturating_sub(gutter as usize + usize::from(vbar));
-    let content = view
-        .lines
-        .iter()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0);
+    let content = view.max_width;
     let max = content.saturating_sub(text_w);
     if max == 0 {
         return;
@@ -1814,6 +1798,109 @@ mod tests {
         let close = crate::ui::dialog::close_button(l.area, &app, crate::app::Dialog::Keys);
         crate::app::handle_mouse(&mut app, click(close.x + 1, close.y));
         assert_eq!(app.dialog, None);
+    }
+
+    #[test]
+    fn dialog_close_releases_editor_state() {
+        let mut app = app_with(VCD);
+        app.set_display(vec![0, 1]);
+        app.selection = vec![0, 1];
+        app.open_logic_operation(0);
+        let close = crate::ui::dialog::close_button(
+            app.last_area,
+            &app,
+            crate::app::Dialog::LogicOperation,
+        );
+        crate::app::handle_mouse(&mut app, click(close.x + 1, close.y));
+        assert_eq!(app.dialog, None);
+        assert!(!app.logic_active());
+
+        app.open_create_bus(0);
+        let close =
+            crate::ui::dialog::close_button(app.last_area, &app, crate::app::Dialog::CreateBus);
+        crate::app::handle_mouse(&mut app, click(close.x + 1, close.y));
+        assert_eq!(app.dialog, None);
+        assert!(app.bus_builder.is_none());
+    }
+
+    #[test]
+    fn find_results_support_mouse_selection() {
+        let vcd = "$timescale 1ns $end\n\
+            $var wire 1 ! data $end\n$var wire 1 \" data_aux $end\n\
+            $var wire 1 # clk $end\n$enddefinitions $end\n#0\n0!\n0\"\n0#\n";
+        let mut app = app_with(vcd);
+        app.open_dialog(crate::app::Dialog::Find);
+        app.input.set("data");
+        let list = crate::ui::dialog::dialog_list(app.last_area, &app, crate::app::Dialog::Find);
+        crate::app::handle_mouse(&mut app, click(list.area.x, list.area.y + 1));
+        assert_eq!(app.find_sel, 1);
+        crate::app::handle_mouse(&mut app, click(list.bar.x, list.bar.y));
+        assert_eq!(app.find_sel, 1, "blank and scrollbar cells are not results");
+    }
+
+    #[test]
+    fn dropdown_scrollbar_drag_preserves_the_selected_option() {
+        let mut app = app_with(VCD);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 40, 10));
+        app.open_settings();
+        app.select_settings_row(4);
+        app.settings_activate();
+        assert!(app.time_dropdown.open);
+        let bounds = crate::ui::dialog::settings_popup_bounds(app.last_area, &app);
+        let hit = (bounds.y..bounds.bottom())
+            .flat_map(|row| (bounds.x..bounds.right()).map(move |col| (col, row)))
+            .filter(|&(col, row)| {
+                matches!(
+                    crate::ui::dialog::settings_hit(app.last_area, &app, col, row),
+                    Some(crate::ui::dialog::SettingsHit::DropdownScroll)
+                )
+            })
+            .last()
+            .expect("dropdown scrollbar");
+        let selected = app.time_dropdown.selected;
+        crate::app::handle_mouse(&mut app, click(hit.0, hit.1));
+        assert!(app.time_dropdown.scroll > 0);
+        assert_eq!(app.time_dropdown.selected, selected);
+        crate::app::handle_mouse(&mut app, drag(hit.0, bounds.bottom() + 5));
+        assert!(app.time_dropdown.open);
+        assert_eq!(app.time_dropdown.selected, selected);
+        crate::app::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: hit.0,
+                row: hit.1,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(!app.is_dragging());
+    }
+
+    #[test]
+    fn browser_scrollbar_scrolls_without_selecting_a_file() {
+        let mut app = app_with(VCD);
+        app.use_gui = false;
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 50, 10));
+        app.open_tui_browser();
+        let list = crate::ui::dialog::dialog_list(app.last_area, &app, crate::app::Dialog::Open);
+        assert!(list.total > list.rows());
+        let selected = app.browser.as_ref().unwrap().sel;
+        crate::app::handle_mouse(&mut app, click(list.bar.x, list.bar.bottom() - 1));
+        assert!(app.browser.as_ref().unwrap().scroll > 0);
+        assert_eq!(app.browser.as_ref().unwrap().sel, selected);
+        crate::app::handle_mouse(&mut app, drag(list.bar.x, list.bar.y));
+        assert_eq!(app.browser.as_ref().unwrap().scroll, 0);
+        assert_eq!(app.browser.as_ref().unwrap().sel, selected);
+        crate::app::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: list.bar.x,
+                row: list.bar.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(!app.is_dragging());
     }
 
     #[test]

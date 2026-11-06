@@ -47,8 +47,12 @@ impl<'a> RadioGroup<'a> {
     }
 
     fn option_rects(&self) -> Vec<Rect> {
+        if self.area.height == 0 {
+            return Vec::new();
+        }
         if !self.horizontal {
             return (0..self.options.len())
+                .take(self.area.height as usize)
                 .map(|index| Rect::new(self.area.x, self.area.y + index as u16, self.area.width, 1))
                 .collect();
         }
@@ -89,6 +93,7 @@ impl<'a> RadioGroup<'a> {
                     } else {
                         Style::new().fg(theme.text).bg(theme.popup_bg)
                     };
+                    ratatui::widgets::Widget::render(ratatui::widgets::Clear, rect, buf);
                     buf.set_style(rect, style);
                     text::put(buf, rect.x, rect.y, &format!(" {option} "), style);
                 }
@@ -229,6 +234,9 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(text.starts_with("[x] Dark"), "{text}");
+        let radio = RadioGroup::new(&["Dark", "Light"], 0, Rect::new(0, 0, 10, 1));
+        assert_eq!(radio.option_at(0, 0), Some(0));
+        assert_eq!(radio.option_at(0, 1), None);
     }
 
     #[test]

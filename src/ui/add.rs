@@ -171,16 +171,7 @@ pub fn pane_visible(screen: Rect, app: &App, pane: AddFocus) -> usize {
 
 /// Window start for a scrollbar dragged to `row` of a `track`-row bar.
 pub fn scroll_from_track(track: usize, len: usize, visible: usize, row: usize) -> usize {
-    if len <= visible || track == 0 || visible == 0 {
-        return 0;
-    }
-    let max_start = len - visible;
-    let thumb = ((track * visible) / len).max(1).min(track);
-    let span = track.saturating_sub(thumb);
-    if span == 0 {
-        return 0;
-    }
-    row.min(span) * max_start / span
+    crate::ui::scrollbar::scroll_from_track(track, len, visible, row)
 }
 
 /// Picker pane under the pointer, if any.
@@ -219,6 +210,19 @@ pub fn draw(frame: &mut ratatui::Frame, screen: Rect, app: &App) {
         .title_style(Style::new().fg(t.accent).add_modifier(Modifier::BOLD))
         .border_style(Style::new().fg(t.accent))
         .render(l.outer, buf);
+    if l.outer.width < 40 || l.outer.height < 10 {
+        text::put(
+            buf,
+            inner.x,
+            inner.y,
+            &text::trunc(
+                "Terminal too small; resize to show this window.",
+                inner.width as usize,
+            ),
+            Style::new().fg(t.dim),
+        );
+        return;
+    }
 
     // --- hierarchy tree -------------------------------------------------
     let tree_rows = app.add_tree_rows();
@@ -471,6 +475,9 @@ pub enum AddHit {
 pub fn hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<AddHit> {
     app.add_signals.as_ref()?;
     let l = layout_for(screen, app);
+    if l.outer.width < 40 || l.outer.height < 10 {
+        return None;
+    }
     let inside =
         |rect: Rect| col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom();
     // Scrollbars are the last column of every pane.
