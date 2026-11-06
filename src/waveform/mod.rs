@@ -1,6 +1,7 @@
 mod arrays;
 mod compare;
 mod export;
+pub(crate) mod logic;
 mod signal;
 mod time;
 mod tree;

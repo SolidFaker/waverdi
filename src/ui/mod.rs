@@ -642,7 +642,7 @@ mod tests {
         assert!(screen.contains("Apply"), "{screen}");
         assert!(screen.contains("OK"), "{screen}");
         assert!(screen.contains("Cancel"), "{screen}");
-        assert!(screen.contains("Filter: all"), "{screen}");
+        assert!(screen.contains("Filter: all  net  reg"), "{screen}");
     }
 
     #[test]
@@ -1221,6 +1221,73 @@ mod tests {
     }
 
     #[test]
+    fn logical_operation_dialog_renders_expression_signals_and_buttons() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.set_display(vec![0, 1]);
+        app.selection = vec![0, 1];
+        app.open_logic_operation(0);
+        let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("Logical Operation"), "{screen}");
+        assert!(screen.contains("logical_expression_1"), "{screen}");
+        assert!(screen.contains("Signals (click to insert)"), "{screen}");
+        assert!(screen.contains("Create"), "{screen}");
+        assert!(screen.contains("&&"), "{screen}");
+    }
+
+    #[test]
+    fn add_signals_filter_is_a_horizontal_radio_list() {
+        let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
+        let mut app = App::new();
+        app.apply_parsed("<test>", out);
+        app.open_add_signals();
+        let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("Filter: all  net  reg"), "{screen}");
+        assert!(!screen.contains("[x]"), "{screen}");
+        assert!(!screen.contains("[ ]"), "{screen}");
+        assert!(!screen.contains("all ▾"), "{screen}");
+        let layout = crate::ui::add::layout_for(app.last_area, &app);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer
+                .cell((layout.filter.x + 9, layout.filter.y))
+                .unwrap()
+                .bg,
+            app.settings.theme.row_sel_bg
+        );
+        assert_eq!(
+            buffer
+                .cell((layout.filter.x + 14, layout.filter.y))
+                .unwrap()
+                .bg,
+            app.settings.theme.popup_bg
+        );
+        let (x, y) = (layout.filter.x..layout.filter.right())
+            .map(|x| (x, layout.filter.y))
+            .find(|&(x, y)| {
+                matches!(
+                    crate::ui::add::hit(app.last_area, &app, x, y),
+                    Some(crate::ui::add::AddHit::Filter(1))
+                )
+            })
+            .expect("net radio option");
+        crate::app::handle_mouse(&mut app, mouse_at(x, y));
+        assert_eq!(
+            app.add_signals.as_ref().unwrap().filter,
+            crate::app::AddFilter::Nets
+        );
+        let screen = render_app(&mut app, 100, 30);
+        assert!(screen.contains("Filter: all  net  reg"), "{screen}");
+        assert!(!screen.contains("[x]"), "{screen}");
+    }
+
+    #[test]
     fn create_bus_dialog_renders_name_editor() {
         let out = vcd::parse_bytes(VCD.as_bytes()).unwrap();
         let mut app = App::new();
@@ -1289,7 +1356,8 @@ mod tests {
         assert!(!general.contains("[off]"), "{general}");
         app.set_settings_category(crate::settings::SettingsCategory::Theme);
         let theme = render_app(&mut app, 100, 30);
-        assert!(theme.contains("[x] Dark"), "{theme}");
+        assert!(theme.contains(" Dark "), "{theme}");
+        assert!(!theme.contains("[x] Dark"), "{theme}");
         app.set_settings_category(crate::settings::SettingsCategory::KeyBindings);
         let keys = render_app(&mut app, 100, 30);
         assert!(keys.contains("zoom in"), "{keys}");

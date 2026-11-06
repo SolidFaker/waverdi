@@ -7,6 +7,12 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AddPurpose {
+    Waveform,
+    LogicOperation,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AddFilter {
     All,
     Inputs,
@@ -43,6 +49,15 @@ impl AddFilter {
             .position(|filter| *filter == self)
             .unwrap_or(0);
         Self::CYCLE[(index + 1) % Self::CYCLE.len()]
+    }
+
+    pub fn available(directions: bool) -> Vec<Self> {
+        Self::CYCLE
+            .into_iter()
+            .filter(|filter| {
+                directions || !matches!(filter, Self::Inputs | Self::Outputs | Self::Inouts)
+            })
+            .collect()
     }
 
     pub fn matches(self, signal: &Signal) -> bool {
@@ -127,6 +142,7 @@ pub enum AddAction {
         close: bool,
     },
     CycleFilter,
+    SelectFilter(usize),
     /// Wheel over one pane.
     Scroll {
         pane: AddFocus,
@@ -166,6 +182,41 @@ pub(crate) struct AddNamesCache {
     key: (usize, AddFilter, u64, u64),
     items: Rc<[usize]>,
     names: Rc<[String]>,
+}
+
+fn add_find_scope(wf: &crate::waveform::Waveform, path: &[String]) -> Option<usize> {
+    let mut scope = wf.tree.root;
+    for part in path {
+        scope = wf.tree.nodes[scope]
+            .children
+            .iter()
+            .copied()
+            .find(|&node| wf.tree.nodes[node].name == *part)?;
+    }
+    Some(scope)
+}
+
+fn add_flattened_tree(
+    wf: &crate::waveform::Waveform,
+    expanded: &HashSet<usize>,
+) -> Vec<(usize, usize)> {
+    fn rec(
+        wf: &crate::waveform::Waveform,
+        id: usize,
+        depth: usize,
+        expanded: &HashSet<usize>,
+        out: &mut Vec<(usize, usize)>,
+    ) {
+        out.push((id, depth));
+        if expanded.contains(&id) {
+            for &child in &wf.tree.nodes[id].children {
+                rec(wf, child, depth + 1, expanded, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    rec(wf, wf.tree.root, 0, expanded, &mut out);
+    out
 }
 
 impl App {
@@ -221,19 +272,63 @@ impl App {
         (items, names)
     }
 
-    /// Open the "Add Signals" picker at the currently selected hierarchy.
+    /// Open the picker at its last scope, or the scope related to the current
+    /// selection. The whole ancestor chain is revealed in the picker tree.
     pub fn open_add_signals(&mut self) {
+        self.add_purpose = AddPurpose::Waveform;
         let Some(wf) = &self.wf else {
             self.msg("no waveform loaded");
             return;
         };
-        let scope = wf.tree.root;
+        let root = wf.tree.root;
+        let related_signal = self
+            .logic_builder
+            .as_ref()
+            .and_then(|builder| {
+                builder
+                    .signals
+                    .get(builder.sel)
+                    .or_else(|| builder.signals.last())
+            })
+            .copied()
+            .or_else(|| self.selected_signal())
+            .or_else(|| self.selection.last().copied());
+        let related_scope = related_signal
+            .and_then(|index| wf.signals.get(index))
+            .and_then(|signal| add_find_scope(wf, &signal.scope));
+        let selected_scope = self.tree_visible().get(self.tree_sel).map(|row| {
+            let TreeNode::Scope { id, .. } = row;
+            *id
+        });
+        let scope = self
+            .add_last_scope
+            .as_deref()
+            .and_then(|path| add_find_scope(wf, path))
+            .or(related_scope)
+            .or(selected_scope)
+            .unwrap_or(root);
         let mut expanded = HashSet::new();
-        expanded.insert(scope);
-        // Start at the instance selected in the Instance pane, if any.
-        let mut add = AddSignals {
+        let mut ancestor = root;
+        expanded.insert(root);
+        for part in wf.tree.path_of(scope) {
+            let Some(child) = wf.tree.nodes[ancestor]
+                .children
+                .iter()
+                .copied()
+                .find(|&node| wf.tree.nodes[node].name == part)
+            else {
+                break;
+            };
+            expanded.insert(child);
+            ancestor = child;
+        }
+        let rows = add_flattened_tree(wf, &expanded);
+        let add = AddSignals {
             scope,
-            tree_sel: 0,
+            tree_sel: rows
+                .iter()
+                .position(|&(node, _)| node == scope)
+                .unwrap_or(0),
             tree_scroll: 0,
             expanded,
             instance_sel: 0,
@@ -241,54 +336,44 @@ impl App {
             signal_sel: 0,
             signal_scroll: 0,
             selected: HashSet::new(),
-            aggregates: Vec::new(),
+            aggregates: self.add_aggregate_cache(scope),
             filter: AddFilter::All,
             focus: AddFocus::Tree,
         };
-        if let Some(id) = self.tree_visible().get(self.tree_sel).map(|row| {
-            let TreeNode::Scope { id, .. } = row;
-            *id
-        }) {
-            add.scope = id;
-            add.expanded.insert(id);
-        }
-        add.aggregates = self.add_aggregate_cache(add.scope);
         self.add_signals = Some(add);
+        self.add_ensure_visible(AddFocus::Tree);
         self.open_dialog(Dialog::AddSignals);
     }
 
+    pub fn open_logic_add_signals(&mut self) {
+        if self.logic_builder.is_some() {
+            self.open_add_signals();
+            self.add_purpose = AddPurpose::LogicOperation;
+        }
+    }
+
     pub fn close_add_signals(&mut self) {
+        if let (Some(add), Some(wf)) = (&self.add_signals, &self.wf) {
+            self.add_last_scope = Some(wf.tree.path_of(add.scope));
+        }
+        let purpose = self.add_purpose;
+        self.add_purpose = AddPurpose::Waveform;
         self.add_signals = None;
         if self.dialog == Some(Dialog::AddSignals) {
-            self.dialog = None;
+            self.dialog = if purpose == AddPurpose::LogicOperation && self.logic_builder.is_some() {
+                Some(Dialog::LogicOperation)
+            } else {
+                None
+            };
         }
     }
 
     /// Flattened scope rows of the picker tree: `(node, depth)`.
     pub fn add_tree_rows(&self) -> Vec<(usize, usize)> {
-        let Some(add) = &self.add_signals else {
+        let (Some(add), Some(wf)) = (&self.add_signals, &self.wf) else {
             return Vec::new();
         };
-        let Some(wf) = &self.wf else {
-            return Vec::new();
-        };
-        fn rec(
-            wf: &crate::waveform::Waveform,
-            id: usize,
-            depth: usize,
-            expanded: &HashSet<usize>,
-            out: &mut Vec<(usize, usize)>,
-        ) {
-            out.push((id, depth));
-            if expanded.contains(&id) {
-                for &child in &wf.tree.nodes[id].children {
-                    rec(wf, child, depth + 1, expanded, out);
-                }
-            }
-        }
-        let mut out = Vec::new();
-        rec(wf, wf.tree.root, 0, &add.expanded, &mut out);
-        out
+        add_flattened_tree(wf, &add.expanded)
     }
 
     /// Child instances of the picker's current scope. Struct/interface
@@ -556,6 +641,17 @@ impl App {
         }
     }
 
+    pub fn add_select_filter(&mut self, index: usize) {
+        let available = AddFilter::available(self.backend_caps.directions);
+        if let Some(add) = &mut self.add_signals {
+            if let Some(filter) = available.get(index) {
+                add.filter = *filter;
+                add.signal_sel = 0;
+                add.signal_scroll = 0;
+            }
+        }
+    }
+
     /// Toggle the signal under the cursor of the Signals pane.
     pub fn add_toggle_signal(&mut self) {
         let Some(index) = self
@@ -652,12 +748,13 @@ impl App {
             AddAction::ToggleCursorSignal => self.add_toggle_signal(),
             AddAction::Apply { close } => self.apply_add_signals(close),
             AddAction::CycleFilter => self.add_cycle_filter(),
+            AddAction::SelectFilter(index) => self.add_select_filter(index),
             AddAction::Scroll { pane, rows } => self.add_scroll_rows(pane, rows),
             AddAction::ScrollTo { pane, row } => self.add_scroll_to_row(pane, row),
         }
     }
 
-    /// Add the chosen signals to the waveform. `close` finishes the dialog.
+    /// Add the chosen signals to the current destination. `close` finishes the dialog.
     pub fn apply_add_signals(&mut self, close: bool) {
         let chosen: Vec<usize> = {
             let Some(add) = &self.add_signals else { return };
@@ -671,13 +768,30 @@ impl App {
             return;
         }
         let count = chosen.len();
-        self.add_signals(&chosen);
+        let purpose = self.add_purpose;
+        match purpose {
+            AddPurpose::Waveform => self.add_signals(&chosen),
+            AddPurpose::LogicOperation => {
+                if let Some(builder) = self.logic_builder.as_mut() {
+                    for index in chosen {
+                        if !builder.signals.contains(&index) {
+                            builder.signals.push(index);
+                        }
+                    }
+                }
+            }
+        }
         if close {
             self.close_add_signals();
         } else if let Some(add) = &mut self.add_signals {
             add.selected.clear();
         }
-        self.msg(format!("added {count} signal(s) to the waveform"));
+        self.msg(match purpose {
+            AddPurpose::Waveform => format!("added {count} signal(s) to the waveform"),
+            AddPurpose::LogicOperation => {
+                format!("added {count} signal(s) to the logical expression")
+            }
+        });
     }
 }
 
@@ -766,6 +880,96 @@ mod tests {
         let (_, filtered) = app.add_pane(AddFocus::Signals);
         assert!(!Rc::ptr_eq(&first, &filtered), "filter change must rebuild");
         assert_eq!(filtered.len(), 2, "both wires pass the net filter");
+    }
+
+    #[test]
+    fn picker_remembers_scope_and_reveals_deep_paths() {
+        let mut vcd = String::from("$timescale 1ns $end\n$scope module top $end\n");
+        for index in 0..30u8 {
+            vcd.push_str(&format!(
+                "$scope module sub{index:02} $end\n$var wire 1 {} s{index:02} $end\n$upscope $end\n",
+                (33 + index) as char
+            ));
+        }
+        vcd.push_str("$upscope $end\n$enddefinitions $end\n#0\n");
+        let mut app = app_with(&vcd);
+        app.sync_layout(ratatui::layout::Rect::new(0, 0, 80, 20));
+        app.add_signal(29);
+        let (top, last, previous) = {
+            let wf = app.wf.as_ref().unwrap();
+            let top = wf.tree.nodes[wf.tree.root].children[0];
+            (
+                top,
+                wf.tree.nodes[top].children[29],
+                wf.tree.nodes[top].children[3],
+            )
+        };
+
+        app.open_add_signals();
+        let add = app.add_signals.as_ref().unwrap();
+        assert_eq!(
+            add.scope, last,
+            "selected signal determines its sibling scope"
+        );
+        assert!(add.expanded.contains(&top));
+        assert!(
+            add.tree_scroll > 0,
+            "a deep target must be scrolled into view"
+        );
+        let rows = app.add_tree_rows();
+        let visible_row = add.tree_sel - add.tree_scroll;
+        assert_eq!(rows[add.tree_sel].0, last);
+        assert!(
+            visible_row
+                < crate::ui::add::pane_visible(app.last_area, &app, crate::app::AddFocus::Tree)
+        );
+
+        app.add_open_scope(previous);
+        app.close_add_signals();
+        app.tree_sel = 0;
+        app.open_add_signals();
+        assert_eq!(
+            app.add_signals.as_ref().unwrap().scope,
+            previous,
+            "history wins over the selected signal"
+        );
+
+        app.apply_parsed("<new>", crate::vcd::parse_bytes(vcd.as_bytes()).unwrap());
+        app.open_add_signals();
+        assert_eq!(
+            app.add_signals.as_ref().unwrap().scope,
+            app.wf.as_ref().unwrap().tree.root
+        );
+    }
+
+    #[test]
+    fn picker_uses_the_signal_scope_for_logical_operations() {
+        let vcd = "$timescale 1ns $end\n\
+            $scope module top $end\n$scope module sub $end\n\
+            $var wire 1 ! clk $end\n$upscope $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n0!\n";
+        let mut app = app_with(vcd);
+        let sub = {
+            let wf = app.wf.as_ref().unwrap();
+            let top = wf.tree.nodes[wf.tree.root].children[0];
+            wf.tree.nodes[top].children[0]
+        };
+        app.open_logic_operation(0);
+        app.open_logic_add_signals();
+        assert_eq!(app.add_signals.as_ref().unwrap().scope, sub);
+        app.close_add_signals();
+        assert_eq!(app.dialog, Some(crate::app::Dialog::LogicOperation));
+    }
+
+    #[test]
+    fn picker_falls_back_to_the_selected_hierarchy() {
+        let vcd = "$timescale 1ns $end\n$scope module top $end\n$upscope $end\n\
+            $enddefinitions $end\n#0\n";
+        let mut app = app_with(vcd);
+        let top = app.wf.as_ref().unwrap().tree.nodes[0].children[0];
+        app.tree_sel = 1;
+        app.open_add_signals();
+        assert_eq!(app.add_signals.as_ref().unwrap().scope, top);
     }
 
     const PICKER_VCD: &str = "$timescale 1ns $end\n\

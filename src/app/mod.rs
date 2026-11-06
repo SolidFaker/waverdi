@@ -12,6 +12,7 @@ mod input;
 pub(crate) mod keymap;
 mod keys;
 mod load;
+mod logic;
 mod marker;
 mod mouse;
 mod nav;
@@ -23,7 +24,7 @@ mod window;
 mod workspace;
 
 pub use action::Action;
-pub use add::{AddAction, AddFocus, AddSignals};
+pub use add::{AddAction, AddFilter, AddFocus, AddPurpose, AddSignals};
 pub(crate) use browser::is_waveform;
 pub use browser::{EntryKind, FileBrowser};
 pub use clipboard::{osc52, take_clipboard};
@@ -33,6 +34,7 @@ pub use dialog::Dialog;
 pub use input::{parse_time_spec, InputState};
 pub use keys::handle_key;
 pub use load::{LoadEvent, LoadJob};
+pub use logic::{LogicBuilder, LogicFocus};
 pub use marker::Marker;
 pub use mouse::handle_mouse;
 pub use nav::{Group, ListRow};
@@ -278,6 +280,8 @@ pub struct App {
     pub renaming_group: Option<u32>,
     /// Ordering state of `Dialog::CreateBus`.
     pub bus_builder: Option<BusBuilder>,
+    pub logic_builder: Option<LogicBuilder>,
+    pub(crate) logic_job: Option<std::sync::mpsc::Receiver<Result<logic::LogicResult, String>>>,
     /// Display-only bus ancestry; automatic expansion keeps using `Signal::parent`.
     pub(crate) manual_parents: HashMap<usize, usize>,
     /// Use the native GUI file dialog instead of the built-in browser.
@@ -312,6 +316,9 @@ pub struct App {
     pub backend_caps: Capabilities,
     /// Open "Add Signals" picker state.
     pub add_signals: Option<AddSignals>,
+    pub add_purpose: AddPurpose,
+    /// Last picker scope, retained until another waveform is loaded.
+    pub(crate) add_last_scope: Option<Vec<String>>,
     /// Bumped by every mutation of `display`, `groups` or `expanded`.
     panes_version: u64,
     list_cache: PaneCache<ListRow>,
@@ -423,6 +430,8 @@ impl App {
             pending_split: None,
             renaming_group: None,
             bus_builder: None,
+            logic_builder: None,
+            logic_job: None,
             manual_parents: HashMap::new(),
             use_gui: crate::picker::detect_gui(),
             browser: None,
@@ -444,6 +453,8 @@ impl App {
             load: None,
             backend_caps: Capabilities::default(),
             add_signals: None,
+            add_purpose: AddPurpose::Waveform,
+            add_last_scope: None,
             panes_version: 0,
             list_cache: RefCell::new(None),
             tree_cache: RefCell::new(None),
@@ -561,6 +572,8 @@ impl App {
     pub fn start_load(&mut self, path: &str) {
         self.compare = None;
         self.pending_export = None;
+        self.logic_builder = None;
+        self.logic_job = None;
         if let Some(job) = &self.load {
             job.cancel();
         }
@@ -917,6 +930,7 @@ impl App {
         self.focus = Focus::Tree;
         self.pending_fit = true;
         self.add_signals = None;
+        self.add_last_scope = None;
         // A filelist may already be loaded (CLI `-f`, or a previous file).
         self.merge_generate_scopes();
         self.restore_workspace_view();
@@ -2116,6 +2130,7 @@ pub fn tick(app: &mut App) {
     app.poll_load();
     app.poll_compare();
     app.poll_export();
+    app.poll_logic_operation();
 }
 
 #[cfg(test)]

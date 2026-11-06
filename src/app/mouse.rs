@@ -235,7 +235,9 @@ fn add_signals_mouse(app: &mut App, m: MouseEvent) {
                     app.dragging = Some(new_drag(DragMode::AddScroll(pane), m.column, 0.0));
                     app.add_action(AddAction::ScrollTo { pane, row: m.row });
                 }
-                crate::ui::add::AddHit::Filter => app.add_action(AddAction::CycleFilter),
+                crate::ui::add::AddHit::Filter(index) => {
+                    app.add_action(AddAction::SelectFilter(index))
+                }
                 crate::ui::add::AddHit::Apply => app.add_action(AddAction::Apply { close: false }),
                 crate::ui::add::AddHit::Ok => app.add_action(AddAction::Apply { close: true }),
                 crate::ui::add::AddHit::Cancel => app.add_action(AddAction::Close),
@@ -311,6 +313,31 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
                 app.follow_sel = index;
                 app.follow_activate();
             }
+        }
+        return;
+    }
+    if dialog == Dialog::LogicOperation && m.kind == MouseEventKind::Down(MouseButton::Left) {
+        match crate::ui::dialog::logic_hit(app.layout().area, app, m.column, m.row) {
+            Some(crate::ui::dialog::LogicHit::Name) => {
+                app.logic_focus(crate::app::LogicFocus::Name)
+            }
+            Some(crate::ui::dialog::LogicHit::Expression) => {
+                app.logic_focus(crate::app::LogicFocus::Expression)
+            }
+            Some(crate::ui::dialog::LogicHit::Signal(index)) => {
+                if let Some(builder) = app.logic_builder.as_mut() {
+                    builder.sel = index;
+                }
+                app.logic_insert_selected();
+            }
+            Some(crate::ui::dialog::LogicHit::Operator(operator)) => {
+                app.logic_insert_operator(operator)
+            }
+            Some(crate::ui::dialog::LogicHit::Add) => app.open_logic_add_signals(),
+            Some(crate::ui::dialog::LogicHit::Create) => app.begin_logic_operation(),
+            Some(crate::ui::dialog::LogicHit::Clear) => app.logic_clear(),
+            Some(crate::ui::dialog::LogicHit::Cancel) => app.logic_cancel(),
+            None => {}
         }
         return;
     }
@@ -490,6 +517,7 @@ fn dialog_mouse(app: &mut App, dialog: Dialog, m: MouseEvent) {
         Dialog::Follow => app.follow_move(delta),
         Dialog::Dataflow => app.dataflow_move(delta),
         Dialog::Compare => app.compare_move(delta),
+        Dialog::LogicOperation => app.logic_move(delta),
         Dialog::Markers => app.marker_move(delta),
         Dialog::Settings => app.settings_move(delta),
         _ => {}
@@ -516,6 +544,11 @@ fn dialog_scroll_to(app: &mut App, dialog: Dialog, row: u16) {
         Dialog::Follow => app.follow_sel = bottom,
         Dialog::Dataflow => app.dataflow_sel = bottom,
         Dialog::Compare => app.compare_sel = bottom,
+        Dialog::LogicOperation => {
+            if let Some(builder) = app.logic_builder.as_mut() {
+                builder.sel = bottom;
+            }
+        }
         Dialog::Markers => app.marker_sel = bottom,
         Dialog::CreateBus => app.bus_builder_select(bottom),
         Dialog::Settings => app.select_settings_row(bottom),

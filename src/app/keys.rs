@@ -431,6 +431,10 @@ fn dialog_key(app: &mut App, key: KeyEvent) -> bool {
         }
         return false;
     }
+    if app.dialog == Some(Dialog::LogicOperation) {
+        app.logic_operation_key(key);
+        return false;
+    }
     if app.dialog == Some(Dialog::Dataflow) {
         match key.code {
             KeyCode::Esc => app.dialog = None,

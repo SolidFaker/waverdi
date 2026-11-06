@@ -10,6 +10,7 @@ pub enum CtxItem {
     WaveAnalog,
     SplitBus,
     CreateBus,
+    LogicalOperation,
     Remove,
     AddToWaveform,
     SelectAllSource,
@@ -91,6 +92,7 @@ pub const SIGNAL_MENU: &[CtxEntry] = &[
     CtxEntry::Submenu("Set Waveform", WAVEFORM_MENU),
     CtxEntry::Submenu("Highlight", HIGHLIGHT_MENU),
     CtxEntry::Submenu("Bus Operations", BUS_MENU),
+    CtxEntry::Item("Logical Operation", CtxItem::LogicalOperation),
     CtxEntry::Item("Remove Signal", CtxItem::Remove),
 ];
 
@@ -236,6 +238,7 @@ impl App {
             (CtxTarget::Signal(sig), CtxItem::WaveAnalog) => self.set_analog_many(sig, true),
             (CtxTarget::Signal(sig), CtxItem::SplitBus) => self.open_split_dialog(sig),
             (CtxTarget::Signal(sig), CtxItem::CreateBus) => self.open_create_bus(sig),
+            (CtxTarget::Signal(sig), CtxItem::LogicalOperation) => self.open_logic_operation(sig),
             (CtxTarget::Signal(sig), CtxItem::Remove) if self.selection.contains(&sig) => {
                 self.remove_selected()
             }

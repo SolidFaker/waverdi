@@ -126,6 +126,7 @@ fn min_size(dialog: Dialog) -> (u16, u16) {
         Dialog::Settings => (64, 12),
         Dialog::ColorPicker => (58, 18),
         Dialog::CreateBus => (40, 8),
+        Dialog::LogicOperation => (88, 16),
         Dialog::Find => (40, 8),
         Dialog::Follow | Dialog::Dataflow | Dialog::Compare | Dialog::Markers | Dialog::Keys => {
             (36, 5)

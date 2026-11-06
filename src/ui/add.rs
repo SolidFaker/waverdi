@@ -54,7 +54,7 @@ fn layout_outer(outer: Rect) -> AddLayout {
         height: outer.height.saturating_sub(2),
     };
     let bottom = inner.bottom().saturating_sub(1);
-    let body_h = inner.height.saturating_sub(2).max(1);
+    let body_h = inner.height.saturating_sub(3).max(1);
     let left_w = (inner.width * 42 / 100).max(20).min(inner.width);
     let tree = Rect {
         x: inner.x,
@@ -79,8 +79,8 @@ fn layout_outer(outer: Rect) -> AddLayout {
     };
     let filter = Rect {
         x: inner.x,
-        y: bottom,
-        width: left_w,
+        y: bottom.saturating_sub(1),
+        width: inner.width,
         height: 1,
     };
     let apply_w = 9u16;
@@ -340,16 +340,31 @@ pub fn draw(frame: &mut ratatui::Frame, screen: Rect, app: &App) {
     text::put(buf, sep_x, l.signals.bottom(), "┴", sep);
 
     // --- filter and buttons ---------------------------------------------
-    text::put(
-        buf,
-        l.filter.x,
-        l.filter.y,
-        &format!(" Filter: {} ▾", add.filter.label()),
-        Style::new().fg(t.accent),
-    );
+    draw_filter(buf, l.filter, app);
     button(buf, l.apply, " Apply ", app);
     button(buf, l.ok, " OK ", app);
     button(buf, l.cancel, " Cancel ", app);
+}
+
+fn filter_area(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(8).min(area.right()),
+        area.y,
+        area.width.saturating_sub(8),
+        1,
+    )
+}
+
+fn draw_filter(buf: &mut Buffer, area: Rect, app: &App) {
+    let t = &app.settings.theme;
+    text::put(buf, area.x, area.y, " Filter:", Style::new().fg(t.dim));
+    let filters = crate::app::AddFilter::available(app.backend_caps.directions);
+    let options: Vec<&str> = filters.iter().map(|filter| filter.label()).collect();
+    let selected = filters
+        .iter()
+        .position(|filter| Some(*filter) == app.add_signals.as_ref().map(|add| add.filter))
+        .unwrap_or(0);
+    crate::ui::widgets::RadioGroup::horizontal(&options, selected, filter_area(area)).draw(buf, t);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -447,7 +462,7 @@ pub enum AddHit {
     /// Signal index in the waveform (not the position in the pane).
     Signal(usize),
     Scrollbar(AddFocus),
-    Filter,
+    Filter(usize),
     Apply,
     Ok,
     Cancel,
@@ -473,7 +488,11 @@ pub fn hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<AddHit> {
         }
     }
     if inside(l.filter) {
-        return Some(AddHit::Filter);
+        let filters = crate::app::AddFilter::available(app.backend_caps.directions);
+        let options: Vec<&str> = filters.iter().map(|filter| filter.label()).collect();
+        return crate::ui::widgets::RadioGroup::horizontal(&options, 0, filter_area(l.filter))
+            .option_at(col, row)
+            .map(AddHit::Filter);
     }
     if inside(l.apply) {
         return Some(AddHit::Apply);

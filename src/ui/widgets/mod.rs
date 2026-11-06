@@ -8,7 +8,7 @@ mod layout;
 mod slider;
 
 pub use button::Button;
-pub use choice::{Checkbox, RadioGroup, Toggle};
+pub use choice::{Checkbox, RadioGroup, RadioStyle, Toggle};
 pub use color_picker::{ColorPicker, ColorPickerAction, ColorPickerState};
 pub use dropdown::{Dropdown, DropdownState};
 pub use input::TextBox;

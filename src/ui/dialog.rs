@@ -52,7 +52,7 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
     }
     let wanted_width = match dialog {
         Dialog::Settings => 92,
-        Dialog::Compare => 88,
+        Dialog::Compare | Dialog::LogicOperation => 88,
         Dialog::ColorPicker => 68,
         _ => 64,
     };
@@ -72,6 +72,7 @@ pub fn dialog_rect(screen: Rect, app: &App, dialog: Dialog) -> Rect {
             .bus_builder()
             .map(|builder| builder.items.len() as u16 + 5)
             .unwrap_or(8),
+        Dialog::LogicOperation => 24,
         Dialog::Settings | Dialog::ColorPicker => 22,
         _ => 7,
     };
@@ -95,6 +96,9 @@ pub fn visible_rows(screen: Rect, app: &App, dialog: Dialog) -> usize {
     let area = dialog_rect(screen, app, dialog);
     if dialog == Dialog::Settings {
         return settings_layout(area).rows;
+    }
+    if dialog == Dialog::LogicOperation {
+        return (area.height as usize).saturating_sub(10).max(1);
     }
     let reserved = match dialog {
         Dialog::Find => 5,
@@ -225,6 +229,13 @@ pub fn scroll_area(screen: Rect, app: &App, dialog: Dialog) -> Option<ScrollArea
                 .map(|session| session.rows.len())
                 .unwrap_or(0),
         ),
+        Dialog::LogicOperation => (
+            area.y + 8,
+            visible_rows(screen, app, dialog),
+            app.logic_builder()
+                .map(|builder| builder.signals.len())
+                .unwrap_or(0),
+        ),
         Dialog::Markers => (
             area.y + 2,
             area.height.saturating_sub(4) as usize,
@@ -262,6 +273,7 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
         Dialog::Dataflow => "Dataflow",
         Dialog::Compare => "Compare Waveform",
         Dialog::Export => "Export Signals",
+        Dialog::LogicOperation => "Logical Operation",
         Dialog::Markers => "Markers",
         Dialog::SplitBus => "Split Bus",
         Dialog::CreateBus => "Create Bus",
@@ -338,6 +350,9 @@ pub fn draw(frame: &mut Frame, l: &Layout, app: &App, dialog: Dialog) {
             Dialog::Compare => draw_compare(buf, area, inner_x, inner_w, app),
             Dialog::Export => {
                 cursor = Some(draw_export(buf, area, app));
+            }
+            Dialog::LogicOperation => {
+                cursor = draw_logic_operation(buf, area, app);
             }
             Dialog::Markers => draw_markers(buf, area, inner_x, inner_w, app),
             Dialog::SplitBus => {
@@ -503,7 +518,9 @@ fn settings_buttons(
 fn draw_settings(buf: &mut Buffer, area: Rect, app: &App) {
     use crate::app::{SettingRow, SettingsPane};
     use crate::settings::{GeneralSetting, SettingId, SettingsCategory, ThemeKind};
-    use crate::ui::widgets::{Alignment, Checkbox, Dropdown, Label, RadioGroup, Toggle};
+    use crate::ui::widgets::{
+        Alignment, Checkbox, Dropdown, Label, RadioGroup, RadioStyle, Toggle,
+    };
 
     let t = &app.settings.theme;
     let layout = settings_layout(area);
@@ -551,7 +568,9 @@ fn draw_settings(buf: &mut Buffer, area: Rect, app: &App) {
                     .iter()
                     .position(|kind| *kind == app.settings.theme_kind)
                     .unwrap_or(0);
-                RadioGroup::new(&options, selected, row_area).draw(buf, t);
+                RadioGroup::new(&options, selected, row_area)
+                    .with_style(RadioStyle::Highlight)
+                    .draw(buf, t);
             }
             SettingRow::Setting(SettingId::General(GeneralSetting::BusSplitBits))
             | SettingRow::Setting(SettingId::General(GeneralSetting::BusSplitWork)) => {
@@ -810,6 +829,7 @@ pub fn settings_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<Setti
             .position(|kind| *kind == app.settings.theme_kind)
             .unwrap_or(0);
         return RadioGroup::new(&options, selected, layout.items)
+            .with_style(crate::ui::widgets::RadioStyle::Highlight)
             .option_at(col, row)
             .map(SettingsHit::Theme);
     }
@@ -1518,6 +1538,230 @@ fn draw_export(buf: &mut Buffer, area: Rect, app: &App) -> Position {
     crate::ui::widgets::Button::new("Export", accept).draw(buf, t);
     crate::ui::widgets::Button::new("Cancel", cancel).draw(buf, t);
     caret
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogicHit {
+    Name,
+    Expression,
+    Signal(usize),
+    Operator(&'static str),
+    Add,
+    Create,
+    Clear,
+    Cancel,
+}
+
+const LOGIC_OPERATORS: [[(&str, &str); 12]; 2] = [
+    [
+        ("~", "~"),
+        ("&", "&"),
+        ("|", "|"),
+        ("^", "^"),
+        ("!", "!"),
+        ("&&", "&&"),
+        ("||", "||"),
+        ("<", "<"),
+        (">", ">"),
+        ("+", "+"),
+        ("-", "-"),
+        ("*", "*"),
+    ],
+    [
+        ("<<", "<<"),
+        (">>", ">>"),
+        ("<<<", "<<<"),
+        (">>>", ">>>"),
+        ("{ }", "{}"),
+        ("? :", "?"),
+        ("==", "=="),
+        ("!=", "!="),
+        ("<=", "<="),
+        (">=", ">="),
+        ("**", "**"),
+        ("%", "%"),
+    ],
+];
+
+fn logic_layout(area: Rect) -> (Rect, Rect, Rect, Rect, Rect, Rect) {
+    let name = Rect::new(area.x + 12, area.y + 1, area.width.saturating_sub(14), 1);
+    let expression = Rect::new(area.x + 2, area.y + 3, area.width.saturating_sub(4), 1);
+    let clear = Rect::new(
+        area.right().saturating_sub(36),
+        area.bottom().saturating_sub(2),
+        10,
+        1,
+    );
+    let create = Rect::new(
+        area.right().saturating_sub(24),
+        area.bottom().saturating_sub(2),
+        12,
+        1,
+    );
+    let cancel = Rect::new(
+        area.right().saturating_sub(11),
+        area.bottom().saturating_sub(2),
+        9,
+        1,
+    );
+    (
+        name,
+        expression,
+        clear,
+        create,
+        cancel,
+        Rect::new(
+            area.x + 2,
+            area.y + 8,
+            area.width.saturating_sub(5),
+            area.height.saturating_sub(10),
+        ),
+    )
+}
+
+fn logic_add_area(area: Rect) -> Rect {
+    Rect::new(area.right().saturating_sub(10), area.y + 7, 8, 1)
+}
+
+fn draw_logic_operation(buf: &mut Buffer, area: Rect, app: &App) -> Option<Position> {
+    let t = &app.settings.theme;
+    let builder = app.logic_builder()?;
+    let (name, expression, clear, create, cancel, _) = logic_layout(area);
+    text::put(buf, area.x + 2, area.y + 1, "Name:", Style::new().fg(t.dim));
+    text::put(
+        buf,
+        area.x + 2,
+        area.y + 2,
+        "Expression:",
+        Style::new().fg(t.dim),
+    );
+    let name_caret = crate::ui::widgets::TextBox::new(&builder.name, name).draw(buf, t);
+    let expression_caret =
+        crate::ui::widgets::TextBox::new(&builder.expression, expression).draw(buf, t);
+    if let Some(error) = builder.error.as_ref() {
+        text::put(
+            buf,
+            area.x + 2,
+            area.y + 4,
+            &text::trunc(error, area.width.saturating_sub(4) as usize),
+            Style::new().fg(if builder.creating { t.dim } else { t.xcol }),
+        );
+    }
+    for (row, operators) in LOGIC_OPERATORS.iter().enumerate() {
+        for (column, &(label, _)) in operators.iter().enumerate() {
+            let rect = Rect::new(
+                area.x + 2 + column as u16 * 7,
+                area.y + 5 + row as u16,
+                7,
+                1,
+            );
+            crate::ui::widgets::Button::new(label, rect)
+                .enabled(!builder.creating)
+                .draw(buf, t);
+        }
+    }
+    text::put(
+        buf,
+        area.x + 2,
+        area.y + 7,
+        "Signals (click to insert):",
+        Style::new().fg(t.dim),
+    );
+    crate::ui::widgets::Button::new("Add", logic_add_area(area))
+        .enabled(!builder.creating)
+        .draw(buf, t);
+    let rows = visible_rows(app.last_area, app, Dialog::LogicOperation);
+    let scroll = app
+        .dialog_scroll
+        .min(builder.signals.len().saturating_sub(rows));
+    for (row, &index) in builder.signals.iter().skip(scroll).take(rows).enumerate() {
+        let selected = row + scroll == builder.sel;
+        let style = if selected && builder.focus == crate::app::LogicFocus::Signals {
+            Style::new().fg(Color::Black).bg(t.accent)
+        } else {
+            Style::new().fg(t.text)
+        };
+        let Some(signal) = app.wf.as_ref().and_then(|wf| wf.signals.get(index)) else {
+            continue;
+        };
+        text::put(
+            buf,
+            area.x + 2,
+            area.y + 8 + row as u16,
+            &text::trunc(
+                &format!("{} : {} bit", signal.full_name(), signal.bits),
+                area.width.saturating_sub(5) as usize,
+            ),
+            style,
+        );
+    }
+    draw_scrollbar(
+        buf,
+        area.right().saturating_sub(2),
+        area.y + 8,
+        rows,
+        scroll,
+        builder.signals.len(),
+        t,
+    );
+    crate::ui::widgets::Button::new("Clear", clear)
+        .enabled(!builder.creating)
+        .draw(buf, t);
+    crate::ui::widgets::Button::new("Create", create)
+        .enabled(!builder.creating)
+        .selected(builder.focus == crate::app::LogicFocus::Create)
+        .draw(buf, t);
+    crate::ui::widgets::Button::new("Close", cancel).draw(buf, t);
+    match builder.focus {
+        crate::app::LogicFocus::Name => Some(name_caret),
+        crate::app::LogicFocus::Expression => Some(expression_caret),
+        crate::app::LogicFocus::Signals | crate::app::LogicFocus::Create => None,
+    }
+}
+
+pub fn logic_hit(screen: Rect, app: &App, col: u16, row: u16) -> Option<LogicHit> {
+    let area = dialog_rect(screen, app, Dialog::LogicOperation);
+    let builder = app.logic_builder()?;
+    let (name, expression, clear, create, cancel, list) = logic_layout(area);
+    if cancel.contains(Position::new(col, row)) {
+        return Some(LogicHit::Cancel);
+    }
+    if builder.creating {
+        return None;
+    }
+    if logic_add_area(area).contains(Position::new(col, row)) {
+        return Some(LogicHit::Add);
+    }
+    if clear.contains(Position::new(col, row)) {
+        return Some(LogicHit::Clear);
+    }
+    if create.contains(Position::new(col, row)) {
+        return Some(LogicHit::Create);
+    }
+    if name.contains(Position::new(col, row)) {
+        return Some(LogicHit::Name);
+    }
+    if expression.contains(Position::new(col, row)) {
+        return Some(LogicHit::Expression);
+    }
+    for (operator_row, operators) in LOGIC_OPERATORS.iter().enumerate() {
+        for (column, &(_, operator)) in operators.iter().enumerate() {
+            let rect = Rect::new(
+                area.x + 2 + column as u16 * 7,
+                area.y + 5 + operator_row as u16,
+                7,
+                1,
+            );
+            if rect.contains(Position::new(col, row)) {
+                return Some(LogicHit::Operator(operator));
+            }
+        }
+    }
+    if list.contains(Position::new(col, row)) {
+        let index = app.dialog_scroll + (row - list.y) as usize;
+        return (index < builder.signals.len()).then_some(LogicHit::Signal(index));
+    }
+    None
 }
 
 fn draw_markers(buf: &mut Buffer, area: Rect, x: u16, width: usize, app: &App) {

@@ -8,6 +8,7 @@ pub enum Dialog {
     Dataflow,
     Compare,
     Export,
+    LogicOperation,
     Markers,
     SplitBus,
     CreateBus,
